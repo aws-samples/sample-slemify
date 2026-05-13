@@ -1,0 +1,13 @@
+we have a deployment that KEDA scales to 0 replicas when idle. but we also have a PDB with minAvailable: 1 on it. when KEDA tries to scale to 0, the PDB blocks the last pod from being evicted. the pod just sits there. is there a way to make PDB and scale-to-zero work together?
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: worker-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: worker
+```

@@ -1,0 +1,22 @@
+our KEDA + Karpenter setup has terrible cold start times. KEDA cooldownPeriod is 30s and Karpenter consolidateAfter is 30s. when traffic drops, KEDA scales down, karpenter removes the node within 30 seconds. when traffic comes back, we wait 2+ minutes for a new node.
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: api-scaler
+spec:
+  scaleTargetRef:
+    name: api-service
+  minReplicaCount: 0
+  maxReplicaCount: 20
+  cooldownPeriod: 30
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus:9090
+        query: sum(rate(http_requests_total{app="api"}[1m]))
+        threshold: "100"
+```
+
+how should we tune the timing between KEDA and Karpenter to avoid cold starts without wasting money on idle nodes?

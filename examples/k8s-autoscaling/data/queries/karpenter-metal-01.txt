@@ -1,0 +1,37 @@
+something weird happened last night. we have a spot NodePool for our general workloads and karpenter provisioned a metal instance (m5.metal) for a pod that only needs 500m CPU and 512Mi memory. the instance costs like $4.60/hr on spot and we're running a tiny nginx pod on it lol
+
+here's our NodePool:
+
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: general-spot
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m", "r"]
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["4"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+  limits:
+    cpu: "200"
+    memory: 512Gi
+```
+
+an LLM told me that metal instances are excluded by default in karpenter because they're not suitable for general workloads. but clearly that's not the case? we've seen m5.metal, c5.metal, and r5.metal all get provisioned over the past month.
+
+is there a way to exclude metal instances? i assume there's some label or requirement i need to add but i can't find it in the docs. also why would karpenter even pick a metal instance for such a small pod? shouldn't it prefer the smallest instance that fits?

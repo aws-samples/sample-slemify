@@ -1,0 +1,2 @@
+cloud in a box cbx-60412 been great 2 months but network drops every few hours for 30 sec. router fine, other devices fine. logs show "eth0 link down" randomly. firmware bug? do NOT want refund just need fix
+- dave

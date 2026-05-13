@@ -1,0 +1,21 @@
+we're setting up a new EC2NodeClass and want to use Bottlerocket. is `amiFamily: Bottlerocket` still the right field in karpenter v1? an LLM gave us this config:
+
+```yaml
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: bottlerocket
+spec:
+  role: KarpenterNodeRole-prod
+  amiFamily: Bottlerocket
+  amiSelectorTerms:
+    - alias: bottlerocket@latest
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: prod-cluster
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: prod-cluster
+```
+
+we chose Bottlerocket for the security hardening. is this the correct way to configure it in v1? the LLM mentioned amiFamily might be deprecated in favor of amiSelectorTerms alias.

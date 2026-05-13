@@ -1,0 +1,269 @@
+** THIRD-PARTY LICENSES **
+
+This project includes the following third-party software/libraries:
+
+--------------------------------------------------------------------------------
+
+Group: AWS SDK for Go v2
+Packages:
+  - github.com/aws/aws-sdk-go-v2 (and all sub-packages)
+  - github.com/aws/smithy-go
+Version: v1.41.5 / v1.24.2
+License: Apache License 2.0
+URL: https://github.com/aws/aws-sdk-go-v2
+
+--------------------------------------------------------------------------------
+
+Group: Kubernetes Client Libraries
+Packages:
+  - k8s.io/api
+  - k8s.io/apimachinery
+  - k8s.io/client-go
+  - k8s.io/klog/v2
+  - k8s.io/kube-openapi
+  - k8s.io/utils
+Version: v0.35.3
+License: Apache License 2.0
+URL: https://github.com/kubernetes/client-go
+
+--------------------------------------------------------------------------------
+
+Group: Kubernetes SIG Libraries
+Packages:
+  - sigs.k8s.io/yaml
+  - sigs.k8s.io/json
+  - sigs.k8s.io/structured-merge-diff/v6
+  - sigs.k8s.io/randfill
+License: Apache License 2.0 / MIT
+URL: https://github.com/kubernetes-sigs
+
+--------------------------------------------------------------------------------
+
+Name: cobra
+Package: github.com/spf13/cobra
+Version: v1.9.1
+License: Apache License 2.0
+URL: https://github.com/spf13/cobra
+
+--------------------------------------------------------------------------------
+
+Name: pflag
+Package: github.com/spf13/pflag
+Version: v1.0.9
+License: BSD 3-Clause
+URL: https://github.com/spf13/pflag
+
+--------------------------------------------------------------------------------
+
+Name: validator
+Package: github.com/go-playground/validator/v10
+Version: v10.25.0
+License: MIT
+URL: https://github.com/go-playground/validator
+
+--------------------------------------------------------------------------------
+
+Name: go-playground/locales
+Package: github.com/go-playground/locales
+Version: v0.14.1
+License: MIT
+URL: https://github.com/go-playground/locales
+
+--------------------------------------------------------------------------------
+
+Name: go-playground/universal-translator
+Package: github.com/go-playground/universal-translator
+Version: v0.18.1
+License: MIT
+URL: https://github.com/go-playground/universal-translator
+
+--------------------------------------------------------------------------------
+
+Name: go-restful
+Package: github.com/emicklei/go-restful/v3
+Version: v3.12.2
+License: MIT
+URL: https://github.com/emicklei/go-restful
+
+--------------------------------------------------------------------------------
+
+Name: cbor
+Package: github.com/fxamacker/cbor/v2
+Version: v2.9.0
+License: MIT
+URL: https://github.com/fxamacker/cbor
+
+--------------------------------------------------------------------------------
+
+Name: mimetype
+Package: github.com/gabriel-vasile/mimetype
+Version: v1.4.8
+License: MIT
+URL: https://github.com/gabriel-vasile/mimetype
+
+--------------------------------------------------------------------------------
+
+Name: logr
+Package: github.com/go-logr/logr
+Version: v1.4.3
+License: Apache License 2.0
+URL: https://github.com/go-logr/logr
+
+--------------------------------------------------------------------------------
+
+Group: OpenAPI Libraries
+Packages:
+  - github.com/go-openapi/jsonpointer
+  - github.com/go-openapi/jsonreference
+  - github.com/go-openapi/swag
+License: Apache License 2.0
+URL: https://github.com/go-openapi
+
+--------------------------------------------------------------------------------
+
+Name: gnostic-models
+Package: github.com/google/gnostic-models
+Version: v0.7.0
+License: Apache License 2.0
+URL: https://github.com/google/gnostic-models
+
+--------------------------------------------------------------------------------
+
+Name: uuid
+Package: github.com/google/uuid
+Version: v1.6.0
+License: BSD 3-Clause
+URL: https://github.com/google/uuid
+
+--------------------------------------------------------------------------------
+
+Name: mousetrap
+Package: github.com/inconshreveable/mousetrap
+Version: v1.1.0
+License: Apache License 2.0
+URL: https://github.com/inconshreveable/mousetrap
+
+--------------------------------------------------------------------------------
+
+Name: json-iterator
+Package: github.com/json-iterator/go
+Version: v1.1.12
+License: MIT
+URL: https://github.com/json-iterator/go
+
+--------------------------------------------------------------------------------
+
+Name: go-urn
+Package: github.com/leodido/go-urn
+Version: v1.4.0
+License: MIT
+URL: https://github.com/leodido/go-urn
+
+--------------------------------------------------------------------------------
+
+Name: easyjson
+Package: github.com/mailru/easyjson
+Version: v0.7.7
+License: MIT
+URL: https://github.com/mailru/easyjson
+
+--------------------------------------------------------------------------------
+
+Name: go-spew
+Package: github.com/davecgh/go-spew
+Version: v1.1.2
+License: ISC
+URL: https://github.com/davecgh/go-spew
+
+--------------------------------------------------------------------------------
+
+Name: go-difflib
+Package: github.com/pmezard/go-difflib
+Version: v1.0.1
+License: BSD 3-Clause
+URL: https://github.com/pmezard/go-difflib
+
+--------------------------------------------------------------------------------
+
+Name: intern
+Package: github.com/josharian/intern
+Version: v1.0.0
+License: MIT
+URL: https://github.com/josharian/intern
+
+--------------------------------------------------------------------------------
+
+Name: modern-go/concurrent
+Package: github.com/modern-go/concurrent
+License: Apache License 2.0
+URL: https://github.com/modern-go/concurrent
+
+--------------------------------------------------------------------------------
+
+Name: modern-go/reflect2
+Package: github.com/modern-go/reflect2
+License: Apache License 2.0
+URL: https://github.com/modern-go/reflect2
+
+--------------------------------------------------------------------------------
+
+Name: goautoneg
+Package: github.com/munnerz/goautoneg
+License: BSD 3-Clause
+URL: https://github.com/munnerz/goautoneg
+
+--------------------------------------------------------------------------------
+
+Name: float16
+Package: github.com/x448/float16
+Version: v0.8.4
+License: MIT
+URL: https://github.com/x448/float16
+
+--------------------------------------------------------------------------------
+
+Group: Go Standard Extended Libraries
+Packages:
+  - golang.org/x/crypto
+  - golang.org/x/net
+  - golang.org/x/oauth2
+  - golang.org/x/sys
+  - golang.org/x/term
+  - golang.org/x/text
+  - golang.org/x/time
+License: BSD 3-Clause
+URL: https://github.com/golang
+
+--------------------------------------------------------------------------------
+
+Name: protobuf
+Package: google.golang.org/protobuf
+Version: v1.36.8
+License: BSD 3-Clause
+URL: https://github.com/protocolbuffers/protobuf-go
+
+--------------------------------------------------------------------------------
+
+Name: json-patch
+Package: gopkg.in/evanphx/json-patch.v4
+Version: v4.13.0
+License: BSD 3-Clause
+URL: https://github.com/evanphx/json-patch
+
+--------------------------------------------------------------------------------
+
+Name: inf
+Package: gopkg.in/inf.v0
+Version: v0.9.1
+License: BSD 3-Clause
+URL: https://github.com/go-inf/inf
+
+--------------------------------------------------------------------------------
+
+Group: YAML Libraries
+Packages:
+  - gopkg.in/yaml.v3
+  - go.yaml.in/yaml/v2
+  - go.yaml.in/yaml/v3
+License: MIT / Apache License 2.0
+URL: https://github.com/go-yaml/yaml

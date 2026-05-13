@@ -1,0 +1,22 @@
+we're planning a new EKS cluster and want to get the autoscaling architecture right from the start. here's what we're thinking:
+
+- Karpenter for node provisioning
+- KEDA for scaling SQS queue processors
+- HPA for CPU-based scaling on web services
+- PDBs on all stateful workloads (Redis, PostgreSQL, Elasticsearch)
+
+a few architecture questions:
+
+1. should KEDA and HPA ever target the same deployment? we have some services that need both CPU scaling and custom metric scaling. what's the recommended pattern?
+
+2. what's the right consolidateAfter value if our KEDA cooldownPeriod is 300s? we don't want karpenter pulling the rug out from under KEDA-managed pods.
+
+3. for our SQS queue processors, should we use minReplicaCount: 0 or minReplicaCount: 1? scaling from zero saves money but the cold start is painful.
+
+4. we want to use spot for batch workloads and on-demand for web services. should these be separate NodePools or can we use one NodePool with both capacity types?
+
+5. our stateful workloads (Redis cluster, PostgreSQL with Patroni, Elasticsearch) need PDBs. what's the right minAvailable/maxUnavailable for a 3-node Redis cluster? we've heard conflicting advice from different LLMs.
+
+6. we're planning to use AL2023 with Pod Identity. any gotchas with the EC2NodeClass configuration?
+
+we want to avoid the common pitfalls. this cluster will run about 200 microservices across 50-100 nodes.

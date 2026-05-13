@@ -1,0 +1,1 @@
+new to EKS and trying to understand autoscaling options. what's the difference between cluster autoscaler, karpenter, HPA, and KEDA? when would you use each one? not asking about a specific problem, just trying to learn.

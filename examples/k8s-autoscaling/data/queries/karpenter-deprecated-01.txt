@@ -1,0 +1,45 @@
+hey team, need some help with karpenter on our EKS 1.31 cluster. we're trying to get GPU nodes provisioned for our ML training workloads. i asked ChatGPT for a karpenter config and it gave me this:
+
+```yaml
+apiVersion: karpenter.sh/v1alpha5
+kind: Provisioner
+metadata:
+  name: gpu-provisioner
+spec:
+  requirements:
+    - key: node.kubernetes.io/instance-type
+      operator: In
+      values: ["p3.2xlarge", "p3.8xlarge", "g4dn.xlarge", "g4dn.2xlarge"]
+    - key: karpenter.sh/capacity-type
+      operator: In
+      values: ["on-demand"]
+    - key: kubernetes.io/arch
+      operator: In
+      values: ["amd64"]
+  limits:
+    resources:
+      cpu: 256
+      memory: 1024Gi
+      nvidia.com/gpu: 32
+  provider:
+    instanceProfile: KarpenterNodeInstanceProfile-ml-cluster
+    subnetSelector:
+      karpenter.sh/discovery: ml-cluster
+    securityGroupSelector:
+      karpenter.sh/discovery: ml-cluster
+    tags:
+      team: ml-platform
+      environment: production
+  ttlSecondsAfterEmpty: 30
+  ttlSecondsUntilExpired: 2592000
+```
+
+i ran `kubectl apply -f provisioner.yaml` and got this error:
+
+```
+error: resource mapping not found for name: "gpu-provisioner" namespace: "" from "provisioner.yaml": no matches for kind "Provisioner" in version "karpenter.sh/v1alpha5"
+```
+
+but a colleague said this used to work on our old cluster. we installed karpenter 1.0.2 via helm about a week ago on a new EKS 1.31 cluster. the nvidia device plugin daemonset is running. other node groups (managed) work fine for CPU workloads.
+
+anyone seen this before? is there something wrong with the provisioner config or do i need to configure something else for GPU support?

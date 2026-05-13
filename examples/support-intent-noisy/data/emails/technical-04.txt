@@ -1,0 +1,2 @@
+weird issue cbx-91102. ethernet works fine but wifi maxes at 2mbps. phone gets 200mbps same network same spot. tried different channels and bands. wifi card defective or driver issue? latest firmware
+- chris

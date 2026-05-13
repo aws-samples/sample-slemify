@@ -1,0 +1,1 @@
+how do I increase the default service account token expiration in EKS? our security team wants it set to 1 hour instead of the default 24 hours. is this a cluster-level setting or per-service-account? running EKS 1.30.

@@ -1,0 +1,1 @@
+hi i just got my cloud in a box cbx-22019 and the initial setup wizard keeps crashing at step 3 "configure network". it loads for about 10 seconds then the screen goes white and i have to refresh. tried chrome firefox and safari all same result. the hardware seems fine all lights are green. just cant get past the setup wizard. help?

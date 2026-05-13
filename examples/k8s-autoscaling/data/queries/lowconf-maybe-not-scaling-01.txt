@@ -1,0 +1,1 @@
+our app is responding slowly under load. we assumed it was a scaling issue but after looking at metrics, CPU and memory are fine, pods are running, nodes have capacity. might be an application-level issue (database connections?) rather than infrastructure scaling. but wanted to check here first in case anyone has seen similar symptoms with karpenter or HPA.

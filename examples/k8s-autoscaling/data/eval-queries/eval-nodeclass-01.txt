@@ -1,0 +1,21 @@
+our AL2023 nodes launch but never join the cluster. we have bash-style userData in our EC2NodeClass:
+
+```yaml
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: workers
+spec:
+  role: KarpenterNodeRole-staging
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  userData: |
+    #!/bin/bash
+    echo "configuring node..."
+    sysctl -w net.core.somaxconn=65535
+    echo "vm.max_map_count=262144" >> /etc/sysctl.conf
+    sysctl -p
+```
+
+ChatGPT said bash userData is the standard for EKS nodes. nodes launch in EC2 but never register with the cluster. is the userData format wrong for AL2023?

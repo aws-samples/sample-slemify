@@ -1,0 +1,109 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+/build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# MyPy
+.mypy_cache/
+
+# Ruff
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+!terraform.tfvars.example
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Kubernetes
+kubeconfig
+*.kubeconfig
+
+# IDE
+.idea/
+.vscode/
+.kiro/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Data artifacts
+data/raw/
+data/processed/
+*.jsonl
+
+# Model artifacts
+models/
+*.gguf
+*.bin
+*.safetensors
+
+# Docker
+.docker/
+
+# Environment
+.env
+.env.local
+*.env
+
+# Secrets
+secrets/
+*.pem
+*.key
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Internal design documents (not for public distribution)
+designs/
+
+# Go
+src/slemify
+src/go.sum
+src/vendor/
+
+# Local overrides (real model names, credentials, etc.)
+local/

@@ -1,0 +1,15 @@
+we have a 3-node etcd cluster (not the k8s etcd, our own) with maxUnavailable: 2 in the PDB. during a karpenter node rotation, 2 etcd pods went down and we lost quorum. data writes failed for 4 minutes.
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: etcd-pdb
+spec:
+  maxUnavailable: 2
+  selector:
+    matchLabels:
+      app: etcd-cluster
+```
+
+an LLM said maxUnavailable 2 leaves 1 node running which is enough. but etcd needs majority quorum (2 of 3). what should maxUnavailable be?

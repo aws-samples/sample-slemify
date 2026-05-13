@@ -1,0 +1,95 @@
+we've been running this KEDA + Karpenter setup for about a week now and it seems stable. our SRE team wants someone to validate the config before we call it production-ready.
+
+ScaledObject:
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: order-processor-scaler
+  namespace: orders
+spec:
+  scaleTargetRef:
+    name: order-processor
+  minReplicaCount: 1
+  maxReplicaCount: 30
+  cooldownPeriod: 300
+  pollingInterval: 30
+  triggers:
+    - type: aws-sqs-queue
+      metadata:
+        queueURL: https://sqs.us-east-1.amazonaws.com/123456789012/orders
+        queueLength: "5"
+        awsRegion: us-east-1
+        identityOwner: operator
+```
+
+Deployment (relevant parts):
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-processor
+  namespace: orders
+spec:
+  selector:
+    matchLabels:
+      app: order-processor
+  template:
+    metadata:
+      labels:
+        app: order-processor
+      annotations:
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      containers:
+        - name: processor
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+```
+
+NodePool:
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: order-processing
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m"]
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["4"]
+        - key: karpenter.k8s.aws/instance-size
+          operator: NotIn
+          values: ["nano", "micro", "small", "metal"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: orders
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 300s
+  limits:
+    cpu: "200"
+```
+
+key design decisions:
+- do-not-disrupt annotation on the pod template prevents karpenter from consolidating nodes while KEDA pods are running
+- cooldownPeriod (300s) matches consolidateAfter (300s) to prevent race conditions
+- WhenEmpty policy so karpenter only removes truly empty nodes
+- minReplicaCount: 1 keeps at least one pod warm
+- identityOwner: operator uses KEDA operator's IRSA role instead of static credentials
+
+we've been running this for a week, SRE wants validation. anything we should change?

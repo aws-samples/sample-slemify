@@ -1,0 +1,36 @@
+our security team just ran a scan and flagged our EC2NodeClass metadata configuration. here's the relevant section:
+
+```yaml
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  role: KarpenterNodeRole-prod-cluster
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: prod-cluster
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: prod-cluster
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 2
+    httpTokens: optional
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 100Gi
+        volumeType: gp3
+        encrypted: true
+```
+
+an LLM told us that `httpTokens: optional` is fine because it still supports IMDSv2, it just doesn't require it. and `httpPutResponseHopLimit: 2` is needed for containers to access instance metadata.
+
+the security team says this is a risk but the LLM was pretty confident this is the standard configuration. we're running pods that need to access IMDS for IAM roles (we haven't migrated to IRSA/Pod Identity yet).
+
+what are the actual security implications here? is the LLM right that optional is fine since IMDSv2 is still supported? and do we really need hop limit 2?

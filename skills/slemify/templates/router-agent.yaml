@@ -1,0 +1,45 @@
+# Router Agent: Fast classification/routing decisions
+# Use for: intent detection, ticket triage, query routing, validation gates
+# Model: 1-4B (sub-second latency, 2-10 token output)
+# No RAG needed - decision is based on input patterns
+
+apiVersion: slemify/v1
+
+project:
+  name: <project-name>              # e.g., support-ticket-router
+  domain: >
+    <Describe what this agent classifies and what each category means.
+    Be specific about the domain and the decision being made.
+    Example: "Classify incoming customer support emails into intent
+    categories based on what the customer needs. Categories represent
+    the team that should handle the request.">
+  labels:
+    intent:                          # Primary classification dimension
+      - category_1                   # e.g., billing_question
+      - category_2                   # e.g., technical_issue
+      - category_3                   # e.g., shipping_inquiry
+    # Optional: secondary dimension
+    # confidence:
+    #   - high
+    #   - medium
+    #   - low
+
+model:
+  base: ""                           # HuggingFace model ID (3B recommended for classification)
+  quantize: q4_k_m                   # Q4 keeps model under 2GB
+
+data:
+  bucket: <your-s3-bucket>
+  path: <project-name>/data/
+  sources:
+    - path: examples/                # Your raw examples (50-200 files)
+      type: raw
+  synthetic:
+    model: eu.anthropic.claude-sonnet-4-6  # Bedrock model for data generation
+    pairs: 800                       # 500-1000 is sufficient for routing
+  evaluation:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 100                       # Hold-out eval set
+
+training:
+  spot: true                         # Use Spot GPU (~$0.15 per run)

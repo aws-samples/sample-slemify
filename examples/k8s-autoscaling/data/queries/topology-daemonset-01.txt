@@ -1,0 +1,36 @@
+we deployed a new monitoring DaemonSet to our cluster but karpenter isn't adding any new nodes for it. the DaemonSet pods are stuck in Pending on nodes that don't have enough resources.
+
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+    spec:
+      containers:
+        - name: node-exporter
+          image: prom/node-exporter:v1.7.0
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          ports:
+            - containerPort: 9100
+      tolerations:
+        - operator: Exists
+```
+
+we have 10 existing nodes and the DaemonSet scheduled on all of them fine. but we expected karpenter to also provision new nodes if needed. for example, we have another DaemonSet that needs GPU nodes and we thought karpenter would automatically add GPU nodes for it.
+
+why doesn't karpenter scale up for my DaemonSet? i thought karpenter provisions nodes for any unschedulable pods. the DaemonSet controller creates pods for every node, so shouldn't karpenter see those as needing nodes?

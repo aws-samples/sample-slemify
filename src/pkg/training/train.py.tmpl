@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""Slemify training script using Unsloth for fast QLoRA fine-tuning."""
+import os, json, torch
+from unsloth import FastLanguageModel
+from trl import SFTTrainer
+from transformers import TrainingArguments
+from datasets import load_dataset
+
+# === Configuration ===
+BASE_MODEL = "{{.BaseModel}}"
+MAX_SEQ_LEN = 2048
+EPOCHS = {{.Epochs}}
+LEARNING_RATE = {{.LearningRate}}
+WARMUP_RATIO = {{.WarmupRatio}}
+LR_SCHEDULER = "{{.Scheduler}}"
+SAVE_STEPS = {{.CheckpointInterval}}
+OUTPUT_DIR = "/tmp/unsloth-output"
+DATA_PATH = "/data/train.jsonl"
+LORA_R = 32
+LORA_ALPHA = 16
+RESUME = {{.Resume}}
+
+print(f"=== Slemify Training (Unsloth) ===")
+print(f"Model: {BASE_MODEL}")
+print(f"Epochs: {EPOCHS}, LR: {LEARNING_RATE}")
+print(f"LoRA: r={LORA_R}, alpha={LORA_ALPHA}")
+
+# === Step 1: Load model with Unsloth optimization ===
+print("Loading model with Unsloth...")
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name=BASE_MODEL,
+    max_seq_length=MAX_SEQ_LEN,
+    dtype=None,  # auto-detect (float16 or bfloat16)
+    load_in_4bit=True,
+)
+
+# === Step 2: Add LoRA adapter ===
+print("Adding LoRA adapter...")
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=LORA_R,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                     "gate_proj", "up_proj", "down_proj"],
+    lora_alpha=LORA_ALPHA,
+    lora_dropout=0,
+    bias="none",
+    use_gradient_checkpointing="unsloth",  # 30% more memory efficient
+    random_state=42,
+)
+
+# === Step 3: Load dataset ===
+print(f"Loading dataset from {DATA_PATH}...")
+dataset = load_dataset("json", data_files=DATA_PATH, split="train")
+print(f"Loaded {len(dataset)} training records")
+
+# Format as instruction template
+def format_prompt(example):
+    instruction = example.get("instruction", "")
+    inp = example.get("input", "")
+    output = example.get("output", "")
+    if inp:
+        text = f"### Instruction:\n{instruction}\n\n### Input:\n{inp}\n\n### Response:\n{output}"
+    else:
+        text = f"### Instruction:\n{instruction}\n\n### Response:\n{output}"
+    return {"text": text}
+
+dataset = dataset.map(format_prompt)
+
+# === Step 4: Train ===
+print("Starting training...")
+trainer = SFTTrainer(
+    model=model,
+    tokenizer=tokenizer,
+    train_dataset=dataset,
+    dataset_text_field="text",
+    max_seq_length=MAX_SEQ_LEN,
+    packing=True,  # Unsloth optimized sample packing
+    args=TrainingArguments(
+        per_device_train_batch_size=2,
+        gradient_accumulation_steps=4,
+        warmup_ratio=WARMUP_RATIO,
+        num_train_epochs=EPOCHS,
+        learning_rate=LEARNING_RATE,
+        lr_scheduler_type=LR_SCHEDULER,
+        fp16=not torch.cuda.is_bf16_supported(),
+        bf16=torch.cuda.is_bf16_supported(),
+        logging_steps=10,
+        save_steps=SAVE_STEPS,
+        save_total_limit=3,
+        optim="adamw_8bit",
+        weight_decay=0.01,
+        seed=42,
+        output_dir=OUTPUT_DIR,
+        report_to="none",  # disable wandb/etc to avoid import errors
+    ),
+)
+
+# === Checkpoint sync callback — uploads checkpoints to S3 for Spot recovery ===
+from transformers import TrainerCallback
+
+class CheckpointSyncCallback(TrainerCallback):
+    """Uploads completed checkpoints directly to S3 for Spot recovery."""
+    def __init__(self):
+        self._boto3_ready = False
+        self._s3 = None
+
+    def _ensure_boto3(self):
+        if not self._boto3_ready:
+            import subprocess, sys
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "boto3"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import boto3
+            self._s3 = boto3.client("s3")
+            self._boto3_ready = True
+
+    def on_save(self, args, state, control, **kwargs):
+        bucket = os.environ.get("S3_BUCKET", "")
+        prefix = os.environ.get("S3_CHECKPOINT_PREFIX", "")
+        if not bucket or not prefix:
+            return
+        try:
+            self._ensure_boto3()
+            checkpoints = sorted(
+                [d for d in os.listdir(OUTPUT_DIR) if d.startswith("checkpoint-")],
+                key=lambda x: int(x.split("-")[-1]),
+            )
+            if not checkpoints:
+                return
+            latest = checkpoints[-1]
+            ckpt_dir = os.path.join(OUTPUT_DIR, latest)
+            s3_prefix = f"{prefix}{latest}/"
+            print(f"Uploading {latest} to s3://{bucket}/{s3_prefix}...")
+            for fname in os.listdir(ckpt_dir):
+                fpath = os.path.join(ckpt_dir, fname)
+                if os.path.isfile(fpath):
+                    self._s3.upload_file(fpath, bucket, f"{s3_prefix}{fname}")
+            print(f"Checkpoint {latest} uploaded to S3")
+            # Clean old checkpoints from S3 (keep last 2)
+            response = self._s3.list_objects_v2(Bucket=bucket, Prefix=prefix, Delimiter="/")
+            s3_ckpts = sorted([
+                p["Prefix"].rstrip("/").split("/")[-1]
+                for p in response.get("CommonPrefixes", [])
+                if "checkpoint-" in p["Prefix"]
+            ], key=lambda x: int(x.split("-")[-1]))
+            for old in s3_ckpts[:-2]:
+                old_prefix = f"{prefix}{old}/"
+                objs = self._s3.list_objects_v2(Bucket=bucket, Prefix=old_prefix)
+                for obj in objs.get("Contents", []):
+                    self._s3.delete_object(Bucket=bucket, Key=obj["Key"])
+        except Exception as e:
+            print(f"Warning: checkpoint sync failed: {e}")
+
+trainer.add_callback(CheckpointSyncCallback())
+
+if RESUME:
+    checkpoints = [d for d in os.listdir(OUTPUT_DIR) if d.startswith("checkpoint-")] if os.path.exists(OUTPUT_DIR) else []
+    if checkpoints:
+        print(f"Resuming from checkpoint ({len(checkpoints)} found)...")
+        trainer.train(resume_from_checkpoint=True)
+    else:
+        print("No checkpoint found, training from scratch...")
+        trainer.train()
+else:
+    # Always check for Spot recovery — checkpoints may exist in S3
+    import subprocess, sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "boto3"],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    import boto3
+    s3_client = boto3.client("s3")
+    s3_bucket = os.environ.get("S3_BUCKET", "")
+    s3_prefix = os.environ.get("S3_CHECKPOINT_PREFIX", "")
+    s3_checkpoints = []
+    if s3_bucket and s3_prefix:
+        try:
+            response = s3_client.list_objects_v2(Bucket=s3_bucket, Prefix=s3_prefix, Delimiter="/")
+            s3_checkpoints = sorted([
+                p["Prefix"].rstrip("/").split("/")[-1]
+                for p in response.get("CommonPrefixes", [])
+                if "checkpoint-" in p["Prefix"]
+            ], key=lambda x: int(x.split("-")[-1]))
+        except Exception as e:
+            print(f"Could not list S3 checkpoints: {e}")
+    if s3_checkpoints:
+        latest = s3_checkpoints[-1]
+        dst = os.path.join(OUTPUT_DIR, latest)
+        os.makedirs(dst, exist_ok=True)
+        ckpt_prefix = f"{s3_prefix}{latest}/"
+        print(f"Spot recovery: downloading {latest} from S3...")
+        objs = s3_client.list_objects_v2(Bucket=s3_bucket, Prefix=ckpt_prefix)
+        for obj in objs.get("Contents", []):
+            fname = obj["Key"].split("/")[-1]
+            if fname:
+                s3_client.download_file(s3_bucket, obj["Key"], os.path.join(dst, fname))
+        print(f"Resuming from checkpoint {latest} (Spot recovery)...")
+        trainer.train(resume_from_checkpoint=dst)
+    else:
+        trainer.train()
+
+# === Step 5: Save adapter and export to GGUF ===
+print("Saving LoRA adapter...")
+model.save_pretrained(OUTPUT_DIR)
+tokenizer.save_pretrained(OUTPUT_DIR)
+
+# Export to GGUF (Unsloth handles merge + conversion + quantization in one step)
+QUANTIZE = "{{.Quantize}}"
+if QUANTIZE and QUANTIZE != "none":
+    quant_method = QUANTIZE.replace("_", "_")  # q4_k_m, q8_0, f16
+    print(f"Exporting to GGUF {quant_method}...")
+    model.save_pretrained_gguf(
+        OUTPUT_DIR,
+        tokenizer,
+        quantization_method=quant_method,
+    )
+    print("GGUF export complete")
+else:
+    print("Exporting to GGUF F16 (no quantization)...")
+    model.save_pretrained_gguf(
+        OUTPUT_DIR,
+        tokenizer,
+        quantization_method="f16",
+    )
+    print("GGUF F16 export complete")
+
+# Save training log for the report
+if hasattr(trainer, "state") and trainer.state and trainer.state.log_history:
+    with open(os.path.join(OUTPUT_DIR, "training_log.json"), "w") as f:
+        json.dump(trainer.state.log_history, f, indent=2)
+    # Also print loss summary for pod logs
+    for entry in trainer.state.log_history:
+        if "loss" in entry:
+            print(json.dumps({k: entry[k] for k in ["loss", "learning_rate", "epoch"] if k in entry}))
+
+print("=== Training complete ===")

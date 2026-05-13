@@ -1,0 +1,1 @@
+hey, we're seeing some weird scaling behavior but not sure if it's karpenter, keda, or something else entirely. our pods sometimes scale up to 20 replicas even when traffic is low. could be a prometheus metric issue, could be a keda misconfiguration, or maybe the HPA is interfering. anyone seen something similar? don't have the configs handy right now but can share later.

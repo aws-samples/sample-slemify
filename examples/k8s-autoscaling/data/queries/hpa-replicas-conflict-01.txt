@@ -1,0 +1,61 @@
+we have a weird issue where every time we do a helm upgrade, our deployment gets reset to 5 replicas even though the HPA had scaled it to 12. here's our setup:
+
+Deployment (in helm chart):
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-frontend
+  namespace: production
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: web-frontend
+  template:
+    metadata:
+      labels:
+        app: web-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: web-frontend:v2.3.1
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          ports:
+            - containerPort: 8080
+```
+
+HPA:
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-frontend-hpa
+  namespace: production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web-frontend
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+```
+
+the HPA scales us up to 12 during peak traffic. but when we deploy a new version via `helm upgrade`, it resets to 5 because that's what's in the deployment spec. then the HPA has to scale back up, which takes several minutes. during that window we get 503s.
+
+an LLM told me this is fine because the HPA will quickly scale back up. but "quickly" is like 5-10 minutes because of the stabilization window. we deploy 3-4 times a day during business hours.
+
+is there a way to prevent helm from overriding the HPA's replica count?

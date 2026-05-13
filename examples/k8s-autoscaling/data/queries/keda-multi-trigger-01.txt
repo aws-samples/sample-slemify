@@ -1,0 +1,32 @@
+we have a ScaledObject with both a CPU trigger and a Prometheus trigger. confused about how KEDA decides the final replica count when the triggers disagree. an LLM told us the triggers are averaged.
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: api-scaler
+  namespace: production
+spec:
+  scaleTargetRef:
+    name: api-deployment
+  minReplicaCount: 2
+  maxReplicaCount: 50
+  cooldownPeriod: 120
+  triggers:
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "70"
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring:9090
+        metricName: http_requests_per_second
+        query: sum(rate(http_requests_total{service="api"}[2m]))
+        threshold: "100"
+```
+
+right now CPU is at 40% (suggesting ~2 replicas is fine) but we're getting 500 req/s (suggesting ~10 replicas based on the threshold). KEDA has scaled us to 10 replicas.
+
+the LLM said triggers are averaged, so it should be (2+10)/2 = 6 replicas. but we're at 10. is the LLM wrong about averaging? how does KEDA actually combine multiple triggers?
+
+also, when we scale up to 10 based on prometheus, CPU drops to like 15% per pod. does that cause KEDA to then scale back down because CPU is low? we're seeing some oscillation.

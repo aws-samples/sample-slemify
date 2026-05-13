@@ -1,0 +1,47 @@
+hey team, we're about to apply this NodePool to our production cluster. can someone review it before we go ahead? we've been running it in staging for a week without issues.
+
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: general-production
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m", "r"]
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["4"]
+        - key: karpenter.k8s.aws/instance-size
+          operator: NotIn
+          values: ["nano", "micro", "small", "metal"]
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["us-east-1a", "us-east-1b", "us-east-1c"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: production
+      expireAfter: 336h
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 60s
+    budgets:
+      - nodes: "10%"
+  limits:
+    cpu: "500"
+    memory: 2048Gi
+```
+
+we went with WhenEmpty instead of WhenEmptyOrUnderutilized because we had consolidation storms with the latter. the 10% budget should prevent too many nodes from being disrupted at once. expireAfter of 336h (14 days) ensures nodes get refreshed regularly.
+
+can someone review this before i apply to prod? anything we're missing or should change?

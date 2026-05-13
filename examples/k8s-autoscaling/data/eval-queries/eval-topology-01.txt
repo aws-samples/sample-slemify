@@ -1,0 +1,21 @@
+pods with zone topology spread constraints are stuck Pending. our NodePool only allows 2 AZs but the deployment wants to spread across all available zones.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+spec:
+  replicas: 4
+  template:
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: auth-service
+```
+
+NodePool only has us-west-2a and us-west-2b. 2 pods schedule fine, then the 3rd and 4th can't find a valid zone. is this a karpenter issue or a scheduling issue?

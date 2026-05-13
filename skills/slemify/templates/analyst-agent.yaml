@@ -1,0 +1,46 @@
+# Analyst Agent: Structured reasoning with domain expertise
+# Use for: config auditing, document analysis, detailed extraction, expert review
+# Model: 7-8B (streams over 10-14s, 100-500 token output)
+# Pair with RAG at inference time to ground reasoning in current docs
+
+apiVersion: slemify/v1
+
+project:
+  name: <project-name>              # e.g., k8s-config-auditor
+  domain: >
+    <Describe what this agent analyzes and what expertise it has.
+    Include what structured output it produces and what makes a
+    good analysis. Example: "Expert auditor for Kubernetes autoscaling
+    configurations on EKS. Produces structured reasoning about what
+    is wrong, why it is dangerous, and how to fix it.">
+  labels:
+    error_type:                      # What kinds of issues it identifies
+      - type_1                       # e.g., deprecated_api
+      - type_2                       # e.g., field_mismatch
+      - type_3                       # e.g., logic_error
+      - valid                        # e.g., valid_config (no issues)
+    severity:                        # How serious the issue is
+      - critical
+      - high
+      - medium
+      - low
+
+model:
+  base: ""                           # HuggingFace model ID (8B recommended for reasoning)
+  quantize: q4_k_m                   # Q4 brings model to ~5GB
+
+data:
+  bucket: <your-s3-bucket>
+  path: <project-name>/data/
+  sources:
+    - path: examples/                # Your raw examples (50-100 files)
+      type: raw
+  synthetic:
+    model: eu.anthropic.claude-sonnet-4-6  # Bedrock model for data generation
+    pairs: 2500                      # More pairs needed for reasoning tasks
+  evaluation:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 100
+
+training:
+  spot: true                         # Use Spot GPU (~$0.15-0.50 per run)

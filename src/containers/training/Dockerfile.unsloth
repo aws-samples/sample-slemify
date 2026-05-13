@@ -1,0 +1,24 @@
+FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
+
+# Install Python and pip
+RUN apt-get update -qq && \
+    apt-get install -y -qq python3 python3-pip git && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Unsloth and dependencies
+RUN pip3 install --no-cache-dir \
+    "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git" \
+    --extra-index-url https://download.pytorch.org/whl/cu121
+
+RUN pip3 install --no-cache-dir --no-deps \
+    trl peft accelerate bitsandbytes
+
+# Working directory
+WORKDIR /workspace
+
+USER 1000
+
+HEALTHCHECK NONE
+
+# Default entrypoint runs the training script from ConfigMap
+ENTRYPOINT ["python3", "/scripts/train.py"]

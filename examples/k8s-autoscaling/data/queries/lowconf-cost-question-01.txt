@@ -1,0 +1,1 @@
+our AWS bill went up 40% last month and we think it might be related to autoscaling but not sure. could be karpenter launching too many nodes, could be KEDA scaling too aggressively, or could be completely unrelated (someone might have left a test cluster running). anyone know how to figure out which?

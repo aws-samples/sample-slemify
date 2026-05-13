@@ -1,0 +1,91 @@
+we're setting up karpenter for our ML training cluster. workloads are GPU-intensive, long-running (6-12 hours), and need to checkpoint to S3 on interruption. an LLM helped us configure everything:
+
+NodePool:
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-training
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["p3.2xlarge"]
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: gpu
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 0s
+    expireAfter: 720h
+  limits:
+    nvidia.com/gpu: "16"
+```
+
+EC2NodeClass:
+```yaml
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: gpu
+spec:
+  role: KarpenterNodeRole
+  amiFamily: AL2
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: ml-cluster
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: ml-cluster
+  metadataOptions:
+    httpEndpoint: enabled
+    httpTokens: optional
+    httpPutResponseHopLimit: 2
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 200Gi
+        volumeType: gp3
+```
+
+Deployment:
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-trainer
+spec:
+  replicas: 4
+  template:
+    spec:
+      terminationGracePeriodSeconds: 600
+      containers:
+        - name: trainer
+          resources:
+            requests:
+              nvidia.com/gpu: 1
+              cpu: "4"
+              memory: "32Gi"
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "python checkpoint.py && sleep 300"]
+```
+
+issues we're seeing:
+1. spot interruptions kill training jobs before checkpoint completes
+2. sometimes karpenter provisions p3.2xlarge but the training pod needs more GPU memory than what's available
+3. only getting p3.2xlarge instances, no diversity
+4. nodes sometimes get consolidated mid-training when GPU utilization dips during data loading phases
+5. security team flagged the IMDS config
+
+the LLM said spot is fine for ML training because "you can just checkpoint." but our checkpoints take 5 minutes and we only get 2 minutes warning. what do we do?

@@ -1,0 +1,1 @@
+getting this error in karpenter logs but not sure what it means: "no instance type satisfied resources and requirements." we changed something in the nodepool yesterday but can't remember what. anyone seen this before?

@@ -1,0 +1,1 @@
+<p>Hi, got my Cloud-in-a-Box (CBX-44102) and stuck on firmware update. Web interface shows v1.2.3 but docs say 2.0.1. Update button greyed&nbsp;out. How do I force it?</p>

@@ -1,0 +1,28 @@
+we have a batch processing system that runs every night. KEDA scales up workers at 2am and scales back to 0 at 6am. the problem is karpenter provisions 20 brand new nodes every single night and terminates them all at 6am. we're paying for 20 node launches every night.
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: batch-cron-scaler
+  namespace: batch
+spec:
+  scaleTargetRef:
+    name: batch-worker
+  minReplicaCount: 0
+  maxReplicaCount: 20
+  cooldownPeriod: 60
+  triggers:
+    - type: cron
+      metadata:
+        timezone: America/New_York
+        start: "0 2 * * *"
+        end: "0 6 * * *"
+        desiredReplicas: "20"
+```
+
+the NodePool has WhenEmptyOrUnderutilized consolidation so all nodes get terminated shortly after 6am when KEDA scales to 0. then at 2am the next night, karpenter has to provision 20 new nodes from scratch. each node takes about 90 seconds to be ready, so our batch jobs don't actually start processing until ~2:02am.
+
+we're spending about $15/night just on the node launch overhead (EBS volumes, ENI attachments, etc). over a month that's $450 wasted.
+
+is there a way to keep the nodes warm overnight? or pre-provision them before 2am? we tried setting consolidateAfter to a very high value but that affects all our workloads, not just the batch ones.

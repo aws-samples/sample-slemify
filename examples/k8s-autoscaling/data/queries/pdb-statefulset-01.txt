@@ -1,0 +1,15 @@
+we have a 5-node elasticsearch cluster running as a statefulset. we want to allow karpenter to do rolling replacements but need to maintain quorum (at least 3 nodes). what's the right PDB config? an LLM suggested minAvailable: 3 but during a rolling update that means only 2 pods can be down at once. is that enough for ES to rebalance shards?
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: elasticsearch-pdb
+spec:
+  minAvailable: 3
+  selector:
+    matchLabels:
+      app: elasticsearch
+```
+
+also our karpenter nodepool has budgets: nodes: "20%". does the PDB interact with the karpenter budget or are they independent?

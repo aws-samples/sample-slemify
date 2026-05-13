@@ -1,0 +1,52 @@
+apiVersion: slemify/v1
+
+project:
+  name: k8s-autoscaling-triage
+  domain: >
+    Classify Kubernetes autoscaling support queries into a routing
+    category and confidence level. Each message should be classified
+    into exactly one routing category: karpenter_config for Karpenter
+    NodePool or EC2NodeClass questions, keda_config for KEDA ScaledObject
+    or TriggerAuthentication questions, hpa_config for HorizontalPodAutoscaler
+    questions, pdb_disruption for PodDisruptionBudget questions,
+    spot_interruption for Spot instance handling questions,
+    multi_resource for questions spanning multiple resource types,
+    or noise for off-topic messages like meetings, social chat, or
+    unrelated Kubernetes topics. Inputs are noisy Slack-style messages
+    that may include YAML snippets and conversational tangents.
+  labels:
+    routing:
+      - karpenter_config
+      - keda_config
+      - hpa_config
+      - pdb_disruption
+      - spot_interruption
+      - multi_resource
+      - noise
+    confidence:
+      - high
+      - medium
+      - low
+
+model:
+  base: ""  # HuggingFace model ID (1-8B parameters recommended)
+  quantize: q4_k_m
+
+data:
+  bucket: slemify-data
+  path: k8s-autoscaling/data/
+  sources:
+    - path: queries/
+      type: raw
+  synthetic:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 1200
+  evaluation:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 150
+    sources:
+      - path: eval-queries/
+        type: raw
+
+training:
+  spot: true

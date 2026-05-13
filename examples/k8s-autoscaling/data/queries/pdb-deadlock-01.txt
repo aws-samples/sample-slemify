@@ -1,0 +1,55 @@
+we have a 5-node Cassandra cluster running on karpenter-managed nodes. we set up a PDB to protect it during disruptions but now karpenter can't consolidate ANY nodes, even ones that are mostly idle. we're wasting money on underutilized nodes.
+
+PDB:
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cassandra-pdb
+  namespace: data
+spec:
+  minAvailable: "100%"
+  selector:
+    matchLabels:
+      app: cassandra
+```
+
+NodePool:
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: data-nodes
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["r", "i"]
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["4"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: data
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 60s
+  limits:
+    cpu: "200"
+    memory: 1024Gi
+```
+
+karpenter logs show:
+```
+{"level":"INFO","message":"cannot disrupt node, pdb would be violated","node":"ip-10-0-1-42"}
+```
+
+an LLM told us that `minAvailable: 100%` is the safest option for stateful workloads like Cassandra because you never want any pod to be disrupted. but now we can't do any node maintenance, upgrades, or consolidation. even `expireAfter` doesn't work because the PDB blocks it.
+
+is there a way to have strong protection but still allow karpenter to do rolling replacements? we need to be able to upgrade nodes eventually.

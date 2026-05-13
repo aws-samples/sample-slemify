@@ -1,0 +1,87 @@
+we're running into multiple issues with our event-driven batch processing setup. an LLM helped us configure everything but things are unstable. here's the full config:
+
+NodePool:
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: batch
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["c5.xlarge"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: batch
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+  limits:
+    cpu: "100"
+```
+
+ScaledObject:
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: batch-scaler
+spec:
+  scaleTargetRef:
+    name: batch-worker
+  minReplicaCount: 0
+  maxReplicaCount: 50
+  cooldownPeriod: 30
+  triggers:
+    - type: aws-sqs-queue
+      authenticationRef:
+        name: aws-creds
+      metadata:
+        queueURL: https://sqs.us-east-1.amazonaws.com/123456789012/batch-queue
+        queueLength: "5"
+        awsRegion: us-east-1
+```
+
+TriggerAuthentication:
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: aws-creds
+spec:
+  secretTargetRef:
+    - parameter: awsAccessKeyID
+      name: aws-secret
+      key: AWS_ACCESS_KEY_ID
+    - parameter: awsSecretAccessKey
+      name: aws-secret
+      key: AWS_SECRET_ACCESS_KEY
+```
+
+PDB:
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: batch-pdb
+spec:
+  minAvailable: "100%"
+  selector:
+    matchLabels:
+      app: batch-worker
+```
+
+symptoms:
+1. spot interruptions kill pods mid-processing with no time to checkpoint (terminationGracePeriodSeconds is 300 but pods get SIGKILL'd)
+2. when queue is empty, keda scales to 0 and karpenter immediately terminates the node. when messages arrive again, 3+ minute cold start
+3. sometimes karpenter tries to consolidate nodes but PDB blocks it, then the node sits there doing nothing
+4. we're using static AWS credentials because the LLM said that's how you authenticate KEDA with SQS
+
+can someone audit this whole setup? we need it stable for production next week.

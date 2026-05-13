@@ -1,0 +1,1 @@
+quick question - we're setting up a new microservice and need to decide between using a sidecar proxy or a service mesh for traffic management. also separately, should we set resource requests on all our pods? someone mentioned it affects autoscaling but I'm not sure how.

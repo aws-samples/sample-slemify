@@ -1,0 +1,77 @@
+we have a deployment with topologySpreadConstraints that requires pods to be spread across zones. but our NodePool only allows 2 of the 3 AZs. the first 2 replicas schedule fine but the third one is stuck in Pending.
+
+Deployment:
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: production
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: payment-service
+      containers:
+        - name: payment
+          image: payment-service:v3.1.0
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+```
+
+NodePool:
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: production
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["m", "c"]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["us-east-1a", "us-east-1b"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 60s
+  limits:
+    cpu: "200"
+```
+
+we restricted the NodePool to 2 AZs because us-east-1c had some capacity issues last month. but now the topology spread constraint wants pods in 3 zones and karpenter can only provision in 2.
+
+`kubectl describe pod` shows:
+```
+Events:
+  Warning  FailedScheduling  default-scheduler  0/4 nodes are available: 2 node(s) didn't match pod topology spread constraints
+```
+
+how do we fix this? we need the pods spread for HA but we also want to avoid us-east-1c.

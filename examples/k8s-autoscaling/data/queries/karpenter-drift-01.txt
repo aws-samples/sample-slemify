@@ -1,0 +1,20 @@
+we updated our EC2NodeClass to use a new AMI version (changed amiSelectorTerms from v20240703 to v20240807). karpenter is now showing nodes as "Drifted" but it's replacing them all at once instead of doing a rolling replacement. we have 15 nodes and they're all getting replaced simultaneously, causing downtime.
+
+```yaml
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  amiSelectorTerms:
+    - alias: al2023@v20240807
+  role: KarpenterNodeRole
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: prod-cluster
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: prod-cluster
+```
+
+our NodePool disruption budget is set to nodes: "50%" but it doesn't seem to be limiting the drift replacements. is drift not subject to disruption budgets? how do we do a controlled AMI rollout?

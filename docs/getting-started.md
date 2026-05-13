@@ -1,0 +1,279 @@
+# Getting Started: Build a Multi-Agent K8s Expert
+
+This guide walks you through building a complete multi-agent system using Slemify. By the end, you'll have two fine-tuned SLMs running on CPUs that audit Kubernetes autoscaling configurations, backed by a RAG knowledge base and an LLM fallback for edge cases.
+
+Total time: ~2 hours (mostly waiting for training). Cost: ~$30 (synthetic data + Spot GPU training).
+
+## The problem
+
+Teams paste Kubernetes configs into ChatGPT and get answers that look correct but contain subtle errors. An LLM confidently tells you that `minValues: 3` in a Karpenter NodePool "blocks scheduling until 3 different families are provisioned" (wrong). It suggests `m6i` with `instance-generation Gt 6` (contradictory). It recommends deprecated APIs for current cluster versions.
+
+These hallucinations are hard to catch because the output is well-formatted and sounds authoritative. A fine-tuned SLM trained on the actual API docs doesn't have this problem. It knows what's valid because it learned from the source of truth.
+
+## What we'll build
+
+```
+User question or YAML config
+        |
+        v
+[Triage SLM - 4B, CPU, ~1.5s]
+  Routes to the right handler
+        |
+        |-- noise --> rejected
+        |-- low confidence --> LLM API + RAG
+        |-- high confidence --> Auditor SLM + RAG
+                                    |
+                                    v
+                            Structured analysis
+                            (error type, severity, fix)
+```
+
+Two models, one pipeline:
+- **Triage** (4B): classifies intent and confidence in ~1.5s
+- **Auditor** (8B): produces structured config analysis, streamed over ~14s
+
+Both run on Graviton4 CPUs. No GPUs. The LLM API is only called for the ~10-20% of queries where the triage model isn't confident.
+
+## Prerequisites
+
+- EKS cluster with [Karpenter](https://karpenter.sh) installed
+- S3 bucket for data and artifacts
+- AWS credentials with Bedrock, S3, and EKS access
+- `kubectl` configured for your cluster
+- Slemify CLI installed (`go install` or download from releases)
+
+## Step 1: Prepare training data
+
+Training data is the foundation. For this example, we use real-world Kubernetes autoscaling questions, the kind that show up in Slack channels and support tickets.
+
+Create a directory with `.txt` files, each containing one query:
+
+```bash
+mkdir -p data/queries
+```
+
+A good training query includes context and a YAML config:
+
+```
+# data/queries/karpenter-limits-01.txt
+pods are stuck in Pending but karpenter isn't launching new nodes.
+kubectl get nodepool shows we're at 48 CPU used out of 50 limit.
+
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  limits:
+    cpu: "50"
+    memory: 200Gi
+
+should we increase the limits? what's a safe value?
+```
+
+You need 50-100 queries covering the scenarios you want the model to handle. Include:
+- Valid configs (the model needs to learn what "correct" looks like)
+- Common mistakes (deprecated APIs, conflicting constraints, missing fields)
+- Edge cases (ambiguous questions, forwarded messages, off-topic noise)
+
+See `examples/k8s-autoscaling/data/queries/` for 76 real examples.
+
+Upload to S3:
+
+```bash
+aws s3 sync ./data/queries s3://slemify-data/k8s-autoscaling/data/queries/
+```
+
+## Step 2: Define the triage model
+
+The triage model is a fast classifier. It reads the query and outputs a routing label + confidence level. Create `triage/expert.yaml`:
+
+```yaml
+apiVersion: slemify/v1
+
+project:
+  name: k8s-autoscaling-triage
+  domain: >
+    Classify Kubernetes autoscaling support queries into a routing
+    category and confidence level.
+  labels:
+    routing:
+      - karpenter_config
+      - keda_config
+      - hpa_config
+      - pdb_disruption
+      - spot_interruption
+      - multi_resource
+      - noise
+    confidence:
+      - high
+      - medium
+      - low
+
+model:
+  base: ""  # HuggingFace model ID (4B recommended for fast classification)
+  quantize: q4_k_m
+
+data:
+  bucket: slemify-data
+  path: k8s-autoscaling/data/
+  sources:
+    - path: queries/
+      type: raw
+  synthetic:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 1200
+
+training:
+  spot: true
+```
+
+Key choices:
+- **4B model**: small enough for sub-2s inference on CPU, large enough for multi-class classification
+- **q4_k_m**: best quality-to-size ratio for CPU inference
+- **1200 synthetic pairs**: Bedrock generates training examples from your raw queries, covering all label combinations
+
+## Step 3: Define the auditor model
+
+The auditor is the expert. It receives queries that passed triage and produces structured analysis. Create `auditor/expert.yaml`:
+
+```yaml
+apiVersion: slemify/v1
+
+project:
+  name: k8s-autoscaling-auditor
+  output_format: free_form
+  domain: >
+    Expert auditor for Kubernetes autoscaling configurations on EKS.
+    Produces structured reasoning about what is wrong, why it is
+    dangerous, and how to fix it.
+  labels:
+    error_type:
+      - deprecated_api
+      - field_mismatch
+      - resource_conflict
+      - logic_error
+      - security_gap
+      - valid_config
+    severity:
+      - critical
+      - high
+      - medium
+      - low
+      - info
+
+model:
+  base: ""  # HuggingFace model ID (8B recommended for structured reasoning)
+  quantize: q4_k_m
+
+data:
+  bucket: slemify-data
+  path: k8s-autoscaling/data/
+  sources:
+    - path: queries/
+      type: raw
+  synthetic:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 2500
+
+training:
+  spot: true
+```
+
+Key choices:
+- **8B model**: large enough for structured reasoning with YAML output
+- **free_form output**: the auditor generates paragraphs, not just labels
+- **2500 synthetic pairs**: more training data because the output space is larger
+
+## Step 4: Train and deploy
+
+```bash
+# Train both models (runs on Spot GPU, ~20 min each)
+slemify deploy --config triage/expert.yaml
+slemify deploy --config auditor/expert.yaml
+```
+
+Each command runs the full pipeline: synthetic data generation, QLoRA training on Spot GPU, GGUF quantization, deployment to your cluster, and a validation report.
+
+Monitor progress:
+
+```bash
+slemify status k8s-autoscaling-triage
+slemify status k8s-autoscaling-auditor
+```
+
+## Step 5: View the reports
+
+```bash
+slemify report --config triage/expert.yaml
+slemify report --config auditor/expert.yaml
+```
+
+The HTML report shows:
+- Accuracy per label (does the model classify correctly?)
+- Confidence calibration (when it says "high confidence," is it right?)
+- SLM vs LLM comparison (how does it compare to Sonnet on the same queries?)
+- Latency benchmarks (TTFT, tokens/second, throughput)
+- Cost projections (what does this cost at 1K, 10K, 100K queries/day?)
+
+If accuracy is below your threshold, add more training queries for the weak categories and retrain.
+
+## Step 6: Set up the demo
+
+Once both models are deployed and validated, set up the multi-agent demo:
+
+```bash
+cd examples/k8s-autoscaling/demo
+
+# Full setup: OpenSearch, knowledge base, orchestrator
+ARM64_BUILD_HOST=my-graviton-host ./scripts/setup-demo.sh
+```
+
+This deploys:
+- OpenSearch for vector search (RAG)
+- Knowledge base indexed from Karpenter, KEDA, and EKS docs (~3900 chunks)
+- Orchestrator pod that ties everything together
+
+## Step 7: Run it
+
+```bash
+# Launch the demo (port-forward + browser + tmux dashboard)
+./scripts/demo-terminal.sh
+```
+
+Open `http://localhost:8000` and paste a Kubernetes config. You'll see:
+1. Triage classification (1.5s)
+2. RAG retrieval from the knowledge base
+3. Auditor analysis streaming token by token
+
+The tmux dashboard shows all three pods processing in sequence, proving it's a multi-agent system running entirely on CPUs.
+
+## What you can customize
+
+| What | How |
+|------|-----|
+| Different domain | Change `project.domain` and `labels` in expert.yaml |
+| More training data | Add .txt files to your data directory, re-run pipeline |
+| Different base model | Change `model.base` (any HuggingFace-compatible model supported by Unsloth) |
+| Larger context | Increase `CHUNK_SIZE` in index-knowledge.py for longer RAG chunks |
+| Different vector DB | Replace OpenSearch with any k-NN capable store |
+| GPU inference | Use vLLM instead of llama.cpp (different project, same GGUF model) |
+
+## Cost breakdown
+
+| Item | Cost | Frequency |
+|------|------|-----------|
+| Synthetic data (Bedrock) | ~$15 per model | One-time |
+| Training (Spot GPU) | ~$0.15 per model | One-time (or per retrain) |
+| Inference (CPU Spot) | ~$117/mo per replica | Ongoing |
+| OpenSearch (CPU) | ~$50/mo | Ongoing |
+| LLM fallback (Bedrock) | ~$0.008 per query | Only for low-confidence queries |
+
+At 10,000 queries/day with 85% handled by the SLM: ~$170/mo total vs ~$3,000/mo for 100% LLM API.
+
+## Next steps
+
+- Read the [Serving deep dive](deep-dive/serving.md) for autoscaling, TTFT optimization, and startup patterns
+- Read the [Data deep dive](deep-dive/data.md) for training data best practices
+- Try the [Support Intent example](../examples/support-intent-noisy/) for a simpler classification task
+- Add your own domain knowledge to the RAG index

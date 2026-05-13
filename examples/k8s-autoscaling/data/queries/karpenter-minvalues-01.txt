@@ -1,0 +1,39 @@
+hey, quick question about spot instance diversity with karpenter. we want to make sure we're using diverse instance types for our spot workloads to reduce interruption risk. an LLM told us that specifying 2 instance categories (c and m) is enough for diversity. here's what we have:
+
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: spot-workers
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m"]
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["4"]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["us-east-1a", "us-east-1b", "us-east-1c"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 60s
+  limits:
+    cpu: "500"
+```
+
+the problem is karpenter seems to pick the cheapest instance type and just uses that one over and over. during a spot interruption event last week, ALL our nodes got reclaimed within a 2-minute window because they were all c5.2xlarge.
+
+i've heard there's something called `minValues` that can help but i'm not sure how to use it. the LLM said categories alone should be sufficient for diversity. is that right or do we need to do something more?
+
+we have about 30 spot nodes running at any given time for our data pipeline workloads.

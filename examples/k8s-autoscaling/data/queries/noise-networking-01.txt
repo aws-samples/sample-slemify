@@ -1,0 +1,1 @@
+we're seeing intermittent DNS resolution failures in our pods. coredns pods look healthy and have plenty of resources. could this be a VPC CNI issue? we're on vpc-cni 1.16 with prefix delegation enabled. happens about 5% of the time.

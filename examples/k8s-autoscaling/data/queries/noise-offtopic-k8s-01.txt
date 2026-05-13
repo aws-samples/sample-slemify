@@ -1,0 +1,1 @@
+does anyone have experience with istio service mesh? we're evaluating it vs linkerd for our microservices. main concerns are performance overhead and operational complexity. we have about 150 services. any recommendations?

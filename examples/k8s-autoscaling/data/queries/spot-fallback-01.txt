@@ -1,0 +1,13 @@
+we're running our web service on spot-only with karpenter. during peak hours we keep getting InsufficientInstanceCapacity errors and pods sit in Pending for 10+ minutes. our NodePool only allows spot:
+
+```yaml
+requirements:
+  - key: karpenter.sh/capacity-type
+    operator: In
+    values: ["spot"]
+  - key: karpenter.k8s.aws/instance-category
+    operator: In
+    values: ["c", "m"]
+```
+
+an LLM told us spot-only is fine because "karpenter automatically handles spot interruptions." but it doesn't seem to handle the case where there's no spot capacity at all. should we add on-demand as a fallback? will karpenter automatically prefer spot over on-demand if both are available?

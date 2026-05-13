@@ -1,0 +1,1 @@
+<p>Dear Support,</p><p>I need to return my Cloud-in-a-Box for a refund. Order CBX-53901. The WiFi module is completely dead &mdash; doesn&rsquo;t show up in lspci.</p><p>Javier</p>

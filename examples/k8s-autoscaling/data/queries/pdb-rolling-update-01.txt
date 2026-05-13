@@ -1,0 +1,15 @@
+we're doing a rolling update on our statefulset and it's stuck. we have a PDB with minAvailable: 3 on a 3-pod statefulset. the rolling update needs to terminate one pod to replace it, but the PDB won't allow it because that would drop below minAvailable. so the update just hangs. is minAvailable: 3 on a 3-pod set basically the same as saying "never disrupt"?
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-pdb
+spec:
+  minAvailable: 3
+  selector:
+    matchLabels:
+      app: redis-cluster
+```
+
+we need to allow rolling updates but also maintain quorum. what's the right PDB for a 3-node statefulset?

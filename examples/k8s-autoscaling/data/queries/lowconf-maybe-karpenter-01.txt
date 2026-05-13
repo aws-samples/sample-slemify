@@ -1,0 +1,1 @@
+we have a node that's been running for 45 days and it's using an old AMI. not sure if karpenter should have replaced it by now or if that's expected. we might have drift detection but I'm not sure if it's enabled. anyone know how to check?

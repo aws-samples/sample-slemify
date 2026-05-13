@@ -1,0 +1,1 @@
+we just migrated from cluster autoscaler to karpenter last week. things were working fine until today — now pods are scaling up but the nodes they land on seem oversized. getting m5.4xlarge for pods that only need 500m CPU. is this a karpenter thing or did we misconfigure something? not sure where to look.

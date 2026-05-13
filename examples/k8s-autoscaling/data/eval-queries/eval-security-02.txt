@@ -1,0 +1,18 @@
+we're using static AWS credentials in a Kubernetes secret for KEDA's TriggerAuthentication to access SQS. our cluster already has IRSA configured for other workloads.
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: aws-auth
+spec:
+  secretTargetRef:
+    - parameter: awsAccessKeyID
+      name: aws-creds
+      key: access-key
+    - parameter: awsSecretAccessKey
+      name: aws-creds
+      key: secret-key
+```
+
+an LLM said this is the standard way to authenticate KEDA with AWS. but we already have IRSA. should we be using IRSA for KEDA instead? what are the risks of static credentials?

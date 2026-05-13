@@ -1,0 +1,25 @@
+migrating from karpenter 0.32 to 1.0. an AI assistant told me i just need to change the apiVersion and kind from Provisioner to NodePool. so i did this:
+
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  requirements:
+    - key: node.kubernetes.io/instance-type
+      operator: In
+      values: ["m5.xlarge", "m5.2xlarge"]
+    - key: karpenter.sh/capacity-type
+      operator: In
+      values: ["on-demand"]
+  provider:
+    instanceProfile: KarpenterNodeInstanceProfile-my-cluster
+    subnetSelector:
+      karpenter.sh/discovery: my-cluster
+    securityGroupSelector:
+      karpenter.sh/discovery: my-cluster
+  ttlSecondsAfterEmpty: 30
+```
+
+getting validation errors. the AI said the spec structure is the same between Provisioner and NodePool, you just change the kind. is that wrong?

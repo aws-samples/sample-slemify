@@ -1,0 +1,1 @@
+we keep seeing SpotRebalanceRecommendation events on our nodes but karpenter doesn't seem to do anything about them. the nodes eventually get interrupted anyway. should karpenter be proactively moving pods when it gets a rebalance recommendation? or do we need AWS Node Termination Handler for that?

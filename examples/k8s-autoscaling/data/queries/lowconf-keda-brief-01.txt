@@ -1,0 +1,1 @@
+keda scaler not working. we're using the prometheus trigger and the HPA it creates shows 0/5 targets. tried restarting the keda operator pod but same result. not sure if it's a KEDA config issue or a prometheus connectivity problem.

@@ -1,0 +1,1 @@
+one of our nodes keeps going NotReady intermittently. not sure if it's a karpenter thing or a general EKS issue. the node comes back after a few minutes. could be networking, could be the kubelet, could be the instance type. anyone have ideas? we're using karpenter but this might not be related to autoscaling at all.

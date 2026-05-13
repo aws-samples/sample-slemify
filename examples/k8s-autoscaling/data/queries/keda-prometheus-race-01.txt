@@ -1,0 +1,61 @@
+we have a queue processor that KEDA scales based on RabbitMQ queue depth. the problem is the cold start time when scaling from zero. here's the timeline:
+
+1. queue is empty, KEDA scales to 0 replicas
+2. karpenter consolidates the node (consolidateAfter: 30s)
+3. messages arrive in the queue
+4. KEDA triggers scale-up to 1 replica
+5. no node available, karpenter needs to provision one
+6. ~3 minutes pass before pod is actually processing messages
+7. by then the queue has 10k+ messages backed up
+
+here's our ScaledObject:
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: rabbitmq-processor
+  namespace: processing
+spec:
+  scaleTargetRef:
+    name: queue-worker
+  minReplicaCount: 0
+  maxReplicaCount: 20
+  cooldownPeriod: 30
+  pollingInterval: 15
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring:9090
+        metricName: rabbitmq_queue_depth
+        query: rate(rabbitmq_queue_messages_ready{queue="processing"}[5m])
+        threshold: "10"
+```
+
+and our NodePool:
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: workers
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+```
+
+also i just realized we're using `rate()` on `rabbitmq_queue_messages_ready` which is a gauge metric. is that even correct? an LLM suggested that query.
+
+how do we reduce this cold start time? we can't afford 3 minutes of message processing delay. and is the prometheus query right?

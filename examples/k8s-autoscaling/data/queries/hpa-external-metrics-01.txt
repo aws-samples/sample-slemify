@@ -1,0 +1,25 @@
+trying to use external metrics from datadog with our HPA. the HPA shows unknown for the metric value. we have the datadog cluster agent running and it registers the external metrics API. but the metric name format seems wrong.
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: queue-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: queue-worker
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: "avg:custom.queue.depth{queue:orders}"
+        target:
+          type: AverageValue
+          averageValue: "5"
+```
+
+kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1" shows the API is registered. what's wrong with the metric name?

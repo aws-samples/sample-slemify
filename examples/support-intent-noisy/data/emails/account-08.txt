@@ -1,0 +1,3 @@
+Dear Support, Our company is migrating from individual Cloud-in-a-Box accounts to a centralized enterprise account. We need to merge accounts CBX-90001 through CBX-90010 under a single admin portal with role-based access control. The primary admin will be it-admin@company.com. Please advise on the migration process and any downtime expected.
+
+Karen Wu, IT Operations Lead

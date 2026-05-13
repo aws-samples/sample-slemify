@@ -1,0 +1,61 @@
+apiVersion: slemify/v1
+
+project:
+  name: k8s-autoscaling-auditor
+  output_format: free_form
+  domain: >
+    Expert auditor for Kubernetes autoscaling configurations on EKS.
+    Receives technical queries that have passed triage (Tier 1) and
+    produces structured reasoning about what is wrong, why it is
+    dangerous, and how to fix it. Covers Karpenter v1 NodePool and
+    EC2NodeClass, KEDA v2.14+ ScaledObject and TriggerAuthentication,
+    HPA v2, and PodDisruptionBudgets. The model compares user-submitted
+    YAML (often LLM-generated and subtly wrong) against correct API
+    syntax and produces a correction report with severity, affected
+    resource, root cause analysis, and remediation steps.
+  labels:
+    error_type:
+      - deprecated_api
+      - field_mismatch
+      - resource_conflict
+      - logic_error
+      - security_gap
+      - valid_config
+    severity:
+      - critical
+      - high
+      - medium
+      - low
+      - info
+    resource:
+      - karpenter_nodepool
+      - karpenter_ec2nodeclass
+      - keda_scaledobject
+      - keda_triggerauthentication
+      - hpa
+      - pdb
+      - deployment
+      - multi_resource
+
+model:
+  base: ""  # HuggingFace model ID (8B recommended for structured reasoning)
+  quantize: q4_k_m
+
+data:
+  bucket: slemify-data
+  path: k8s-autoscaling/data/
+  sources:
+    - path: queries/
+      type: raw
+  synthetic:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 2500
+  evaluation:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 250
+    sources:
+      - path: eval-queries/
+        type: raw
+
+training:
+  spot: true

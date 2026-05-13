@@ -1,0 +1,18 @@
+security audit flagged our EC2NodeClass for having httpTokens set to optional:
+
+```yaml
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  role: KarpenterNodeRole-prod
+  amiFamily: AL2023
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 2
+    httpTokens: optional
+```
+
+an LLM said optional is fine because "IMDSv2 is still available, it just doesn't force it." our pods use IMDS to get temporary credentials. what are the actual risks of httpTokens: optional?

@@ -1,0 +1,57 @@
+getting validation errors when trying to apply my NodePool. i upgraded karpenter from v0.37 to v1.0 and updated the configs. here's what i have:
+
+NodePool:
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m", "r"]
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["4"]
+      nodeClassRef:
+        apiVersion: karpenter.k8s.aws/v1beta1
+        kind: EC2NodeClass
+        name: default
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 60s
+  limits:
+    cpu: "100"
+```
+
+EC2NodeClass:
+```yaml
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  role: KarpenterNodeRole-dev-cluster
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: dev-cluster
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: dev-cluster
+```
+
+when i apply the NodePool i get:
+```
+Error from server: error when creating "nodepool.yaml": admission webhook "validation.karpenter.sh" denied the request: spec.template.spec.nodeClassRef: Invalid value
+```
+
+the EC2NodeClass applies fine on its own. it's only the NodePool that fails. i copied the nodeClassRef format from a blog post that was written for karpenter v0.37. is the format different in v1?

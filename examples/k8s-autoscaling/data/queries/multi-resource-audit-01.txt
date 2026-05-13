@@ -1,0 +1,96 @@
+can you audit this whole setup? we have Karpenter + KEDA + HPA all running and things are a mess. pods oscillate between 3 and 15 replicas, nodes churn constantly, and some pods are stuck Pending.
+
+NodePool:
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: api-nodes
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["m"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+  limits:
+    cpu: "100"
+```
+
+KEDA ScaledObject:
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: api-scaler
+  namespace: production
+spec:
+  scaleTargetRef:
+    name: api-deployment
+  minReplicaCount: 0
+  maxReplicaCount: 30
+  cooldownPeriod: 30
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring:9090
+        metricName: http_rps
+        query: sum(rate(http_requests_total{app="api"}[1m]))
+        threshold: "50"
+```
+
+HPA (also targeting api-deployment):
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-hpa
+  namespace: production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-deployment
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+```
+
+PDB:
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-pdb
+  namespace: production
+spec:
+  minAvailable: "100%"
+  selector:
+    matchLabels:
+      app: api-deployment
+```
+
+symptoms:
+- KEDA and HPA fight over replica count
+- KEDA scales to 0 during low traffic, then HPA tries to maintain 3 minimum
+- nodes get provisioned and consolidated every few minutes
+- PDB blocks all consolidation when pods are running
+- pods stuck Pending because consolidateAfter is too aggressive
+
+this was set up by three different teams and nobody coordinated. help.

@@ -1,0 +1,99 @@
+we have a web API that needs to scale on both CPU and request rate. here's what we set up based on various LLM suggestions:
+
+HPA for CPU:
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-server
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+```
+
+KEDA for request rate:
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: api-keda
+spec:
+  scaleTargetRef:
+    name: api-server
+  minReplicaCount: 1
+  maxReplicaCount: 50
+  cooldownPeriod: 60
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus:9090
+        metricName: http_rps
+        query: sum(rate(http_requests_total{service="api"}[2m]))
+        threshold: "100"
+```
+
+NodePool:
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["m5.xlarge", "m5.2xlarge"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 60s
+  limits:
+    cpu: "200"
+```
+
+Deployment:
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-server
+spec:
+  replicas: 5
+  template:
+    spec:
+      containers:
+        - name: api
+          resources:
+            requests:
+              cpu: "500m"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+```
+
+problems:
+1. replicas oscillate between 1 and 20 every few minutes
+2. every helm upgrade resets to 5 replicas regardless of current HPA state
+3. karpenter keeps launching and terminating nodes
+4. during scale-down, some requests get 502 errors
+
+the LLM said having both HPA and KEDA gives us "defense in depth" for scaling. is that right?

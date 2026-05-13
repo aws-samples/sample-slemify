@@ -1,0 +1,1 @@
+hey is this the right channel for karpenter questions? we're having some issues with our nodes but it might actually be a VPC CNI problem. pods get IPs but then lose connectivity after a few minutes. not sure if karpenter is involved at all since the nodes themselves seem fine.

@@ -1,0 +1,42 @@
+seeing weird behavior where karpenter launches 3 nodes (one per AZ) but then immediately terminates 2 of them. here's our deployment:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: production
+spec:
+  replicas: 9
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: api-gateway
+      containers:
+        - name: gateway
+          image: api-gateway:v1.8.0
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+```
+
+the HPA scales this from 3 to 30 replicas. when it scales up, karpenter provisions nodes in all 3 AZs. but because `whenUnsatisfiable: ScheduleAnyway` is a soft constraint, the kube-scheduler packs all pods onto whichever node becomes Ready first. the other 2 nodes end up empty and karpenter consolidates them within 30 seconds.
+
+then the next scaling event happens and karpenter launches 3 more nodes, same thing happens. we're seeing nodes launch and terminate within 60 seconds, over and over.
+
+why are my nodes launching and terminating within seconds? is this a karpenter bug or a scheduler issue? we want pods spread across zones but we also don't want pods stuck in Pending if a zone is temporarily unavailable.

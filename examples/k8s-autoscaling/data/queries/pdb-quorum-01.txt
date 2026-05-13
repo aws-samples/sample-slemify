@@ -1,0 +1,27 @@
+we lost ZooKeeper quorum during a karpenter node upgrade last week. we have a 3-node ZK ensemble with this PDB:
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: zookeeper-pdb
+  namespace: kafka
+spec:
+  maxUnavailable: 2
+  selector:
+    matchLabels:
+      app: zookeeper
+```
+
+an LLM told us `maxUnavailable: 2` is fine for a 3-node cluster because it still guarantees at least 1 node is always available. but during a karpenter node replacement, 2 ZK pods went down simultaneously and we lost quorum. the kafka cluster couldn't elect a new controller and we had a 15-minute outage.
+
+the sequence was:
+1. karpenter decided to consolidate 2 nodes that had ZK pods
+2. PDB allowed it because maxUnavailable: 2 means 2 pods can be down
+3. both ZK pods got evicted at roughly the same time
+4. only 1 ZK node remained, which is below quorum (need 2 of 3)
+5. kafka lost its controller connection
+6. new ZK pods took ~3 minutes to start and rejoin the ensemble
+7. kafka recovered after ZK quorum was restored
+
+how should we configure the PDB for a 3-node quorum system? the LLM's advice clearly didn't account for quorum requirements.

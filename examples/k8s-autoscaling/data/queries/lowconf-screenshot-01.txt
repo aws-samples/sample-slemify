@@ -1,0 +1,1 @@
+see attached screenshot of our grafana dashboard — something looks off with the node count but I can't tell if it's a karpenter issue or just normal scaling behavior. the graph shows nodes going up and down every hour. is that expected? [screenshot not available in text]

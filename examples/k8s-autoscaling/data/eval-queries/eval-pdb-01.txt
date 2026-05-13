@@ -1,0 +1,15 @@
+our PDB with minAvailable 100% is blocking all karpenter consolidation and node expiry. we can't even do security patches on nodes.
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-pdb
+spec:
+  minAvailable: "100%"
+  selector:
+    matchLabels:
+      app: redis-cluster
+```
+
+an LLM recommended 100% for maximum safety. but now we're stuck with unpatched nodes. what's the right value for a 6-node Redis cluster?

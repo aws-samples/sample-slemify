@@ -1,0 +1,2 @@
+Our CBX-88234 has intermittent SMART errors on NVMe. 3 reallocated sectors, read latency spikes >500ms. Unit functional but concerned about data integrity. Warranty drive replacement?
+Dr. James Liu, Sysadmin

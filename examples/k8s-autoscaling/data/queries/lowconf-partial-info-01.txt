@@ -1,0 +1,1 @@
+something is wrong with our cluster scaling. pods are pending but I don't know why. we use karpenter I think. or maybe cluster autoscaler? let me check... anyway the pods have been pending for like 30 minutes. could be a resource issue or a scheduling issue. not sure what logs to look at.

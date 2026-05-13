@@ -1,0 +1,55 @@
+we're trying to set up memory-based autoscaling on our K8s 1.25 cluster. ChatGPT suggested using `autoscaling/v2beta2` for the HPA. here's what we have:
+
+```yaml
+apiVersion: autoscaling/v2beta2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cache-service-hpa
+  namespace: production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cache-service
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+```
+
+the CPU scaling works but memory scaling doesn't seem to do anything. pods are using 90%+ of their memory (according to `kubectl top pods`) but the HPA doesn't scale up. `kubectl describe hpa` shows:
+
+```
+Conditions:
+  Type            Status  Reason            Message
+  ----            ------  ------            -------
+  AbleToScale     True    ReadyForNewScale  recommended size matches current size
+  ScalingActive   True    ValidMetricFound  the HPA was able to successfully calculate a replica count from cpu resource utilization
+  ScalingLimited  False   DesiredWithinRange  the desired count is within the acceptable range
+```
+
+it only mentions CPU, nothing about memory. also i noticed our deployment doesn't have memory requests set:
+
+```yaml
+containers:
+  - name: cache-service
+    resources:
+      requests:
+        cpu: "500m"
+      limits:
+        cpu: "1"
+        memory: "2Gi"
+```
+
+is the missing memory request related? and is v2beta2 the right apiVersion for K8s 1.25? we're planning to upgrade to 1.30 soon. ChatGPT was pretty confident about it.

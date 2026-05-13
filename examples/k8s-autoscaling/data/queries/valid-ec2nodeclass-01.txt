@@ -1,0 +1,48 @@
+is this EC2NodeClass config following best practices? we're setting up a new production cluster and want to make sure we get the node configuration right from the start.
+
+```yaml
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: production
+spec:
+  role: KarpenterNodeRole-prod-cluster
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: prod-cluster
+        network-tier: private
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: prod-cluster
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 1
+    httpTokens: required
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 100Gi
+        volumeType: gp3
+        iops: 3000
+        throughput: 125
+        encrypted: true
+        deleteOnTermination: true
+  tags:
+    environment: production
+    managed-by: karpenter
+    cost-center: platform
+```
+
+we're using:
+- `role` instead of `instanceProfile` (karpenter creates the instance profile automatically)
+- `httpTokens: required` to enforce IMDSv2
+- `httpPutResponseHopLimit: 1` to restrict IMDS access to the node only (we use Pod Identity for pod-level IAM)
+- `alias: al2023@latest` for the AMI
+- encrypted EBS volumes
+- private subnet tags
+
+anything we're missing or should change? this is going to production next week.

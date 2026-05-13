@@ -1,0 +1,1 @@
+hi everyone, I'm an intern and my manager asked me to look into why our cluster costs are high. I found something called NodePool and ScaledObject in our cluster but I don't really understand what they do. are these related to autoscaling? should I be looking at these or something else?

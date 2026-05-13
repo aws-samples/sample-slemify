@@ -1,0 +1,24 @@
+our batch processing pods have terminationGracePeriodSeconds: 300 for checkpointing to S3. but during spot interruptions the pods get SIGKILL'd almost immediately. karpenter logs show "Forceful Termination" even though we set terminationGracePeriod: 10m on the NodePool.
+
+here's the relevant NodePool config:
+```yaml
+spec:
+  template:
+    spec:
+      terminationGracePeriod: 10m
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+```
+
+and the pod spec:
+```yaml
+terminationGracePeriodSeconds: 300
+lifecycle:
+  preStop:
+    exec:
+      command: ["/bin/sh", "-c", "python checkpoint.py && sleep 120"]
+```
+
+the preStop hook takes about 2 minutes to complete the checkpoint. but AWS only gives a 2-minute spot warning. is there a way to get more time? an LLM said we can configure the spot warning period.

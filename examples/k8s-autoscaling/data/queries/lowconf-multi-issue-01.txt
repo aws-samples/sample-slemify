@@ -1,0 +1,8 @@
+we have like 5 different issues happening at once and I'm not sure which is causing what:
+1. some pods are OOMKilled
+2. nodes are being terminated by karpenter
+3. HPA keeps scaling up and down
+4. our prometheus is behind on scraping
+5. DNS resolution is slow
+
+could be all related or could be 5 separate problems. where do we even start?

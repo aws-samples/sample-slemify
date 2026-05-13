@@ -1,0 +1,55 @@
+we have an existing HPA on our API deployment for CPU-based scaling. now we want to add KEDA to also scale based on Prometheus metrics (request latency p99). an LLM told us we can just add a ScaledObject alongside the HPA and they'll complement each other. here's what we have:
+
+existing HPA:
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-hpa
+  namespace: production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-server
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+```
+
+new ScaledObject we want to add:
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: api-keda
+  namespace: production
+spec:
+  scaleTargetRef:
+    name: api-server
+  minReplicaCount: 3
+  maxReplicaCount: 50
+  cooldownPeriod: 60
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring:9090
+        metricName: http_request_duration_p99
+        query: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{service="api-server"}[5m])) by (le))
+        threshold: "0.5"
+```
+
+the LLM said KEDA and HPA complement each other - HPA handles CPU scaling and KEDA handles custom metrics. they both target the same deployment and kubernetes will use whichever says more replicas.
+
+but when we applied the ScaledObject, we got this error:
+```
+Already an HPA with the same owner exists for this ScaledObject
+```
+
+is the LLM wrong? can't we use both? what's the right way to scale on both CPU and Prometheus metrics?

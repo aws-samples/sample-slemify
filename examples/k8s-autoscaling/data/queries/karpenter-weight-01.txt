@@ -1,0 +1,39 @@
+we have two NodePools: one for general workloads (weight: 10) and one for GPU workloads (weight: 50). but pods that should go to the general pool are landing on GPU nodes instead. an LLM said higher weight means higher priority, so GPU should only be used for GPU pods. is that wrong?
+
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: general
+spec:
+  weight: 10
+  template:
+    spec:
+      requirements:
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m", "r"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: general
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu
+spec:
+  weight: 50
+  template:
+    spec:
+      requirements:
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["g5.xlarge", "g5.2xlarge"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: gpu
+```
+
+we thought weight controls which pool gets used first. do we need taints on the GPU pool to prevent non-GPU pods from scheduling there?

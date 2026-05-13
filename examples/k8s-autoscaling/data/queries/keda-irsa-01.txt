@@ -1,0 +1,51 @@
+we're on EKS with IRSA configured for our workloads. we want KEDA to scale based on SQS queue depth. an LLM told us to create a TriggerAuthentication with AWS credentials stored in a Kubernetes secret. here's what we set up:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keda-aws-credentials
+  namespace: processing
+type: Opaque
+data:
+  AWS_ACCESS_KEY_ID: QUtJQVhYWFhYWFhYWFhYWA==
+  AWS_SECRET_ACCESS_KEY: d0phbHJYVXRuRkVNSS9LN01ERU5HL2JQeFJmaUNZRVhBTVBMRUtFWQ==
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: keda-aws-auth
+  namespace: processing
+spec:
+  secretTargetRef:
+    - parameter: awsAccessKeyID
+      name: keda-aws-credentials
+      key: AWS_ACCESS_KEY_ID
+    - parameter: awsSecretAccessKey
+      name: keda-aws-credentials
+      key: AWS_SECRET_ACCESS_KEY
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: queue-processor-scaler
+  namespace: processing
+spec:
+  scaleTargetRef:
+    name: queue-processor
+  minReplicaCount: 1
+  maxReplicaCount: 30
+  cooldownPeriod: 300
+  triggers:
+    - type: aws-sqs-queue
+      authenticationRef:
+        name: keda-aws-auth
+      metadata:
+        queueURL: https://sqs.us-east-1.amazonaws.com/123456789012/processing-queue
+        queueLength: "5"
+        awsRegion: us-east-1
+```
+
+this works but is using static credentials the right approach? we already have IRSA set up for other workloads in the cluster. the LLM said storing credentials in a secret is the standard way to authenticate KEDA with AWS services. but our security team is asking why we're not using IRSA for this.
+
+also these credentials are from an IAM user, not a role. do we need to rotate them manually? the LLM didn't mention anything about credential rotation.

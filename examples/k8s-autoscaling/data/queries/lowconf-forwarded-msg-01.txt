@@ -1,0 +1,1 @@
+forwarding from a customer: "we're having issues with our kubernetes cluster. things are slow and pods keep restarting. we think it might be a scaling issue but we're not sure. can someone help?" — no other context provided, no configs, no cluster version. thoughts?

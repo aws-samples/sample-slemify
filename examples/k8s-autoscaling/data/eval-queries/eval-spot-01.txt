@@ -1,0 +1,24 @@
+our spot NodePool only uses c5.2xlarge and our pods have terminationGracePeriodSeconds: 300. during a spot interruption we only get a 2-minute warning but our pods need 5 minutes to gracefully shut down.
+
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: workers
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["c5.2xlarge"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+```
+
+pods keep getting SIGKILL'd during interruptions. is there a way to extend the spot warning period? an LLM said we can configure it.

@@ -1,0 +1,38 @@
+we're experiencing what i can only describe as "consolidation storms" every day around 10am-2pm when traffic dips slightly. here's our NodePool config:
+
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: general
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["m5.xlarge", "m5.2xlarge", "m6i.xlarge", "m6i.2xlarge"]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["us-east-1a", "us-east-1b", "us-east-1c"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 5m
+    budgets:
+      - nodes: "50%"
+```
+
+what happens is: karpenter identifies 4-5 nodes as underutilized and starts consolidating them. pods get moved to other nodes. but then those replacement nodes are ALSO considered underutilized because the pods that just landed haven't ramped up their resource usage yet. so karpenter starts consolidating THOSE nodes too. we end up with 2-3 generations of churn before things stabilize.
+
+during this window we see increased latency, connection resets, and our PagerDuty goes off because health checks fail during pod migrations. we've had this happen every weekday for the past 3 weeks.
+
+the budget of 50% doesn't help because it just means half the nodes get churned at once, then the other half gets churned in the next cycle.
+
+how do we stop this cycle? we tried setting consolidateAfter to 30m but then we're paying for idle nodes for half an hour. is there a way to make karpenter wait for pods to stabilize before evaluating utilization again? similar to what was discussed in github issue #7146.

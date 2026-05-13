@@ -1,0 +1,2 @@
+Dear Technical Support, I need assistance configuring our Cloud-in-a-Box (CBX-67890) with Active Directory and 802.1Q VLAN tagging. Hardware is fine, we just need technical guidance for deployment.
+Dr. Sarah Chen, IT Director

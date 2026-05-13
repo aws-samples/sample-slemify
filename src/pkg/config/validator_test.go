@@ -1,0 +1,185 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: MIT-0
+
+package config
+
+import (
+	"strings"
+	"testing"
+)
+
+func validConfig() *ExpertConfig {
+	return &ExpertConfig{
+		APIVersion: "slemify/v1",
+		Project: ProjectConfig{
+			Name:   "karpenter-expert",
+			Domain: "Karpenter configuration",
+		},
+		Model: ModelConfig{Base: "mistralai/Mistral-7B-Instruct-v0.3"},
+		Data: DataConfig{
+			Bucket: "my-bucket",
+			Path:   "data/",
+			Synthetic: SyntheticConfig{
+				Model: "claude-sonnet",
+				Pairs: 500,
+			},
+		},
+		Training: TrainingConfig{Spot: true},
+	}
+}
+
+func TestValidateValidConfig(t *testing.T) {
+	errs := Validate(validConfig())
+	if len(errs) > 0 {
+		t.Errorf("expected no errors, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidateMissingAPIVersion(t *testing.T) {
+	cfg := validConfig()
+	cfg.APIVersion = ""
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "apiVersion") {
+		t.Errorf("expected error on apiVersion, got: %v", errs)
+	}
+}
+
+func TestValidateWrongAPIVersion(t *testing.T) {
+	cfg := validConfig()
+	cfg.APIVersion = "slemify/v2"
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "apiVersion") {
+		t.Errorf("expected error on apiVersion for wrong version, got: %v", errs)
+	}
+}
+
+func TestValidateMissingProjectName(t *testing.T) {
+	cfg := validConfig()
+	cfg.Project.Name = ""
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "project.name") {
+		t.Errorf("expected error on project.name, got: %v", errs)
+	}
+}
+
+func TestValidateInvalidProjectName(t *testing.T) {
+	cfg := validConfig()
+	cfg.Project.Name = "INVALID_NAME!"
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "project.name") {
+		t.Errorf("expected error on project.name for invalid DNS label, got: %v", errs)
+	}
+}
+
+func TestValidateMissingDomain(t *testing.T) {
+	cfg := validConfig()
+	cfg.Project.Domain = ""
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "project.domain") {
+		t.Errorf("expected error on project.domain, got: %v", errs)
+	}
+}
+
+func TestValidateMissingModelBase(t *testing.T) {
+	cfg := validConfig()
+	cfg.Model.Base = ""
+	errs := Validate(cfg)
+	if len(errs) == 0 {
+		t.Fatal("expected validation error for empty model.base")
+	}
+	// The error should reference either "model.base" or "model"
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Field, "model") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected error referencing model, got: %v", errs)
+	}
+}
+
+func TestValidateMissingBucket(t *testing.T) {
+	cfg := validConfig()
+	cfg.Data.Bucket = ""
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "data.bucket") {
+		t.Errorf("expected error on data.bucket, got: %v", errs)
+	}
+}
+
+func TestValidateSyntheticPairsTooLow(t *testing.T) {
+	cfg := validConfig()
+	cfg.Data.Synthetic.Pairs = 5
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "data.synthetic.pairs") {
+		t.Errorf("expected error on synthetic.pairs < 10, got: %v", errs)
+	}
+}
+
+func TestValidateSyntheticPairsMinimum(t *testing.T) {
+	cfg := validConfig()
+	cfg.Data.Synthetic.Pairs = 10
+	errs := Validate(cfg)
+	if hasFieldError(errs, "data.synthetic.pairs") {
+		t.Errorf("pairs=10 should be valid, got error: %v", errs)
+	}
+}
+
+func TestValidateInvalidSourceType(t *testing.T) {
+	cfg := validConfig()
+	cfg.Data.Sources = []SourceConfig{
+		{Path: "data/", Type: "invalid-type"},
+	}
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "type") {
+		t.Errorf("expected error on invalid source type, got: %v", errs)
+	}
+}
+
+func TestValidateValidSourceTypes(t *testing.T) {
+	validTypes := []string{"github-issues", "github-discussions", "documentation", "source-code", "documents", "raw"}
+	for _, st := range validTypes {
+		cfg := validConfig()
+		cfg.Data.Sources = []SourceConfig{
+			{Path: "data/", Type: st},
+		}
+		errs := Validate(cfg)
+		if hasFieldError(errs, "type") {
+			t.Errorf("source type %q should be valid, got error: %v", st, errs)
+		}
+	}
+}
+
+func TestValidateMultipleErrors(t *testing.T) {
+	cfg := &ExpertConfig{} // everything missing
+	errs := Validate(cfg)
+	if len(errs) < 3 {
+		t.Errorf("expected multiple errors for empty config, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidationErrorFormat(t *testing.T) {
+	cfg := validConfig()
+	cfg.APIVersion = ""
+	errs := Validate(cfg)
+	if len(errs) == 0 {
+		t.Fatal("expected errors")
+	}
+	// Check that Error() method works
+	errStr := errs[0].Error()
+	if errStr == "" {
+		t.Error("Error() returned empty string")
+	}
+}
+
+// hasFieldError checks if any ValidationError references the given field substring.
+func hasFieldError(errs []ValidationError, field string) bool {
+	for _, e := range errs {
+		if strings.Contains(e.Field, field) {
+			return true
+		}
+	}
+	return false
+}

@@ -1,0 +1,55 @@
+we have a Kafka consumer that KEDA scales based on consumer lag. we set minReplicaCount to 1 so there's always at least one consumer ready. but karpenter keeps consolidating the node that the single consumer pod runs on, causing the pod to get evicted and rescheduled in a loop.
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: kafka-consumer-scaler
+  namespace: streaming
+spec:
+  scaleTargetRef:
+    name: kafka-consumer
+  minReplicaCount: 1
+  maxReplicaCount: 15
+  cooldownPeriod: 120
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka-bootstrap.kafka:9092
+        consumerGroup: event-processor
+        topic: events
+        lagThreshold: "100"
+```
+
+NodePool:
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: streaming
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+  limits:
+    cpu: "100"
+```
+
+when kafka has no messages, the single consumer pod uses almost no CPU/memory. karpenter sees the node as underutilized and consolidates it. the pod gets evicted, rescheduled on another node (or a new node), and then karpenter consolidates THAT node too because it's also underutilized with just one small pod.
+
+we see the pod getting rescheduled every 2-3 minutes. each time it has to rejoin the consumer group which takes about 30 seconds. during that window, any new messages are not processed.
+
+how do we tell karpenter to leave this pod alone?

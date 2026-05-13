@@ -1,0 +1,1 @@
+we're evaluating cost optimization tools for our EKS clusters. someone mentioned karpenter and KEDA but we haven't set them up yet. right now we're just using managed node groups with cluster autoscaler. is it worth migrating? what's the learning curve like?

@@ -1,0 +1,4 @@
+can someone help me set up port forwarding on my cloud in a box? cbx-88432. i want to host a web server but i cant figure out how to open port 443 from the management interface. the docs mention something about iptables but i thought this thing had a GUI for that? also do i need to set up a static IP first? sorry for all the questions im new to self-hosting
+
+thanks
+- kevin

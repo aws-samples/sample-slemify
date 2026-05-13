@@ -1,0 +1,1 @@
+our HPA shows `<unknown>` for the memory metric. kubectl describe hpa just says "unable to get metrics." we have metrics-server running. is this a metrics-server issue or an HPA config issue? don't have the yaml handy.

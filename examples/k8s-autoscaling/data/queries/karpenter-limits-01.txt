@@ -1,0 +1,30 @@
+pods are stuck in Pending but karpenter isn't launching new nodes. no errors in the karpenter logs, it just says "can't create any more capacity." we checked and our NodePool has limits set:
+
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m"]
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["4"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+  limits:
+    cpu: "50"
+    memory: 200Gi
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 60s
+```
+
+kubectl get nodepool shows we're at 48 CPU used out of 50 limit. so karpenter won't provision more. but we have 20 pending pods. should we increase the limits? what's a safe limit to set? an LLM said to remove limits entirely but that seems risky.

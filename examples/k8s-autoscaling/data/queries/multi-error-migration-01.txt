@@ -1,0 +1,89 @@
+we're migrating from karpenter 0.32 to 1.0 and an LLM generated the "migrated" configs for us. but nothing works after the upgrade. here's what we had and what the LLM gave us:
+
+Original (working on 0.32):
+```yaml
+apiVersion: karpenter.sh/v1alpha5
+kind: Provisioner
+metadata:
+  name: default
+spec:
+  consolidation:
+    enabled: true
+  requirements:
+    - key: karpenter.sh/capacity-type
+      operator: In
+      values: ["spot", "on-demand"]
+    - key: node.kubernetes.io/instance-type
+      operator: In
+      values: ["m5.xlarge", "m5.2xlarge", "c5.xlarge"]
+  provider:
+    subnetSelector:
+      karpenter.sh/discovery: prod-cluster
+    securityGroupSelector:
+      karpenter.sh/discovery: prod-cluster
+    instanceProfile: KarpenterNodeInstanceProfile-prod
+  ttlSecondsAfterEmpty: 60
+  ttlSecondsUntilExpired: 2592000
+---
+apiVersion: karpenter.k8s.aws/v1alpha1
+kind: AWSNodeTemplate
+metadata:
+  name: default
+spec:
+  subnetSelector:
+    karpenter.sh/discovery: prod-cluster
+  securityGroupSelector:
+    karpenter.sh/discovery: prod-cluster
+  instanceProfile: KarpenterNodeInstanceProfile-prod
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 100Gi
+        volumeType: gp3
+        encrypted: true
+```
+
+LLM "migrated" version:
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  consolidation:
+    enabled: true
+  requirements:
+    - key: karpenter.sh/capacity-type
+      operator: In
+      values: ["spot", "on-demand"]
+    - key: node.kubernetes.io/instance-type
+      operator: In
+      values: ["m5.xlarge", "m5.2xlarge", "c5.xlarge"]
+  provider:
+    subnetSelector:
+      karpenter.sh/discovery: prod-cluster
+    securityGroupSelector:
+      karpenter.sh/discovery: prod-cluster
+    instanceProfile: KarpenterNodeInstanceProfile-prod
+  ttlSecondsAfterEmpty: 60
+  ttlSecondsUntilExpired: 2592000
+---
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  subnetSelector:
+    karpenter.sh/discovery: prod-cluster
+  securityGroupSelector:
+    karpenter.sh/discovery: prod-cluster
+  instanceProfile: KarpenterNodeInstanceProfile-prod
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 100Gi
+        volumeType: gp3
+        encrypted: true
+```
+
+the LLM basically just changed the apiVersion and kind but kept everything else the same. kubectl apply gives validation errors on both resources. what's the correct v1 migration for these configs?

@@ -1,0 +1,3 @@
+our nodes are hitting their expireAfter limit (336h) but karpenter can't drain them because of PDBs. the nodes just sit there with the karpenter.sh/disrupted taint forever. we have do-not-disrupt on some pods too. is there a way to force karpenter to drain these expired nodes even with PDBs blocking?
+
+nodepool has terminationGracePeriod: 1h but it doesn't seem to help. pods with do-not-disrupt just stay there.

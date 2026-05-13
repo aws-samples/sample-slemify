@@ -1,0 +1,52 @@
+nodes are launching but never joining the cluster. ChatGPT told me to add custom userData to my EC2NodeClass for some extra kubelet configuration. here's what i have:
+
+```yaml
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: custom-nodes
+spec:
+  role: KarpenterNodeRole-staging-cluster
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: staging-cluster
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: staging-cluster
+  userData: |
+    #!/bin/bash
+    set -ex
+
+    # Configure kubelet
+    cat <<EOF > /etc/kubernetes/kubelet/kubelet-config.json
+    {
+      "maxPods": 110,
+      "systemReserved": {
+        "cpu": "100m",
+        "memory": "256Mi"
+      },
+      "kubeReserved": {
+        "cpu": "200m",
+        "memory": "512Mi"
+      }
+    }
+    EOF
+
+    # Start kubelet
+    systemctl restart kubelet
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 50Gi
+        volumeType: gp3
+        encrypted: true
+```
+
+the nodes launch fine in EC2 but never show up in `kubectl get nodes`. i checked the cloud-init logs and there are errors about the userData format. ChatGPT said bash scripts are the standard way to customize node bootstrapping in EKS.
+
+we were using AL2 before and bash userData worked fine there. we switched to AL2023 last week. is the userData format different for AL2023? the karpenter docs are a bit confusing on this.
+
+running EKS 1.30, karpenter 1.0.4.

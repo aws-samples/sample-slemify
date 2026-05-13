@@ -1,0 +1,20 @@
+we're running both AWS Node Termination Handler (NTH) and Karpenter on our EKS cluster. we're seeing an infinite loop where:
+
+1. AWS sends a rebalance recommendation for a spot instance
+2. NTH picks up the event and cordons/drains the node
+3. karpenter sees the pods need rescheduling and launches a replacement node
+4. the replacement node is the same instance type (also spot)
+5. AWS sends another rebalance recommendation for the new instance
+6. NTH drains it again
+7. goto 3
+
+this has been going on for hours. we've launched and terminated about 50 nodes today. our spot fleet is in us-east-1 and there seems to be ongoing capacity pressure on c5.xlarge instances.
+
+we installed NTH because an LLM recommended it for handling spot interruptions gracefully. but it seems like karpenter already handles spot interruptions? should we be running both NTH and karpenter?
+
+our karpenter version is 1.0.2 and NTH is 1.13.3 running in queue mode with an SQS queue. the NTH is configured to handle:
+- spot interruption warnings
+- rebalance recommendations
+- scheduled events
+
+is there overlap between what NTH and karpenter handle? which one should we keep?

@@ -1,0 +1,41 @@
+hi all, we're migrating from karpenter 0.37 to the latest version (1.0.x). Claude gave me this AWSNodeTemplate to replace our old one:
+
+```yaml
+apiVersion: karpenter.k8s.aws/v1alpha1
+kind: AWSNodeTemplate
+metadata:
+  name: default
+spec:
+  subnetSelector:
+    karpenter.sh/discovery: prod-cluster
+  securityGroupSelector:
+    karpenter.sh/discovery: prod-cluster
+  instanceProfile: KarpenterNodeInstanceProfile-prod-cluster
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 100Gi
+        volumeType: gp3
+        iops: 3000
+        throughput: 125
+        encrypted: true
+        deleteOnTermination: true
+  tags:
+    environment: production
+    managed-by: karpenter
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 2
+    httpTokens: required
+```
+
+when i try to apply this i get:
+
+```
+error: unable to recognize "nodetemplate.yaml": no matches for kind "AWSNodeTemplate" in version "karpenter.k8s.aws/v1alpha1"
+```
+
+i also tried `v1alpha5` for the apiVersion but same error. the CRDs are installed, i can see `ec2nodeclasses.karpenter.k8s.aws` when i run `kubectl get crd`. Claude said AWSNodeTemplate is the correct resource for defining node configuration in karpenter. what am i missing here?
+
+we're on EKS 1.30 and just upgraded karpenter from 0.37.0 to 1.0.2 using the helm chart. the old AWSNodeTemplate was working fine before the upgrade.

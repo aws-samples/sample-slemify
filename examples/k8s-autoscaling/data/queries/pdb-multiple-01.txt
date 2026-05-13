@@ -1,0 +1,25 @@
+we have a pod that matches two different PDBs because of overlapping label selectors. one PDB says maxUnavailable: 1 and the other says minAvailable: 100%. karpenter can never consolidate the node this pod is on. is this expected? do both PDBs need to allow disruption or just one?
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: team-a-pdb
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      team: a
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: critical-pdb
+spec:
+  minAvailable: "100%"
+  selector:
+    matchLabels:
+      tier: critical
+```
+
+the pod has both labels: team=a and tier=critical

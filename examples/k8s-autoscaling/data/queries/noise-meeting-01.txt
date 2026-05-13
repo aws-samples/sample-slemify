@@ -1,0 +1,1 @@
+hey team, standup moved to 3pm today. also can someone update the confluence page for the Q3 roadmap? the section on observability improvements is outdated. thanks!
