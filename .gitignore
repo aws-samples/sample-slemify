@@ -102,7 +102,6 @@ designs/
 
 # Go
 src/slemify
-src/go.sum
 src/vendor/
 src/dist/
 
