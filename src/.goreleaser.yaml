@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: slemify
+
+builds:
+  - id: slemify
+    main: .
+    binary: slemify
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - src: ../README.md
+        dst: .
+      - src: ../LICENSE
+        dst: .
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^style:"
+      - "^test:"
+
+release:
+  github:
+    owner: aws-samples
+    name: sample-slemify
+  draft: false
+  prerelease: auto
+  name_template: "v{{.Version}}"
