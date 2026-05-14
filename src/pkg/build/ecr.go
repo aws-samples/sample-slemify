@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
+	ecrtypes "github.com/aws/aws-sdk-go-v2/service/ecr/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
@@ -102,6 +103,10 @@ func (m *ECRManager) ensureRepo(ctx context.Context, repoName string) (string, e
 	result, err := m.ecrClient.CreateRepository(ctx, &ecr.CreateRepositoryInput{
 		RepositoryName:     aws.String(repoName),
 		ImageTagMutability: "MUTABLE",
+		Tags: []ecrtypes.Tag{
+			{Key: aws.String("app.kubernetes.io/managed-by"), Value: aws.String("slemify")},
+			{Key: aws.String("slemify.io/purpose"), Value: aws.String("container-images")},
+		},
 	})
 	if err != nil {
 		// Handle race condition: repo created between describe and create
