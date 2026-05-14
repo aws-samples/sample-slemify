@@ -51,6 +51,8 @@ With S3 mount, the `--mlock` flag is important. Without it, the kernel can evict
 
 GPU inference is faster per request, but for the workloads Slemify targets (classification, routing, extraction), CPU inference is the better economic choice.
 
+**The key rule: output token count determines if CPU is viable, not input context size.** Prefill (processing input) is compute-bound and fast even for long inputs (200-300ms for 2000 tokens). Decode (generating output) is memory-bandwidth bound and slow (each token requires reading the full model weights from RAM). For classification tasks that output 2-10 tokens, total latency stays within SLA bounds. For free-form generation of 500+ tokens, total latency grows to 30-70 seconds on an 8B model.
+
 The reasoning comes down to utilization. A GPU instance costs 3-10x more per hour than a comparable CPU instance. To justify that cost, the GPU needs to stay busy. Classification requests are short (small input, tiny output), so each request uses the GPU for milliseconds and then it sits idle. Unless you're batching hundreds of concurrent requests, the GPU is underutilized and you're paying for idle capacity.
 
 CPU instances, especially Spot, cost a fraction of GPU instances and scale horizontally. Adding a replica is cheap. Removing one when traffic drops is instant. There's no GPU scheduling contention, no NVIDIA driver compatibility issues, and near-unlimited Spot capacity for CPU instance families.
@@ -139,6 +141,8 @@ The auto-sizer maps your model size and quantization level to CPU, memory, and t
 The memory request accounts for the model file plus the KV cache and runtime overhead. The CPU request determines how many threads llama.cpp uses for matrix operations. More threads help up to the point where memory bandwidth saturates, after which adding threads provides no benefit.
 
 **Thread count matters.** Setting threads higher than the number of physical cores (ignoring hyperthreads) can actually hurt performance due to cache contention. The auto-sizer sets threads equal to the CPU request, which maps to physical cores on most instance types.
+
+**Models larger than 8B.** The auto-sizer supports models up to 30B+ parameters on CPU. Larger models work but with proportionally higher latency (more weights to read per token). For classification and routing tasks with short output, models up to 30B are viable on CPU if the response time fits your SLAs. For most classification tasks, 3-8B is the sweet spot: fast enough for real-time use, large enough for multi-class accuracy.
 
 ## Karpenter and instance selection
 
