@@ -149,6 +149,13 @@ func inferenceDeployment(cfg *config.ExpertConfig, sized config.SizedConfig, ns 
 							Ports: []corev1.ContainerPort{
 								{Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP},
 							},
+							Lifecycle: &corev1.Lifecycle{
+								PostStart: &corev1.LifecycleHandler{
+									Exec: &corev1.ExecAction{
+										Command: warmupCommand(),
+									},
+								},
+							},
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
@@ -239,6 +246,24 @@ func inferencePDB(cfg *config.ExpertConfig, ns string, labels, selectorLabels ma
 	}
 }
 
+
+// warmupCommand returns the postStart lifecycle hook command that sends a dummy
+// completion request to the llama.cpp server after it starts. This forces the
+// model weights into memory and primes the KV cache, eliminating the cold-start
+// penalty on the first real user request.
+// The script polls /health until the server is ready, then sends a completion
+// request with a representative system prompt to pre-compute the KV cache prefix
+// that real queries will share.
+func warmupCommand() []string {
+	return []string{
+		"/bin/sh", "-c",
+		// Write the warmup payload to a file to avoid shell quoting issues,
+		// then use wget --post-file to send it.
+		`printf '{"messages":[{"role":"user","content":"You are a Kubernetes autoscaling auditor. Answer ONLY based on the reference documentation below. Do NOT invent fields, behaviors, or modes not in the docs. If the docs do not cover something, say so. State what is correct, why, and provide a fix if needed.\n\n--- REFERENCE DOCUMENTATION ---\nNodePool limits define the maximum amount of resources Karpenter can provision. When limits are reached, Karpenter will not launch new nodes.\n--- END REFERENCE ---\n\n--- USER QUERY ---\nwarmup\n--- END USER QUERY ---"}],"max_tokens":1}' > /tmp/warmup.json && ` +
+			"for i in $(seq 1 60); do wget -q -O /dev/null http://localhost:8080/health && break; sleep 1; done && " +
+			"wget -q -O /dev/null --post-file=/tmp/warmup.json --header='Content-Type: application/json' http://localhost:8080/v1/chat/completions || true",
+	}
+}
 
 // llamaCppArgs builds the llama.cpp server arguments based on the model config.
 // Context size and reasoning budget are derived from training data output stats.
