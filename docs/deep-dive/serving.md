@@ -73,6 +73,43 @@ For a deeper treatment of this topic, see [Silicon, Memory, and Modern Inference
 
 Since inference is memory-bandwidth bound, the CPU architecture that moves data fastest wins. All three major server CPU families work well with llama.cpp, but they have different strengths:
 
+## Latency planning: how input size affects response time
+
+Use this table to estimate total response time based on your input token count. These numbers are based on tests we have run with llama.cpp and Q4_K_M quantization on a standard compute-optimised CPU instance (16 vCPUs, 8 cores allocated per model).
+
+### 4B model (classification/routing tasks, 8 CPU cores)
+
+Prompt throughput: ~367 tokens/sec. Generation: ~28 ms/token.
+
+| Input | Tokens (approx) | Prompt eval | + 32 output tokens | **Total** |
+|-------|-----------------|-------------|-------------------|-----------|
+| Short query (1-2 lines) | 50 | 0.1s | 0.9s | **1.0s** |
+| Config snippet (20 lines YAML) | 200 | 0.5s | 0.9s | **1.5s** |
+| Email body (~500 words) | 700 | 1.9s | 0.9s | **2.8s** |
+| Email + MCP context (~2000 words) | 2,800 | 7.6s | 0.9s | **8.5s** |
+| Full thread + tool results (~5000 words) | 7,000 | 19.1s | 0.9s | **20s** |
+
+### 8B model (structured generation tasks, 8 CPU cores)
+
+Prompt throughput: ~220 tokens/sec. Generation: ~51 ms/token.
+
+| Input | Tokens (approx) | Prompt eval | + 300 output tokens | **Total** |
+|-------|-----------------|-------------|---------------------|-----------|
+| Short query + RAG (2 docs) | 500 | 2.3s | 15.3s | **17.6s** |
+| Medium query + RAG (3 docs) | 800 | 3.6s | 15.3s | **18.9s** |
+| Long query + RAG (5 docs) | 1,500 | 6.8s | 15.3s | **22.1s** |
+
+### Formula
+
+```
+Total time = (input_tokens / prompt_throughput) + (output_tokens x ms_per_token / 1000)
+```
+
+**Practical guidance:**
+- For **routing/classification** (short output): keep input under ~1000 tokens for sub-3.5s response. If your input is larger, truncate to the most relevant section before sending to the SLM.
+- For **structured generation** (long output): the generation phase dominates. Input size matters less because even doubling the input only adds 2-3s, while the 15s generation time is fixed.
+- For **batch inference**: latency doesn't matter. Process overnight. CPU is viable for any input size when you're optimizing for cost, not speed.
+
 | CPU family | Memory bandwidth | Key advantage for inference |
 |-----------|-----------------|---------------------------|
 | [AWS Graviton4](https://aws.amazon.com/ec2/graviton/) (Arm Neoverse V2) | 12x DDR5-5600 channels | Lowest cost per core-hour on AWS. 75% more bandwidth than Graviton3. |
