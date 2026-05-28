@@ -39,5 +39,5 @@ echo "                    |"
 echo "                    └── Auditor SLM (8B, CPU, streaming)"
 echo "                            structured config analysis"
 echo ""
-echo "  All inference on Graviton4 CPUs. Zero GPUs."
+echo "  All inference on CPU instances. Zero GPUs."
 '

@@ -128,6 +128,34 @@ async def warmup():
     _ready = True
 
 
+# --- Keep-alive background task ---
+
+@app.on_event("startup")
+async def start_keepalive():
+    """Periodically ping Bedrock to keep credentials and connections warm."""
+    asyncio.create_task(_keepalive_loop())
+
+
+async def _keepalive_loop():
+    """Send a lightweight embedding request every 5 minutes to prevent credential/connection expiry."""
+    while True:
+        await asyncio.sleep(300)  # 5 minutes
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _ping_bedrock)
+        except Exception as e:
+            print(f"  Keepalive failed: {e}")
+
+
+def _ping_bedrock():
+    """Minimal Bedrock call to keep the session alive."""
+    resp = bedrock.invoke_model(
+        modelId=EMBEDDING_MODEL,
+        body=json.dumps({"inputText": "keepalive", "dimensions": 1024, "normalize": True}),
+    )
+    resp["body"].read()
+
+
 # --- Core functions ---
 
 def classify(text: str) -> dict:
