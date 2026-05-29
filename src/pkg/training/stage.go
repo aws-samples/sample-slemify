@@ -217,7 +217,7 @@ func TrainingJobManifest(cfg *config.ExpertConfig, sized config.SizedConfig, ns,
 					Containers: []corev1.Container{
 						{
 							Name:            "training",
-							Image:           "unsloth/unsloth:2026.4.8-pt2.10.0-vllm-0.16.0-cu12.8-studio-release-v0.1.37-beta-fix-startup",
+							Image:           "unsloth/unsloth:2026.5.7-pt2.10.0-vllm-0.16.0-cu12.8-studio-release-v0.1.41-beta-2026-MAY-24",
 							ImagePullPolicy: corev1.PullAlways,
 							Command: []string{"bash", "-c", fmt.Sprintf(`
 set -e

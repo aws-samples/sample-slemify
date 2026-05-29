@@ -189,7 +189,7 @@ func TestSecurityNoHardcodedSecrets(t *testing.T) {
 
 func TestSecurityNoUnexpectedLatestTag(t *testing.T) {
 	allowed := map[string]bool{
-		"unsloth/unsloth:2026.4.8-pt2.10.0-vllm-0.16.0-cu12.8-studio-release-v0.1.37-beta-fix-startup": true,
+		"unsloth/unsloth:2026.5.7-pt2.10.0-vllm-0.16.0-cu12.8-studio-release-v0.1.41-beta-2026-MAY-24": true,
 		"amazon/aws-cli:latest":  true,
 	}
 	for name, c := range allContainers() {

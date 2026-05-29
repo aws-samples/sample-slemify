@@ -171,11 +171,41 @@ def classify(text: str) -> dict:
         d = resp.json()
 
     raw = d["choices"][0]["message"]["content"]
-    parts = [p.strip() for p in raw.split("\n")[0].strip().split("|") if p.strip()]
-    return {
-        "confidence": parts[0] if parts else "unknown",
-        "category": parts[1] if len(parts) > 1 else "unknown",
+
+    # Extract category|confidence from the response, handling extra text.
+    # The model may output "category|confidence" followed by explanation.
+    import re
+    valid_categories = {
+        "karpenter_config", "keda_config", "hpa_config",
+        "pdb_disruption", "spot_interruption", "multi_resource", "noise",
     }
+    valid_confidence = {"high", "medium", "low"}
+
+    # Try to find a pipe-separated pair anywhere in the first line
+    first_line = raw.split("\n")[0].strip()
+    parts = [p.strip().lower() for p in first_line.split("|") if p.strip()]
+
+    category = "unknown"
+    confidence = "unknown"
+    for part in parts:
+        if part in valid_categories:
+            category = part
+        elif part in valid_confidence:
+            confidence = part
+
+    # Fallback: check if any valid category appears anywhere in the raw output
+    if category == "unknown":
+        raw_lower = raw.lower()
+        for cat in valid_categories:
+            if cat in raw_lower:
+                category = cat
+                break
+        # If still unknown but mentions noise-like content
+        if category == "unknown" and any(w in raw_lower for w in ["not relate", "unrelated", "off-topic", "noise"]):
+            category = "noise"
+            confidence = "high"
+
+    return {"confidence": confidence, "category": category}
 
 
 def retrieve(query: str, k: int = 3) -> list[str]:
