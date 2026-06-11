@@ -21,6 +21,10 @@ User submits a K8s config question via chat UI
         |-- high confidence -->
                 |
                 v
+        [Embedding - bge-base-en-v1.5, CPU, ~5ms]
+          Embeds the query locally (768d), no external API call
+                |
+                v
         [OpenSearch - Vector DB, CPU, ~100ms]
           Retrieves relevant Karpenter/KEDA docs, examples, known issues
                 |
@@ -40,6 +44,7 @@ User submits a K8s config question via chat UI
 | Chat UI | Static web app | Any | User interface with markdown rendering |
 | Orchestrator | Python FastAPI | CPU pod | Routes between triage, RAG, auditor, LLM |
 | Triage SLM | llama.cpp | c8g (Graviton4 CPU) | Intent classification, 1.5s |
+| Embedding | sentence-transformers (bge-base-en-v1.5) | c8g (Graviton4 CPU) | In-cluster query/doc embeddings, 768d |
 | OpenSearch | OpenSearch k-NN | CPU pod | Vector search over 3900+ doc chunks |
 | Auditor SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed |
 | LLM API | Bedrock (Sonnet 4.5) | Managed | Fallback for low confidence queries |
@@ -52,7 +57,7 @@ User submits a K8s config question via chat UI
 - AWS EKS Best Practices (autoscaling section)
 - 17 AWS blog posts (Karpenter v1.0, Spot consolidation, Graviton migration, KEDA + Prometheus, etc.)
 
-Embedding model: Titan Embeddings v2 (1024 dimensions, via Bedrock).
+Embedding model: bge-base-en-v1.5 (768 dimensions), served in-cluster on CPU via sentence-transformers. No external API call for embeddings.
 
 ## Demo Prompts (Tested)
 
@@ -191,9 +196,9 @@ ARM64_BUILD_HOST=my-graviton-host ./scripts/setup-demo.sh
 The setup script:
 1. Verifies SLM models are deployed
 2. Deploys OpenSearch (if not already running)
-3. Indexes the knowledge base (~3900 chunks from Karpenter, KEDA, EKS docs + blogs)
-4. Builds and pushes the orchestrator image (native arm64)
-5. Deploys the orchestrator pod with Pod Identity for Bedrock access
+3. Builds and pushes the orchestrator + embedding images (native arm64)
+4. Deploys the embedding service and orchestrator pods (Pod Identity for Bedrock LLM fallback)
+5. Indexes the knowledge base (~3900 chunks from Karpenter, KEDA, EKS docs + blogs) using the in-cluster embedding service
 6. Waits for everything to be ready
 
 ## Running Locally
@@ -204,6 +209,7 @@ The setup script:
 kubectl port-forward -n slemify svc/k8s-autoscaling-triage-inference 8081:8080
 kubectl port-forward -n slemify svc/k8s-autoscaling-auditor-inference 8082:8080
 kubectl port-forward -n slemify svc/opensearch-cluster-master 9200:9200
+kubectl port-forward -n slemify svc/k8s-autoscaling-embedding 8083:80
 
 # Install deps
 pip install fastapi uvicorn httpx opensearch-py boto3
@@ -217,18 +223,18 @@ python3 server.py
 ## Deploying to Cluster
 
 ```bash
-# One command: builds image, pushes to ECR, sets up Pod Identity, deploys
+# One command: builds images, pushes to ECR, sets up Pod Identity, deploys
 ./scripts/deploy.sh
 
 # Access via port-forward
-kubectl port-forward -n slemify svc/demo-orchestrator 8000:80
+kubectl port-forward -n slemify svc/k8s-autoscaling-orchestrator 8000:80
 # Open http://localhost:8000
 ```
 
 The deploy script:
-1. Builds the Docker image and pushes to ECR
-2. Creates the ServiceAccount, Deployment, and LoadBalancer Service
-3. Sets up an IAM role with Bedrock access via EKS Pod Identity
+1. Builds the orchestrator + embedding images and pushes to ECR
+2. Creates the ServiceAccount, Deployments, and Services
+3. Sets up an IAM role with Bedrock access (LLM fallback) via EKS Pod Identity
 4. Waits for the rollout to complete
 
 ## Live Demo
@@ -243,10 +249,14 @@ The deploy script:
 
 ## Indexing the Knowledge Base
 
+Indexing uses the in-cluster embedding service, so port-forward both OpenSearch
+and the embedding pod first.
+
 ```bash
 # Full index (clones repos, chunks, embeds, indexes)
 kubectl port-forward -n slemify svc/opensearch-cluster-master 9200:9200
-pip install opensearch-py boto3 gitpython requests beautifulsoup4
+kubectl port-forward -n slemify svc/k8s-autoscaling-embedding 8083:80
+pip install opensearch-py httpx gitpython requests beautifulsoup4
 python3 scripts/index-knowledge.py
 
 # Add only blog posts to existing index
@@ -255,6 +265,11 @@ python3 scripts/index-knowledge.py --append --source=aws-blog
 # Add only a specific source
 python3 scripts/index-knowledge.py --append --source=karpenter
 ```
+
+> Note: the embedding model (bge-base-en-v1.5, 768d) must match at index and
+> query time. The index (`k8s-autoscaling-knowledge`) is built with the
+> in-cluster embedding service. Changing the embedding model requires a full
+> reindex (the index mapping dimension changes), not an `--append`.
 
 ## The Story This Tells
 

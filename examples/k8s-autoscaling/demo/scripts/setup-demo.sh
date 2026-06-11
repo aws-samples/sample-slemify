@@ -20,7 +20,8 @@ DEMO_DIR="$(dirname "$SCRIPT_DIR")"
 REGION="${AWS_REGION:-eu-west-1}"
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 REGISTRY="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
-IMAGE="${REGISTRY}/slemify/demo-orchestrator:latest"
+IMAGE="${REGISTRY}/slemify/k8s-autoscaling-orchestrator:latest"
+EMBEDDING_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-embedding:latest"
 NAMESPACE="slemify"
 
 echo "=== Demo Setup ==="
@@ -63,77 +64,63 @@ kubectl rollout status statefulset/opensearch-cluster-master -n "${NAMESPACE}" -
 echo "  OpenSearch: ready"
 echo ""
 
-# --- Step 3: Index knowledge base ---
-echo "--- Step 3: Indexing knowledge base ---"
+# --- Step 3: Build and push images (multi-arch) ---
+echo "--- Step 3: Building images (multi-arch) ---"
+bash "${SCRIPT_DIR}/build-images.sh"
+echo "  Images pushed"
+echo ""
+
+# --- Step 4: Deploy manifests (embedding + orchestrator) ---
+echo "--- Step 4: Deploying manifests ---"
+
+sed -e "s|REPLACE_WITH_ECR_IMAGE|${IMAGE}|g" \
+    -e "s|REPLACE_WITH_EMBEDDING_IMAGE|${EMBEDDING_IMAGE}|g" \
+    "${DEMO_DIR}/k8s-manifest.yaml" | \
+  kubectl apply -f -
+
+echo "  Waiting for embedding service to be ready..."
+kubectl rollout status deployment/k8s-autoscaling-embedding -n "${NAMESPACE}" --timeout=300s
+echo "  Embedding service: ready"
+echo ""
+
+# --- Step 5: Index knowledge base ---
+echo "--- Step 5: Indexing knowledge base ---"
+
+# Knowledge base index, built with the in-cluster bge-base embeddings (768d).
+INDEX_NAME="k8s-autoscaling-knowledge"
 
 # Check if index already has data
 OPENSEARCH_POD=$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/name=opensearch -o jsonpath='{.items[0].metadata.name}')
 DOC_COUNT=$(kubectl exec -n "${NAMESPACE}" "${OPENSEARCH_POD}" -- \
-  curl -s "http://localhost:9200/k8s-autoscaling-knowledge/_count" 2>/dev/null | \
+  curl -s "http://localhost:9200/${INDEX_NAME}/_count" 2>/dev/null | \
   python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null || echo "0")
 
 if [ "${DOC_COUNT}" -gt 100 ]; then
   echo "  Knowledge base already indexed (${DOC_COUNT} docs), skipping"
 else
   echo "  Installing Python dependencies..."
-  pip install --quiet opensearch-py boto3 gitpython requests beautifulsoup4
+  pip install --quiet opensearch-py httpx gitpython requests beautifulsoup4
 
-  echo "  Starting port-forward for indexing..."
+  echo "  Starting port-forwards for indexing..."
   kubectl port-forward -n "${NAMESPACE}" svc/opensearch-cluster-master 9200:9200 &
-  PF_PID=$!
+  PF_OS_PID=$!
+  kubectl port-forward -n "${NAMESPACE}" svc/k8s-autoscaling-embedding 8083:80 &
+  PF_EMB_PID=$!
   sleep 3
 
-  python3 "${SCRIPT_DIR}/index-knowledge.py"
+  python3 "${SCRIPT_DIR}/index-knowledge.py" --index-name="${INDEX_NAME}"
 
-  kill "${PF_PID}" 2>/dev/null
+  kill "${PF_OS_PID}" "${PF_EMB_PID}" 2>/dev/null
 fi
 echo ""
-
-# --- Step 4: Build and push orchestrator image ---
-echo "--- Step 4: Building orchestrator image (arm64) ---"
-
-# ECR login
-aws ecr get-login-password --region "${REGION}" | \
-  docker login --username AWS --password-stdin "${REGISTRY}" 2>/dev/null
-
-# Create ECR repo if needed
-aws ecr describe-repositories --repository-names slemify/demo-orchestrator \
-  --region "${REGION}" >/dev/null 2>&1 || \
-  aws ecr create-repository --repository-name slemify/demo-orchestrator \
-  --region "${REGION}" --image-scanning-configuration scanOnPush=true >/dev/null
-
-# Build natively on arm64
-if [ -n "${ARM64_BUILD_HOST:-}" ]; then
-  echo "  Building on remote host: ${ARM64_BUILD_HOST}"
-  ssh "${ARM64_BUILD_HOST}" "mkdir -p ~/demo-build"
-  scp "${DEMO_DIR}/Dockerfile" "${DEMO_DIR}/server.py" "${ARM64_BUILD_HOST}:~/demo-build/"
-  ssh "${ARM64_BUILD_HOST}" "aws ecr get-login-password --region ${REGION} | docker login --username AWS --password-stdin ${REGISTRY} 2>/dev/null && docker build -t ${IMAGE} ~/demo-build/ && docker push ${IMAGE}"
-elif [ "$(uname -m)" = "arm64" ] || [ "$(uname -m)" = "aarch64" ]; then
-  echo "  Building locally (native arm64)"
-  docker build -t "${IMAGE}" "${DEMO_DIR}"
-  docker push "${IMAGE}"
-else
-  echo "  ERROR: Native arm64 build required but running on $(uname -m)"
-  echo "  Set ARM64_BUILD_HOST to an SSH-accessible Graviton instance:"
-  echo "    ARM64_BUILD_HOST=my-graviton-host ./setup-demo.sh"
-  exit 1
-fi
-echo "  Image pushed: ${IMAGE}"
-echo ""
-
-# --- Step 5: Deploy orchestrator ---
-echo "--- Step 5: Deploying orchestrator ---"
-
-sed "s|REPLACE_WITH_ECR_IMAGE|${IMAGE}|g" "${DEMO_DIR}/k8s-manifest.yaml" | \
-  kubectl apply -f -
 
 # --- Step 6: Pod Identity for Bedrock ---
 echo ""
 echo "--- Step 6: Setting up Pod Identity ---"
 
 CLUSTER_NAME=$(aws eks list-clusters --region "${REGION}" --query 'clusters[0]' --output text)
-ROLE_NAME="slemify-demo-orchestrator-bedrock"
-SA_NAME="demo-orchestrator"
+ROLE_NAME="slemify-k8s-autoscaling-orchestrator-bedrock"
+SA_NAME="k8s-autoscaling-orchestrator"
 
 if ! aws iam get-role --role-name "${ROLE_NAME}" >/dev/null 2>&1; then
   echo "  Creating IAM role: ${ROLE_NAME}"
@@ -186,7 +173,7 @@ fi
 # --- Step 7: Wait for rollout ---
 echo ""
 echo "--- Step 7: Waiting for orchestrator to be ready ---"
-kubectl rollout status deployment/demo-orchestrator -n "${NAMESPACE}" --timeout=120s
+kubectl rollout status deployment/k8s-autoscaling-orchestrator -n "${NAMESPACE}" --timeout=120s
 
 echo ""
 echo "=== Demo setup complete ==="
@@ -195,5 +182,5 @@ echo "To run the demo:"
 echo "  ./scripts/demo-terminal.sh"
 echo ""
 echo "Or manually:"
-echo "  kubectl port-forward -n slemify svc/demo-orchestrator 8000:80"
+echo "  kubectl port-forward -n slemify svc/k8s-autoscaling-orchestrator 8000:80"
 echo "  open http://localhost:8000"

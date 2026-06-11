@@ -11,32 +11,21 @@ set -euo pipefail
 REGION="${AWS_REGION:-eu-west-1}"
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 REGISTRY="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
-IMAGE="${REGISTRY}/slemify/demo-orchestrator:latest"
+IMAGE="${REGISTRY}/slemify/k8s-autoscaling-orchestrator:latest"
+EMBEDDING_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-embedding:latest"
 SCRIPT_DIR="$(dirname "$0")"
 DEMO_DIR="$(dirname "$SCRIPT_DIR")"
 
-echo "=== Building demo orchestrator ==="
-echo "  Image: ${IMAGE}"
-
-# Login to ECR
-aws ecr get-login-password --region "${REGION}" | \
-  docker login --username AWS --password-stdin "${REGISTRY}"
-
-# Create ECR repo if it doesn't exist
-aws ecr describe-repositories --repository-names slemify/demo-orchestrator \
-  --region "${REGION}" 2>/dev/null || \
-  aws ecr create-repository --repository-name slemify/demo-orchestrator \
-  --region "${REGION}" --image-scanning-configuration scanOnPush=true
-
-# Build and push
-docker build -t "${IMAGE}" "${DEMO_DIR}"
-docker push "${IMAGE}"
+echo "=== Building images (multi-arch) ==="
+bash "${SCRIPT_DIR}/build-images.sh"
 
 echo ""
 echo "=== Deploying to cluster ==="
 
-# Replace image placeholder and apply
-sed "s|REPLACE_WITH_ECR_IMAGE|${IMAGE}|g" "${DEMO_DIR}/k8s-manifest.yaml" | \
+# Replace image placeholders and apply
+sed -e "s|REPLACE_WITH_ECR_IMAGE|${IMAGE}|g" \
+    -e "s|REPLACE_WITH_EMBEDDING_IMAGE|${EMBEDDING_IMAGE}|g" \
+    "${DEMO_DIR}/k8s-manifest.yaml" | \
   kubectl apply -f -
 
 echo ""
@@ -46,8 +35,8 @@ echo "=== Setting up Pod Identity for Bedrock access ==="
 CLUSTER_NAME=$(kubectl config current-context | grep -oP '(?<=:cluster/)[^/]+' || \
   kubectl config current-context)
 
-ROLE_NAME="slemify-demo-orchestrator-bedrock"
-SA_NAME="demo-orchestrator"
+ROLE_NAME="slemify-k8s-autoscaling-orchestrator-bedrock"
+SA_NAME="k8s-autoscaling-orchestrator"
 NAMESPACE="slemify"
 
 # Create IAM role if needed
@@ -104,8 +93,8 @@ fi
 
 echo ""
 echo "=== Waiting for rollout ==="
-kubectl rollout status deployment/demo-orchestrator -n slemify --timeout=120s
+kubectl rollout status deployment/k8s-autoscaling-orchestrator -n slemify --timeout=120s
 
 echo ""
 echo "=== Done ==="
-echo "  Access: kubectl port-forward -n slemify svc/demo-orchestrator 8000:80"
+echo "  Access: kubectl port-forward -n slemify svc/k8s-autoscaling-orchestrator 8000:80"

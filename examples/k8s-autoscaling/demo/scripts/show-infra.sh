@@ -17,7 +17,7 @@ echo ""
 
 echo "=== Pods in slemify namespace ==="
 echo ""
-kubectl get pods -n slemify -l "app in (demo-orchestrator,k8s-autoscaling-triage-inference,k8s-autoscaling-auditor-inference,opensearch-cluster-master)" \
+kubectl get pods -n slemify -l "app in (k8s-autoscaling-orchestrator,k8s-autoscaling-triage-inference,k8s-autoscaling-auditor-inference,k8s-autoscaling-embedding,opensearch-cluster-master)" \
   -o custom-columns="\
 NAME:.metadata.name,\
 STATUS:.status.phase,\

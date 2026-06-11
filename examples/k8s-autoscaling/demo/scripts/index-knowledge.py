@@ -1,31 +1,35 @@
 """Index Karpenter and KEDA documentation into OpenSearch for RAG.
 
 Clones official doc repos, chunks markdown files, generates embeddings
-via Bedrock Titan, and indexes into OpenSearch k-NN.
+via the in-cluster TEI embedding pod (bge-base-en-v1.5), and indexes into
+OpenSearch k-NN.
 
 Usage:
   kubectl port-forward -n slemify svc/opensearch-cluster-master 9200:9200
+  kubectl port-forward -n slemify svc/k8s-autoscaling-embedding 8083:80
   python3 index-knowledge.py                    # Full reindex
   python3 index-knowledge.py --append --source=aws-blog  # Add blogs only
 
-Requires: pip install opensearch-py boto3 gitpython requests beautifulsoup4
+Requires: pip install opensearch-py httpx gitpython requests beautifulsoup4
 """
 
-import json
 import os
 import shutil
 import sys
 import tempfile
 
-import boto3
+import httpx
 from git import Repo
 from opensearchpy import OpenSearch
 
 # --- Configuration ---
 
 OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:9200")
-INDEX_NAME = "k8s-autoscaling-knowledge"
-EMBEDDING_MODEL = "amazon.titan-embed-text-v2:0"
+INDEX_NAME = os.environ.get("INDEX_NAME", "k8s-autoscaling-knowledge")
+# In-cluster embedding model (TEI serving bge-base-en-v1.5, 768 dimensions).
+# Must match the dimension in the index mapping and in server.py at query time.
+EMBEDDING_URL = os.environ.get("EMBEDDING_URL", "http://localhost:8083")
+EMBEDDING_DIM = 768
 CHUNK_SIZE = 2000  # chars (~500 tokens)
 CHUNK_OVERLAP = 200
 
@@ -75,8 +79,6 @@ BLOG_URLS = [
 ]
 
 # --- Shared clients ---
-
-bedrock = boto3.client("bedrock-runtime")
 
 
 def get_opensearch_client() -> OpenSearch:
@@ -182,15 +184,13 @@ def fetch_blogs() -> list[dict]:
 # --- Embedding and indexing ---
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Generate embeddings via Bedrock Titan Embeddings v2."""
-    embeddings = []
-    for text in texts:
-        resp = bedrock.invoke_model(
-            modelId=EMBEDDING_MODEL,
-            body=json.dumps({"inputText": text[:8000], "dimensions": 1024, "normalize": True}),
-        )
-        embeddings.append(json.loads(resp["body"].read())["embedding"])
-    return embeddings
+    """Generate embeddings via the in-cluster TEI pod (bge-base-en-v1.5)."""
+    # TEI accepts a batch of inputs and returns one embedding per input.
+    truncated = [t[:8000] for t in texts]
+    with httpx.Client(timeout=60) as client:
+        resp = client.post(f"{EMBEDDING_URL}/embed", json={"inputs": truncated})
+        resp.raise_for_status()
+        return resp.json()
 
 
 def index_chunks(client: OpenSearch, chunks: list[dict]) -> int:
@@ -228,8 +228,12 @@ def create_index(client: OpenSearch):
                 "section": {"type": "keyword"},
                 "embedding": {
                     "type": "knn_vector",
-                    "dimension": 1024,
-                    "method": {"name": "hnsw", "space_type": "cosinesimil", "engine": "faiss"},
+                    "dimension": EMBEDDING_DIM,
+                    # Embeddings are L2-normalized (unit vectors), so inner
+                    # product ranks identically to cosine similarity. faiss
+                    # supports innerproduct across OpenSearch versions, whereas
+                    # cosinesimil + faiss is only valid from 2.19+.
+                    "method": {"name": "hnsw", "space_type": "innerproduct", "engine": "faiss"},
                 },
             }
         },
@@ -242,11 +246,17 @@ def create_index(client: OpenSearch):
 def main():
     print("=== Indexing Knowledge Base ===")
 
+    global INDEX_NAME
+
     append = "--append" in sys.argv
     source_filter = None
     for arg in sys.argv[1:]:
         if arg.startswith("--source="):
             source_filter = arg.split("=", 1)[1]
+        elif arg.startswith("--index-name="):
+            INDEX_NAME = arg.split("=", 1)[1]
+
+    print(f"  Index: {INDEX_NAME}")
 
     client = get_opensearch_client()
 

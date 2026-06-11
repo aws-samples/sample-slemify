@@ -29,8 +29,8 @@ fi
 tmux kill-session -t "$SESSION" 2>/dev/null
 
 # Start port-forward in background
-echo "Starting port-forward (svc/demo-orchestrator -> localhost:${PORT})..."
-kubectl port-forward -n slemify svc/demo-orchestrator "${PORT}:80" &
+echo "Starting port-forward (svc/k8s-autoscaling-orchestrator -> localhost:${PORT})..."
+kubectl port-forward -n slemify svc/k8s-autoscaling-orchestrator "${PORT}:80" &
 PF_PID=$!
 sleep 2
 
@@ -49,7 +49,7 @@ tmux new-session -d -s "$SESSION" -n "demo"
 
 # Top pane: orchestrator logs
 tmux send-keys -t "$SESSION" \
-  'echo "=== Orchestrator (routing + RAG + streaming) ===" && kubectl logs -n slemify deployment/demo-orchestrator -f --tail=5' Enter
+  'echo "=== Orchestrator (routing + RAG + streaming) ===" && kubectl logs -n slemify deployment/k8s-autoscaling-orchestrator -f --tail=5' Enter
 
 # Split horizontally for bottom row
 tmux split-window -t "$SESSION" -v -p 40

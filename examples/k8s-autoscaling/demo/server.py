@@ -25,8 +25,11 @@ TRIAGE_URL = os.environ.get("TRIAGE_URL", "http://localhost:8081")
 AUDITOR_URL = os.environ.get("AUDITOR_URL", "http://localhost:8082")
 OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:9200")
 LLM_MODEL = os.environ.get("LLM_MODEL", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0")
-EMBEDDING_MODEL = "amazon.titan-embed-text-v2:0"
-INDEX_NAME = "k8s-autoscaling-knowledge"
+# In-cluster embedding model served by Text Embeddings Inference (TEI).
+# bge-base-en-v1.5 produces 768-dimensional vectors. Must match the dimension
+# used at index time in index-knowledge.py.
+EMBEDDING_URL = os.environ.get("EMBEDDING_URL", "http://localhost:8083")
+INDEX_NAME = os.environ.get("INDEX_NAME", "k8s-autoscaling-knowledge")
 
 TRIAGE_INSTRUCTION = (
     "Classify this Kubernetes autoscaling support query into a routing "
@@ -48,6 +51,15 @@ LLM_INSTRUCTION = (
 # --- Shared clients (initialized once) ---
 
 bedrock = boto3.client("bedrock-runtime")
+
+
+def embed_query(text: str) -> list[float]:
+    """Embed text via the in-cluster TEI embedding pod (bge-base-en-v1.5)."""
+    with httpx.Client(timeout=10) as client:
+        resp = client.post(f"{EMBEDDING_URL}/embed", json={"inputs": text[:8000]})
+        resp.raise_for_status()
+        # TEI returns a list of embeddings, one per input.
+        return resp.json()[0]
 
 
 def _parse_opensearch_url() -> OpenSearch:
@@ -115,45 +127,14 @@ async def warmup():
         print(f"  Warmup {name}: {status}")
 
     try:
-        resp = bedrock.invoke_model(
-            modelId=EMBEDDING_MODEL,
-            body=json.dumps({"inputText": "warmup", "dimensions": 1024, "normalize": True}),
-        )
-        resp["body"].read()
-        print("  Warmup bedrock: ok")
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, embed_query, "warmup")
+        print("  Warmup embedding: ok")
     except Exception as e:
-        print(f"  Warmup bedrock: failed ({e})")
+        print(f"  Warmup embedding: failed ({e})")
 
     print("  All services warmed up")
     _ready = True
-
-
-# --- Keep-alive background task ---
-
-@app.on_event("startup")
-async def start_keepalive():
-    """Periodically ping Bedrock to keep credentials and connections warm."""
-    asyncio.create_task(_keepalive_loop())
-
-
-async def _keepalive_loop():
-    """Send a lightweight embedding request every 5 minutes to prevent credential/connection expiry."""
-    while True:
-        await asyncio.sleep(300)  # 5 minutes
-        try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, _ping_bedrock)
-        except Exception as e:
-            print(f"  Keepalive failed: {e}")
-
-
-def _ping_bedrock():
-    """Minimal Bedrock call to keep the session alive."""
-    resp = bedrock.invoke_model(
-        modelId=EMBEDDING_MODEL,
-        body=json.dumps({"inputText": "keepalive", "dimensions": 1024, "normalize": True}),
-    )
-    resp["body"].read()
 
 
 # --- Core functions ---
@@ -210,11 +191,7 @@ def classify(text: str) -> dict:
 
 def retrieve(query: str, k: int = 3) -> list[str]:
     """Retrieve relevant docs from OpenSearch via k-NN vector search."""
-    resp = bedrock.invoke_model(
-        modelId=EMBEDDING_MODEL,
-        body=json.dumps({"inputText": query[:8000], "dimensions": 1024, "normalize": True}),
-    )
-    embedding = json.loads(resp["body"].read())["embedding"]
+    embedding = embed_query(query)
 
     results = opensearch.search(
         index=INDEX_NAME,
