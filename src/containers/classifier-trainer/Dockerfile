@@ -3,7 +3,9 @@ FROM python:3.12-slim@sha256:46cb7cc2877e60fbd5e21a9ae6115c30ace7a077b9f8772da87
 WORKDIR /app
 
 COPY requirements.txt .
-# CPU-only torch (the default wheel drags ~1.5GB of CUDA libs we don't need).
+# Install CPU torch from the PyTorch CPU index first, then the rest. torch is
+# pinned to the same version in requirements.txt so the second resolve sees it
+# already satisfied and does not pull the ~1.5GB CUDA wheel.
 RUN pip install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu \
     && pip install --no-cache-dir -r requirements.txt
 
