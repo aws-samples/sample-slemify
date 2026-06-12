@@ -286,8 +286,6 @@ Training inputs need to reflect the mess that production data contains. The type
 
 The generation prompt asks the LLM to vary noise levels across examples: some clean, some messy, some extremely noisy. A model trained only on clean text will fail on noisy production inputs. A model trained on diverse noise profiles learns to focus on the semantic signal rather than surface-level formatting.
 
-> For a concrete example of noisy data across multiple noise profiles, see the [support-intent-noisy](../../examples/support-intent-noisy/) example.
-
 ## References
 
 - [Phi-1: Textbooks Are All You Need](https://arxiv.org/abs/2306.11644) (Microsoft, 2023). Demonstrates that high-quality synthetic data can match web-scale training data.

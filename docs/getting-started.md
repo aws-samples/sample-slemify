@@ -275,5 +275,5 @@ At 10,000 queries/day with 85% handled by the SLM: ~$170/mo total vs ~$3,000/mo 
 
 - Read the [Serving deep dive](deep-dive/serving.md) for autoscaling, TTFT optimization, and startup patterns
 - Read the [Data deep dive](deep-dive/data.md) for training data best practices
-- Try the [Support Intent example](../examples/support-intent-noisy/) for a simpler classification task
+- Try the [K8s Autoscaling Triage example](../examples/k8s-autoscaling/triage/) for a classification task
 - Add your own domain knowledge to the RAG index

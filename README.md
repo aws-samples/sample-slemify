@@ -68,45 +68,41 @@ The output is a GGUF model file in S3 and a production readiness report. The ser
 apiVersion: slemify/v1
 
 project:
-  name: support-intent-noisy
+  name: k8s-autoscaling-triage
+  task: classification
   domain: >
-    Email triage for customer support. Extract intent and sentiment
-    from noisy, unstructured emails containing OCR artifacts,
-    mobile-device typos, conversational tangents, and corrupted
-    character encodings.
+    Classify Kubernetes autoscaling support queries into a routing
+    category. Each message is classified into exactly one category:
+    karpenter_config, keda_config, hpa_config, pdb_disruption,
+    spot_interruption, multi_resource, or noise for off-topic messages.
   labels:
-    intent:
-      - refund_request
-      - setup_help
-      - billing_question
-      - technical_issue
-      - feedback
-      - account_change
-      - shipping_inquiry
-    sentiment:
-      - angry
-      - frustrated
-      - neutral
-      - satisfied
+    routing:
+      - karpenter_config
+      - keda_config
+      - hpa_config
+      - pdb_disruption
+      - spot_interruption
+      - multi_resource
+      - noise
 
 model:
-  base: ""  # HuggingFace model ID
-  quantize: q4_k_m
+  base: ""       # encoder model ID (e.g. BAAI/bge-base-en-v1.5)
+  head: logistic # classifier head: logistic | linear | mlp
 
 data:
   bucket: slemify-data
-  path: support-intent-noisy/data/
+  path: k8s-autoscaling/data/
   sources:
-    - path: emails/
+    - path: queries/
       type: raw
   synthetic:
     model: eu.anthropic.claude-sonnet-4-6
-    pairs: 800
+    pairs: 1200
   evaluation:
     model: eu.anthropic.claude-sonnet-4-6
-    pairs: 100
+    pairs: 150
     sources:
-      - path: eval-emails/
+      - path: eval-queries/
         type: raw
 
 training:
@@ -116,8 +112,8 @@ training:
 ### 2. Upload your training data
 
 ```bash
-aws s3 sync ./data/emails s3://slemify-data/support-intent-noisy/data/emails/
-aws s3 sync ./data/eval-emails s3://slemify-data/support-intent-noisy/data/eval-emails/
+aws s3 sync ./data/queries s3://slemify-data/k8s-autoscaling/data/queries/
+aws s3 sync ./data/eval-queries s3://slemify-data/k8s-autoscaling/data/eval-queries/
 ```
 
 ### 3. Deploy
@@ -158,8 +154,7 @@ Inference cost depends on how you deploy. The reference deployment (llama.cpp on
 
 ## Examples
 
-- [Support Intent (Noisy)](examples/support-intent-noisy/). Classify messy customer support emails into intent categories
-- [K8s Autoscaling Auditor](examples/k8s-autoscaling/). Tiered SLM system: a 4B triage classifier routes queries, an 8B auditor produces structured reasoning about Karpenter/KEDA/HPA misconfigurations
+- [K8s Autoscaling Auditor](examples/k8s-autoscaling/). Tiered SLM system: a triage classifier routes queries, an 8B auditor produces structured reasoning about Karpenter/KEDA/HPA misconfigurations
 
 ## Deep Dives
 

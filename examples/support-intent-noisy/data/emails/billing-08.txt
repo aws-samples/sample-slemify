@@ -1,3 +1,0 @@
-Hello, I purchased a Cloud-in-a-Box using a company purchase order (PO-2026-1234) but the invoice was sent to my personal email instead of our AP department. Can you reissue the invoice to accounts.payable@bigcorp.com and change the billing entity from my name to BigCorp Inc, Tax ID 12-3456789? Order CBX-70102.
-
-Thanks, Jennifer Park, Procurement

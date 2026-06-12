@@ -1,1 +1,0 @@
-<p>CBX-45678: USB 2.0 devices cause entire USB controller to reset. USB 3.0 fine. Tested keyboard, mouse, flash drive &mdash; all trigger it. Firmware up to&nbsp;date. Known&nbsp;bug?</p>

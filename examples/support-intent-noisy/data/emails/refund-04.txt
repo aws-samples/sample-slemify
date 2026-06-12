@@ -1,2 +1,0 @@
-Dear Support Team, I am writing as Senior Infrastructure Architect at Pemberton & Associates to request a full refund for order CBX-42901. Our 47-point hardware verification found kernel panics, thermal throttling, and a PCIe riser defect. Please process the refund.
-Jonathan Pemberton-Whitfield III

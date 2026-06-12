@@ -1,3 +1,0 @@
-We just received 5 Cloud-in-a-Box units for our new branch office (CBX-BULK-3301). Hardware passed our intake inspection but we need help with the initial cluster configuration. Specifically: how do we set up the units to communicate with each other in a mesh network? The documentation only covers single-unit setup. We need all 5 units to share storage and compute resources. Is there a clustering guide or API documentation available?
-
-Sandra Kim, Network Engineer
