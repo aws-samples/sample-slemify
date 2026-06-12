@@ -69,13 +69,13 @@ fallback instead):
   knowable up front, a prompted LLM's flexibility wins.
 
 **Workaround when you genuinely need more context.** The 512-token cap is a
-property of the *chosen encoder*, not the approach. Longer-context encoders exist
-and drop into the same path: ModernBERT extends to **8,192 tokens** and
-Qwen3-Embedding to **32,768** ([vLLM semantic router](https://vllm.ai/blog/semantic-router-modular)).
-Set `model.base` to one of those for long-input routing — at the cost of a larger,
-somewhat slower encoder. Before reaching for that, prefer cheaper fixes: truncate
-or pre-summarize to the routing-relevant section, or route on a salient slice
-(subject line, first paragraph, the YAML block) rather than the whole payload.
+property of the *chosen encoder*, not the approach. Longer-context encoders
+exist — some extend to several thousand tokens, others to tens of thousands —
+and drop into the same path: point `model.base` at one for long-input routing,
+at the cost of a larger, somewhat slower encoder. Before reaching for that,
+prefer cheaper fixes: truncate or pre-summarize to the routing-relevant section,
+or route on a salient slice (subject line, first paragraph, the YAML block)
+rather than the whole payload.
 
 The remainder of this document covers the generation (llama.cpp + GGUF) path.
 
