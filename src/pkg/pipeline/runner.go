@@ -108,7 +108,8 @@ func (r *Runner) persistState(ctx context.Context) {
 // Stages with status "completed" and valid artifacts are skipped.
 func (r *Runner) Run(ctx context.Context, startStage Stage) error {
 	startIdx := 0
-	if startStage != "" {
+	explicitStart := startStage != ""
+	if explicitStart {
 		for i, s := range StageOrder {
 			if s == startStage {
 				startIdx = i
@@ -120,11 +121,16 @@ func (r *Runner) Run(ctx context.Context, startStage Stage) error {
 	for i := startIdx; i < len(StageOrder); i++ {
 		stage := StageOrder[i]
 
-		// Check if stage can be skipped (already completed with valid artifacts)
-		if result, ok := r.state.Stages[stage]; ok {
-			if result.Status == StatusCompleted && len(result.Artifacts) > 0 {
-				r.onProgress(stage, StatusCompleted, "skipped (artifacts exist)")
-				continue
+		// Check if stage can be skipped (already completed with valid artifacts).
+		// When the user explicitly requests a start stage, force it (and the
+		// stages after it) to re-run rather than trusting persisted state —
+		// the prior artifacts may have been removed or regenerated out of band.
+		if !(explicitStart && i >= startIdx) {
+			if result, ok := r.state.Stages[stage]; ok {
+				if result.Status == StatusCompleted && len(result.Artifacts) > 0 {
+					r.onProgress(stage, StatusCompleted, "skipped (artifacts exist)")
+					continue
+				}
 			}
 		}
 

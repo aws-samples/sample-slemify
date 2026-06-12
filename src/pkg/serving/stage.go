@@ -24,12 +24,19 @@ import (
 // After deployment is ready, submits a report Job that evaluates the model.
 func Stage(client *k8s.Client, cfg *config.ExpertConfig, sized config.SizedConfig, ns string, pc *pipeline.PipelineContext) pipeline.StageFunc {
 	return func(ctx context.Context) ([]string, error) {
-		manifests := GenerateInferenceManifests(cfg, sized, ns, pc)
+		var manifests *InferenceManifests
+		if cfg.Project.IsEncoderHead() {
+			manifests = GenerateClassifierInferenceManifests(cfg, sized, ns, pc)
+		} else {
+			manifests = GenerateInferenceManifests(cfg, sized, ns, pc)
+		}
 
 		fmt.Printf("  Instance: %s\n", sized.InferenceInstance)
 
-		// Apply S3 mount PV/PVC if Mountpoint CSI driver is being used
-		if pc.UseS3Mount {
+		// Apply S3 mount PV/PVC if Mountpoint CSI driver is being used.
+		// Only the generative (GGUF) path mounts a model from S3; the classifier
+		// loads its head.json directly via the AWS SDK at startup.
+		if pc.UseS3Mount && !cfg.Project.IsEncoderHead() {
 			fmt.Printf("  Setting up S3 mount for model (Mountpoint CSI driver)...\n")
 			s3Manifests := S3MountManifests(cfg.Project.Name, cfg.Data.Bucket, ns)
 			for _, doc := range pipeline.SplitYAMLDocs(s3Manifests) {
@@ -65,6 +72,18 @@ func Stage(client *k8s.Client, cfg *config.ExpertConfig, sized config.SizedConfi
 		}
 
 		endpoint := fmt.Sprintf("http://%s-inference.%s.svc.cluster.local:8080", cfg.Project.Name, ns)
+
+		if cfg.Project.IsEncoderHead() {
+			// Classification metrics were computed by the training job (exact-match
+			// accuracy + per-class P/R/F1) and written to metrics.json. Surface
+			// those instead of running the generative LLM-as-judge report.
+			if m, err := report.LoadClassificationMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
+				fmt.Printf("  ⚠ Could not load classification metrics: %v\n", err)
+			} else {
+				report.PrintEncoderHeadMetrics(m)
+			}
+			return []string{endpoint}, nil
+		}
 
 		// Run classification report as a K8s Job (direct access to inference service)
 		fmt.Printf("  Running classification report (in-cluster)...\n")

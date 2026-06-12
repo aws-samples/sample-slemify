@@ -173,6 +173,31 @@ func TestResumeFromStage(t *testing.T) {
 	}
 }
 
+func TestExplicitStartStageForcesRerun(t *testing.T) {
+	// Even if DATA is marked completed with artifacts, explicitly starting from
+	// DATA must re-run it (stale state may reference removed/regenerated artifacts).
+	state := NewState("test-project")
+	state.Stages[StageData] = StageResult{
+		Stage:     StageData,
+		Status:    StatusCompleted,
+		Artifacts: []string{"s3://bucket/train.jsonl"},
+	}
+
+	runner := NewRunner("test-project", state)
+	runner.SetProgressCallback(func(Stage, Status, string) {})
+
+	var executed []Stage
+	registerAllStages(runner, &executed)
+
+	if err := runner.Run(context.Background(), StageData); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(executed) == 0 || executed[0] != StageData {
+		t.Errorf("explicit start at DATA should re-run DATA, executed: %v", executed)
+	}
+}
+
 func TestUnregisteredStageReturnsError(t *testing.T) {
 	state := NewState("test-project")
 	runner := NewRunner("test-project", state)
