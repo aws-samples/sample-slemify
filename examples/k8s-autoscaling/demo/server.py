@@ -29,7 +29,13 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "eu.anthropic.claude-sonnet-4-5-20250929
 # bge-base-en-v1.5 produces 768-dimensional vectors. Must match the dimension
 # used at index time in index-knowledge.py.
 EMBEDDING_URL = os.environ.get("EMBEDDING_URL", "http://localhost:8083")
+# In-cluster cross-encoder re-ranker. Scores the OpenSearch candidate set and
+# keeps only the most relevant chunks, so the auditor prompt stays small.
+RERANKER_URL = os.environ.get("RERANKER_URL", "http://localhost:8084")
 INDEX_NAME = os.environ.get("INDEX_NAME", "k8s-autoscaling-knowledge")
+# Candidates pulled from vector search before re-ranking. The reranker scores
+# all of these and the orchestrator keeps only the top few for the SLM/LLM.
+RETRIEVE_CANDIDATES = 10
 
 TRIAGE_INSTRUCTION = (
     "Classify this Kubernetes autoscaling support query into a routing "
@@ -60,6 +66,28 @@ def embed_query(text: str) -> list[float]:
         resp.raise_for_status()
         # TEI returns a list of embeddings, one per input.
         return resp.json()[0]
+
+
+def rerank_docs(query: str, docs: list[str], top_k: int) -> list[str]:
+    """Re-rank candidate docs with the cross-encoder, keeping the best top_k.
+
+    Falls back to the original order (truncated) if the reranker is unavailable,
+    so retrieval still works even if the reranker pod is down.
+    """
+    if not docs:
+        return []
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.post(
+                f"{RERANKER_URL}/rerank",
+                json={"query": query[:8000], "documents": docs, "top_k": top_k},
+            )
+            resp.raise_for_status()
+            results = resp.json()["results"]
+        return [docs[r["index"]] for r in results]
+    except Exception as e:
+        print(f"  Rerank failed, using vector order: {e}")
+        return docs[:top_k]
 
 
 def _parse_opensearch_url() -> OpenSearch:
@@ -132,6 +160,13 @@ async def warmup():
         print("  Warmup embedding: ok")
     except Exception as e:
         print(f"  Warmup embedding: failed ({e})")
+
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, rerank_docs, "warmup", ["warmup document"], 1)
+        print("  Warmup reranker: ok")
+    except Exception as e:
+        print(f"  Warmup reranker: failed ({e})")
 
     print("  All services warmed up")
     _ready = True
@@ -279,7 +314,8 @@ async def query_endpoint(q: Query):
 
         # Step 3: Low confidence -> LLM fallback with RAG
         if result["confidence"] in ("low", "unknown"):
-            docs = retrieve(q.text, k=5)
+            candidates = retrieve(q.text, k=RETRIEVE_CANDIDATES)
+            docs = rerank_docs(q.text, candidates, top_k=5)
             if docs:
                 yield sse("status", text=f"Retrieved {len(docs)} relevant docs from knowledge base")
             yield sse("status", text="Low confidence, escalating to LLM API...")
@@ -291,7 +327,8 @@ async def query_endpoint(q: Query):
 
         # Step 4: High confidence -> RAG + Auditor SLM
         yield sse("status", text="Searching knowledge base...")
-        docs = retrieve(q.text, k=2)
+        candidates = retrieve(q.text, k=RETRIEVE_CANDIDATES)
+        docs = rerank_docs(q.text, candidates, top_k=2)
         if docs:
             yield sse("status", text=f"Retrieved {len(docs)} relevant docs from knowledge base")
         yield sse("model", name="Auditor SLM (8B, CPU)")

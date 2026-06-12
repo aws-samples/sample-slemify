@@ -61,6 +61,8 @@ spec:
               value: "http://opensearch-cluster-master.slemify:9200"
             - name: EMBEDDING_URL
               value: "http://k8s-autoscaling-embedding.slemify:80"
+            - name: RERANKER_URL
+              value: "http://k8s-autoscaling-reranker.slemify:80"
             - name: INDEX_NAME
               value: "k8s-autoscaling-knowledge"
             - name: LLM_MODEL
@@ -214,6 +216,113 @@ spec:
   type: ClusterIP
   selector:
     app: k8s-autoscaling-embedding
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-autoscaling-reranker
+  namespace: slemify
+  labels:
+    app: k8s-autoscaling-reranker
+    slemify.io/component: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k8s-autoscaling-reranker
+  template:
+    metadata:
+      labels:
+        app: k8s-autoscaling-reranker
+        slemify.io/component: demo
+    spec:
+      # The reranker service does not call the Kubernetes API.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+        slemify.io/workload: slm
+      tolerations:
+        - key: slemify.io/slm
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: reranker
+          image: REPLACE_WITH_RERANKER_IMAGE
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            # Cross-encoder scores ~10 short pairs per request. Thread counts
+            # are tied to the CPU request (not the node's core count) so the
+            # pod only uses the capacity it asked the scheduler for.
+            - name: OMP_NUM_THREADS
+              value: "6"
+            - name: MKL_NUM_THREADS
+              value: "6"
+            # torch/transformers scratch space (root filesystem is read-only).
+            - name: HOME
+              value: "/tmp"
+            - name: TMPDIR
+              value: "/tmp"
+          resources:
+            requests:
+              # Memory limit must equal request (security standard).
+              # bge-reranker-base (~280MB) plus torch runtime fits in 2Gi.
+              # CPU request drives the thread counts above; reranking is
+              # compute-bound, so more cores cut the cross-encoder latency.
+              cpu: "6"
+              memory: 2Gi
+            limits:
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            # Model load + warmup takes a few seconds on CPU.
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-autoscaling-reranker
+  namespace: slemify
+  labels:
+    app: k8s-autoscaling-reranker
+    slemify.io/component: demo
+spec:
+  type: ClusterIP
+  selector:
+    app: k8s-autoscaling-reranker
   ports:
     - port: 80
       targetPort: 8080

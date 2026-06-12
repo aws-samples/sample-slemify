@@ -26,7 +26,11 @@ User submits a K8s config question via chat UI
                 |
                 v
         [OpenSearch - Vector DB, CPU, ~100ms]
-          Retrieves relevant Karpenter/KEDA docs, examples, known issues
+          Retrieves 10 candidate Karpenter/KEDA doc chunks
+                |
+                v
+        [Reranker - bge-reranker-base cross-encoder, CPU]
+          Scores all 10 candidates, keeps the best 2
                 |
                 v
         [Auditor SLM - 8B, CPU, streaming ~14s]
@@ -45,6 +49,7 @@ User submits a K8s config question via chat UI
 | Orchestrator | Python FastAPI | CPU pod | Routes between triage, RAG, auditor, LLM |
 | Triage SLM | llama.cpp | c8g (Graviton4 CPU) | Intent classification, 1.5s |
 | Embedding | sentence-transformers (bge-base-en-v1.5) | c8g (Graviton4 CPU) | In-cluster query/doc embeddings, 768d |
+| Reranker | sentence-transformers (bge-reranker-base) | c8g (Graviton4 CPU) | Cross-encoder re-ranks top-10 candidates to best 2 |
 | OpenSearch | OpenSearch k-NN | CPU pod | Vector search over 3900+ doc chunks |
 | Auditor SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed |
 | LLM API | Bedrock (Sonnet 4.5) | Managed | Fallback for low confidence queries |
@@ -196,8 +201,8 @@ ARM64_BUILD_HOST=my-graviton-host ./scripts/setup-demo.sh
 The setup script:
 1. Verifies SLM models are deployed
 2. Deploys OpenSearch (if not already running)
-3. Builds and pushes the orchestrator + embedding images (native arm64)
-4. Deploys the embedding service and orchestrator pods (Pod Identity for Bedrock LLM fallback)
+3. Builds and pushes the orchestrator + embedding + reranker images (multi-arch)
+4. Deploys the embedding, reranker, and orchestrator pods (Pod Identity for Bedrock LLM fallback)
 5. Indexes the knowledge base (~3900 chunks from Karpenter, KEDA, EKS docs + blogs) using the in-cluster embedding service
 6. Waits for everything to be ready
 
@@ -210,6 +215,7 @@ kubectl port-forward -n slemify svc/k8s-autoscaling-triage-inference 8081:8080
 kubectl port-forward -n slemify svc/k8s-autoscaling-auditor-inference 8082:8080
 kubectl port-forward -n slemify svc/opensearch-cluster-master 9200:9200
 kubectl port-forward -n slemify svc/k8s-autoscaling-embedding 8083:80
+kubectl port-forward -n slemify svc/k8s-autoscaling-reranker 8084:80
 
 # Install deps
 pip install fastapi uvicorn httpx opensearch-py boto3
@@ -232,7 +238,7 @@ kubectl port-forward -n slemify svc/k8s-autoscaling-orchestrator 8000:80
 ```
 
 The deploy script:
-1. Builds the orchestrator + embedding images and pushes to ECR
+1. Builds the orchestrator + embedding + reranker images and pushes to ECR
 2. Creates the ServiceAccount, Deployments, and Services
 3. Sets up an IAM role with Bedrock access (LLM fallback) via EKS Pod Identity
 4. Waits for the rollout to complete
@@ -273,7 +279,7 @@ python3 scripts/index-knowledge.py --append --source=karpenter
 
 ## The Story This Tells
 
-1. CPUs handle the full AI pipeline (triage + retrieval + generation)
+1. CPUs handle the full AI pipeline (triage + embedding + reranking + retrieval + generation)
 2. Fine-tuned SLMs are more accurate than general LLMs on domain-specific tasks
 3. RAG grounds the response in current documentation (reduces hallucinations)
 4. The tiered architecture (SLM router + SLM expert + LLM fallback) optimizes cost

@@ -22,6 +22,7 @@ ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 REGISTRY="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
 IMAGE="${REGISTRY}/slemify/k8s-autoscaling-orchestrator:latest"
 EMBEDDING_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-embedding:latest"
+RERANKER_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-reranker:latest"
 NAMESPACE="slemify"
 
 echo "=== Demo Setup ==="
@@ -70,17 +71,19 @@ bash "${SCRIPT_DIR}/build-images.sh"
 echo "  Images pushed"
 echo ""
 
-# --- Step 4: Deploy manifests (embedding + orchestrator) ---
+# --- Step 4: Deploy manifests (embedding + reranker + orchestrator) ---
 echo "--- Step 4: Deploying manifests ---"
 
 sed -e "s|REPLACE_WITH_ECR_IMAGE|${IMAGE}|g" \
     -e "s|REPLACE_WITH_EMBEDDING_IMAGE|${EMBEDDING_IMAGE}|g" \
+    -e "s|REPLACE_WITH_RERANKER_IMAGE|${RERANKER_IMAGE}|g" \
     "${DEMO_DIR}/k8s-manifest.yaml" | \
   kubectl apply -f -
 
-echo "  Waiting for embedding service to be ready..."
+echo "  Waiting for embedding and reranker services to be ready..."
 kubectl rollout status deployment/k8s-autoscaling-embedding -n "${NAMESPACE}" --timeout=300s
-echo "  Embedding service: ready"
+kubectl rollout status deployment/k8s-autoscaling-reranker -n "${NAMESPACE}" --timeout=300s
+echo "  Embedding + reranker services: ready"
 echo ""
 
 # --- Step 5: Index knowledge base ---
