@@ -64,14 +64,38 @@ func DefaultBuildSpecs() []BuildInstanceSpec {
 }
 
 // UserDataScript returns the cloud-init script that installs Docker.
+// It retries the package install (transient repo/mirror failures are the main
+// source of build flakiness) and writes /tmp/build-ready only after Docker is
+// confirmed running, so the controller can wait on a definitive signal.
 func UserDataScript() string {
 	return `#!/bin/bash
-set -e
-yum install -y docker
+# Do NOT 'set -e' for the whole script: a single transient yum failure must not
+# abort before we can retry. We gate the ready-marker on Docker actually running.
+install_docker() {
+  for i in $(seq 1 5); do
+    yum install -y docker && return 0
+    echo "yum install docker attempt $i failed; retrying in 10s" >&2
+    sleep 10
+  done
+  return 1
+}
+
+install_docker || { echo "docker install failed after retries" >&2; exit 1; }
 systemctl enable docker
 systemctl start docker
 usermod -aG docker ec2-user
-touch /tmp/build-ready
+
+# Wait until the daemon actually answers before signalling readiness.
+for i in $(seq 1 30); do
+  if docker info >/dev/null 2>&1; then
+    touch /tmp/build-ready
+    echo "build-ready"
+    exit 0
+  fi
+  sleep 2
+done
+echo "docker did not become ready" >&2
+exit 1
 `
 }
 

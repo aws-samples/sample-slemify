@@ -41,16 +41,24 @@ func RemoteBuild(ctx context.Context, cfg RemoteBuildConfig) error {
 		return fmt.Errorf("SSM connect: %w", err)
 	}
 
-	// Wait for Docker to be ready (user-data may still be running)
-	fmt.Printf("  [%s] Waiting for Docker...\n", cfg.Instance.Arch)
-	for i := 0; i < 60; i++ {
-		if _, err := client.Run(ctx, "sudo docker info"); err == nil {
+	// Wait for Docker to be ready. The user-data script writes /tmp/build-ready
+	// only after the Docker daemon answers, so we wait on that definitive marker
+	// rather than racing the daemon directly. Package install can be slow on
+	// first boot (repo/mirror latency), so allow up to 10 minutes.
+	fmt.Printf("  [%s] Waiting for Docker (build-ready marker)...\n", cfg.Instance.Arch)
+	ready := false
+	for i := 0; i < 120; i++ {
+		if _, err := client.Run(ctx, "test -f /tmp/build-ready && sudo docker info"); err == nil {
+			ready = true
 			break
 		}
-		if i == 59 {
-			return fmt.Errorf("Docker not ready after 300s")
-		}
 		time.Sleep(5 * time.Second)
+	}
+	if !ready {
+		// Surface the bootstrap log so the failure is diagnosable instead of opaque.
+		diag, _ := client.Run(ctx, "sudo cat /var/log/cloud-init-output.log 2>/dev/null | tail -n 40")
+		return fmt.Errorf("Docker not ready after 600s on %s; cloud-init tail:\n%s",
+			cfg.Instance.Arch, diag)
 	}
 
 	// Upload container source via S3

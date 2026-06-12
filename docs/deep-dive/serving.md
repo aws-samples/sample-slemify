@@ -13,10 +13,12 @@ How a model is served depends on its `project.task`:
 - **Generation** (`task: generation`) → **llama.cpp + GGUF**. The rest of this
   document describes this path: S3-mounted GGUF, llama.cpp flags, KEDA scaling on
   queue depth, TTFT/streaming. This is the bulk of the serving surface.
-- **Classification** (`task: classification`) → **encoder + head**. A CPU pod
-  runs Slemify's managed encoder image in "classifier mode": it loads the trained
-  `head.json` from S3, embeds the query in-process, applies the logistic head,
-  and returns a label. There is no GGUF and no llama.cpp.
+- **Classification** (`task: classification`) → **encoder + head, served via ONNX**.
+  A lean CPU pod (onnxruntime + tokenizers, **no torch**) downloads the project's
+  `encoder.onnx`, `tokenizer.json`, and `head.json` from S3, embeds the query
+  with ONNX Runtime (CLS pooling + L2 normalize), applies the logistic head, and
+  returns a label. The encoder is exported to ONNX by the training job, so the
+  embeddings match training exactly and serving carries no heavyweight ML deps.
 
 The classifier serving pod deliberately exposes the **same OpenAI-compatible
 `/v1/chat/completions` contract** as the generative path, returning

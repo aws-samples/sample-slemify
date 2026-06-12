@@ -16,7 +16,7 @@ path is summarized here and shares the data and report stages.
 | Engine | Unsloth + TRL (SFTTrainer) | scikit-learn (logistic regression) |
 | Hardware | GPU (Spot) | **CPU** |
 | Time | ~10-30 min | **seconds to a couple of minutes** |
-| Output | GGUF (quantized) | `head.json` + `labels.json` |
+| Output | GGUF (quantized) | `head.json` + `encoder.onnx` + `tokenizer.json` |
 | Why | The model must *generate* text | The encoder already understands language; only a decision rule is learned |
 
 The classification path is fast because nothing in the billion-parameter encoder
