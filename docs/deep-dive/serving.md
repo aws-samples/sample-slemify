@@ -34,6 +34,49 @@ is dominated by the encoder forward pass (~25ms for bge-base on CPU) — there i
 no token-by-token decode phase, so the latency-planning tables below (which model
 the generation decode loop) do not apply to it.
 
+### Context window: a fixed 512-token cap (no latency penalty inside it)
+
+The classification path behaves very differently from a generative SLM when it
+comes to input size, and it's important not to apply the SLM context rules to it:
+
+- **Hard cap, not a latency tradeoff.** `bge-base` has a fixed maximum of **512
+  tokens** (~350-400 words). Input beyond that is **silently truncated** — only
+  the first ~512 tokens are embedded. Unlike a generative SLM (where bigger input
+  means linearly more time, per the tables below), the encoder cannot use more
+  than 512 tokens at all.
+- **But flat-fast within the window.** Embedding 50 tokens vs 512 tokens is a
+  single forward pass either way — a few milliseconds apart, not seconds. There
+  is no "context kills latency" problem inside the window.
+
+**Where the classifier is the right tool** (short input, fixed labels — the
+routing/intent/guardrail sweet spot): a Slack-style question, a single config or
+log snippet, an error message, an email subject+body. The routing-relevant signal
+is stated up front and fits comfortably under 512 tokens. Independent benchmarks
+back this up: fine-tuned BERT-family encoders match or beat zero-/few-shot LLM
+prompting on fixed-label classification while running at **1-2 orders of magnitude
+lower latency and cost**, with tighter tail latency (Valdés González, 2026,
+[arXiv:2602.06370](https://arxiv.org/abs/2602.06370)).
+
+**Where it is the wrong tool** (and you should use the generation path or the LLM
+fallback instead):
+- **Routing signal buried in long context** — a 5,000-token email thread + tool
+  outputs where the intent only becomes clear late. The encoder never sees past
+  token 512. (This is exactly the long-context case the generation latency tables
+  flag as GPU-territory for SLMs.)
+- **Open-ended / generative needs** — anything that must *produce* text
+  (explanations, remediation, summaries). A classifier only emits a label.
+- **Fluid or unknown label space** — if categories change constantly or aren't
+  knowable up front, a prompted LLM's flexibility wins.
+
+**Workaround when you genuinely need more context.** The 512-token cap is a
+property of the *chosen encoder*, not the approach. Longer-context encoders exist
+and drop into the same path: ModernBERT extends to **8,192 tokens** and
+Qwen3-Embedding to **32,768** ([vLLM semantic router](https://vllm.ai/blog/semantic-router-modular)).
+Set `model.base` to one of those for long-input routing — at the cost of a larger,
+somewhat slower encoder. Before reaching for that, prefer cheaper fixes: truncate
+or pre-summarize to the routing-relevant section, or route on a salient slice
+(subject line, first paragraph, the YAML block) rather than the whole payload.
+
 The remainder of this document covers the generation (llama.cpp + GGUF) path.
 
 ## What happens in the reference deployment
