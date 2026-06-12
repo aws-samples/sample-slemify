@@ -13,7 +13,7 @@ import (
 func karpenterConfig() *config.ExpertConfig {
 	return &config.ExpertConfig{
 		APIVersion: "slemify/v1",
-		Project:    config.ProjectConfig{Name: "karpenter-expert", Domain: "Karpenter"},
+		Project:    config.ProjectConfig{Name: "karpenter-expert", Domain: "Karpenter", Task: config.TaskGeneration},
 		Model:      config.ModelConfig{Base: "mistralai/Mistral-7B-Instruct-v0.3"},
 		Data:       config.DataConfig{Bucket: "test-bucket", Path: "test-data/", Synthetic: config.SyntheticConfig{Model: "claude", Pairs: 1000}},
 		Training:   config.TrainingConfig{Spot: true},

@@ -47,6 +47,16 @@ func Validate(cfg *ExpertConfig) []ValidationError {
 		}
 	}
 
+	// Task: reject valid-but-not-yet-implemented task values with a clear message.
+	// The struct `oneof` tag already rejects unknown values; this catches values
+	// that are valid in the schema but whose pipeline isn't built yet.
+	if cfg.Project.Task != "" && !IsSupportedTask(cfg.Project.Task) {
+		errs = append(errs, ValidationError{
+			Field:   "project.task",
+			Message: fmt.Sprintf("task %q is declared but not yet supported in this version", cfg.Project.Task),
+		})
+	}
+
 	// Security: validate inputs used in K8s names, S3 paths, and shell commands
 	if cfg.Project.Name != "" && !safeName.MatchString(cfg.Project.Name) {
 		errs = append(errs, ValidationError{
@@ -152,7 +162,9 @@ func camelToYAML(s string) string {
 		"Priority":      "priority",
 		"Strategy":      "strategy",
 		"Projects":      "projects",
+		"Task":          "task",
 		"OutputFormat":  "output_format",
+		"Head":          "head",
 	}
 	if mapped, ok := fieldMap[s]; ok {
 		return mapped

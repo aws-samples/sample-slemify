@@ -2,6 +2,8 @@ apiVersion: slemify/v1
 
 project:
   name: support-intent-noisy
+  task: generation
+  output_format: pipe_delimited
   domain: >
     Email triage for customer support. Extract intent and sentiment
     from noisy, unstructured emails containing OCR artifacts,

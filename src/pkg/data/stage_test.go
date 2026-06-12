@@ -17,6 +17,7 @@ func karpenterExpertConfig() *config.ExpertConfig {
 			Name:          "karpenter-expert",
 			Domain:        "Karpenter configuration and optimization on EKS",
 			DomainVersion: "1.2",
+			Task:          config.TaskGeneration,
 		},
 		Model: config.ModelConfig{Base: "mistralai/Mistral-7B-Instruct-v0.3"},
 		Data: config.DataConfig{

@@ -13,15 +13,72 @@ type ExpertConfig struct {
 	Evaluation EvaluationConfig `json:"evaluation,omitempty" yaml:"evaluation,omitempty"`
 }
 
+// Task values. Each maps onto one of three implementation families:
+//   - generation:     causal LM, GPU fine-tune, CPU serve (llama.cpp/GGUF)
+//   - classification, scoring, extraction, reranking: frozen encoder + trained
+//     head, CPU train, CPU serve (encoder-head family)
+//   - embedding:       contrastive encoder, CPU serve (embedding family)
+const (
+	TaskGeneration     = "generation"
+	TaskClassification = "classification"
+	TaskScoring        = "scoring"
+	TaskExtraction     = "extraction"
+	TaskReranking      = "reranking"
+	TaskEmbedding      = "embedding"
+)
+
+// supportedTasks lists task values whose full pipeline is implemented in this
+// version. Other valid task values are accepted by the schema but rejected by
+// validation with a clear "not yet supported" message.
+var supportedTasks = map[string]bool{
+	TaskGeneration: true,
+}
+
+// IsSupportedTask returns true if the task's pipeline is implemented.
+func IsSupportedTask(task string) bool {
+	return supportedTasks[task]
+}
+
 type ProjectConfig struct {
 	Name          string              `json:"name" yaml:"name" validate:"required,dns_label"`
 	Domain        string              `json:"domain" yaml:"domain" validate:"required"`
 	DomainVersion string              `json:"domain_version,omitempty" yaml:"domain_version,omitempty"`
 	Labels        map[string][]string `json:"labels,omitempty" yaml:"labels,omitempty"`
-	OutputFormat  string              `json:"output_format,omitempty" yaml:"output_format,omitempty" validate:"omitempty,oneof=pipe_delimited free_form"` // default: pipe_delimited
+	// Task selects the model family and pipeline. Required, no default.
+	Task string `json:"task" yaml:"task" validate:"required,oneof=generation classification scoring extraction reranking embedding"`
+	// OutputFormat applies only to task=generation: free_form (prose/reasoning)
+	// vs pipe_delimited (structured label output). Ignored for other tasks.
+	// Transitional: retired once no generation expert uses pipe_delimited.
+	OutputFormat string `json:"output_format,omitempty" yaml:"output_format,omitempty" validate:"omitempty,oneof=pipe_delimited free_form"`
 }
 
-// OutputFormatType returns the effective output format, defaulting to pipe_delimited.
+// TaskType returns the configured task value.
+func (p ProjectConfig) TaskType() string {
+	return p.Task
+}
+
+// IsGeneration returns true for the generative (causal LM) family.
+func (p ProjectConfig) IsGeneration() bool {
+	return p.Task == TaskGeneration
+}
+
+// IsEncoderHead returns true for the frozen-encoder + trained-head family
+// (classification, scoring, extraction, reranking).
+func (p ProjectConfig) IsEncoderHead() bool {
+	switch p.Task {
+	case TaskClassification, TaskScoring, TaskExtraction, TaskReranking:
+		return true
+	}
+	return false
+}
+
+// IsEmbedding returns true for the contrastive embedding family.
+func (p ProjectConfig) IsEmbedding() bool {
+	return p.Task == TaskEmbedding
+}
+
+// OutputFormatType returns the effective generation output format, defaulting
+// to pipe_delimited. Only meaningful when IsGeneration() is true.
 func (p ProjectConfig) OutputFormatType() string {
 	if p.OutputFormat == "" {
 		return "pipe_delimited"
@@ -29,14 +86,18 @@ func (p ProjectConfig) OutputFormatType() string {
 	return p.OutputFormat
 }
 
-// IsFreeForm returns true if the project uses free-form output (reasoning/audit traces).
+// IsFreeForm returns true if a generation expert uses free-form output
+// (reasoning/audit traces) rather than pipe-delimited labels.
 func (p ProjectConfig) IsFreeForm() bool {
-	return p.OutputFormatType() == "free_form"
+	return p.IsGeneration() && p.OutputFormatType() == "free_form"
 }
 
 type ModelConfig struct {
 	Base     string `json:"base" yaml:"base" validate:"required"`
-	Quantize string `json:"quantize,omitempty" yaml:"quantize,omitempty" validate:"omitempty,oneof=q4_k_m q8_0 f16 none"` // default: q4_k_m
+	Quantize string `json:"quantize,omitempty" yaml:"quantize,omitempty" validate:"omitempty,oneof=q4_k_m q8_0 f16 none"` // default: q4_k_m (generation only)
+	// Head selects the classifier head for encoder-head tasks. Ignored for
+	// generation/embedding. Used from Phase 2 onward.
+	Head string `json:"head,omitempty" yaml:"head,omitempty" validate:"omitempty,oneof=logistic linear mlp"`
 }
 
 // QuantizeType returns the effective quantization type, defaulting to q4_k_m.

@@ -14,6 +14,7 @@ func validConfig() *ExpertConfig {
 		Project: ProjectConfig{
 			Name:   "karpenter-expert",
 			Domain: "Karpenter configuration",
+			Task:   TaskGeneration,
 		},
 		Model: ModelConfig{Base: "mistralai/Mistral-7B-Instruct-v0.3"},
 		Data: DataConfig{
@@ -77,6 +78,43 @@ func TestValidateMissingDomain(t *testing.T) {
 	errs := Validate(cfg)
 	if !hasFieldError(errs, "project.domain") {
 		t.Errorf("expected error on project.domain, got: %v", errs)
+	}
+}
+
+func TestValidateMissingTask(t *testing.T) {
+	cfg := validConfig()
+	cfg.Project.Task = ""
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "project.task") {
+		t.Errorf("expected error on project.task when empty, got: %v", errs)
+	}
+}
+
+func TestValidateUnknownTask(t *testing.T) {
+	cfg := validConfig()
+	cfg.Project.Task = "translation"
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "project.task") {
+		t.Errorf("expected error on unknown task value, got: %v", errs)
+	}
+}
+
+func TestValidateNotYetSupportedTask(t *testing.T) {
+	// classification is a valid schema value but not implemented in Phase 1.
+	cfg := validConfig()
+	cfg.Project.Task = TaskClassification
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "project.task") {
+		t.Errorf("expected 'not yet supported' error for classification, got: %v", errs)
+	}
+}
+
+func TestValidateGenerationTaskSupported(t *testing.T) {
+	cfg := validConfig()
+	cfg.Project.Task = TaskGeneration
+	errs := Validate(cfg)
+	if hasFieldError(errs, "project.task") {
+		t.Errorf("generation task should be supported, got error: %v", errs)
 	}
 }
 

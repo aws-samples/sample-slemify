@@ -103,6 +103,10 @@ def main():
     project_name = config["project"]["name"]
     domain = config["project"]["domain"]
     labels_config = config.get("project", {}).get("labels")
+    task = config.get("project", {}).get("task", "generation")
+    # output_format applies only to task=generation (free_form vs pipe_delimited).
+    # For non-generation tasks the data shape is determined by the task itself
+    # (handled in later phases); default keeps generation behavior unchanged.
     output_format = config.get("project", {}).get("output_format", "pipe_delimited")
     synthetic_cfg = data_cfg.get("synthetic", {})
 

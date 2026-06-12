@@ -2,6 +2,7 @@ apiVersion: slemify/v1
 
 project:
   name: k8s-autoscaling-auditor
+  task: generation
   output_format: free_form
   domain: >
     Expert auditor for Kubernetes autoscaling configurations on EKS.

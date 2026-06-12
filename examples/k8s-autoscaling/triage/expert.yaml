@@ -2,6 +2,8 @@ apiVersion: slemify/v1
 
 project:
   name: k8s-autoscaling-triage
+  task: generation
+  output_format: pipe_delimited
   domain: >
     Classify Kubernetes autoscaling support queries into a routing
     category and confidence level. Each message should be classified

@@ -7,6 +7,8 @@ apiVersion: slemify/v1
 
 project:
   name: <project-name>              # e.g., k8s-config-auditor
+  task: generation                  # causal LM, free-form reasoning output
+  output_format: free_form          # prose/structured reasoning (not labels)
   domain: >
     <Describe what this agent analyzes and what expertise it has.
     Include what structured output it produces and what makes a

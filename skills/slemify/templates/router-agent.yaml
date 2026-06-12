@@ -7,6 +7,7 @@ apiVersion: slemify/v1
 
 project:
   name: <project-name>              # e.g., support-ticket-router
+  task: classification              # encoder + head (CPU). NOTE: available from Phase 2
   domain: >
     <Describe what this agent classifies and what each category means.
     Be specific about the domain and the decision being made.

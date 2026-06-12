@@ -18,7 +18,7 @@ import (
 func secConfig() *config.ExpertConfig {
 	return &config.ExpertConfig{
 		APIVersion: "slemify/v1",
-		Project:    config.ProjectConfig{Name: "test-project", Domain: "test domain"},
+		Project:    config.ProjectConfig{Name: "test-project", Domain: "test domain", Task: config.TaskGeneration},
 		Model:      config.ModelConfig{Base: "HuggingFaceTB/SmolLM3-3B"},
 		Data: config.DataConfig{
 			Bucket: "test-bucket",

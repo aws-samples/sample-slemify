@@ -12,6 +12,7 @@ const validKarpenterYAML = `
 apiVersion: slemify/v1
 project:
   name: karpenter-expert
+  task: generation
   domain: "Karpenter configuration and optimization on EKS"
   domain_version: "1.2"
 model:
@@ -87,6 +88,7 @@ func TestParseWithOpenAIEndpoint(t *testing.T) {
 apiVersion: slemify/v1
 project:
   name: test-expert
+  task: generation
   domain: "test domain"
 model:
   base: meta-llama/Llama-3.1-8B-Instruct
@@ -112,6 +114,7 @@ func TestParseUnknownFieldsProduceWarnings(t *testing.T) {
 apiVersion: slemify/v1
 project:
   name: test-expert
+  task: generation
   domain: "test"
 model:
   base: mistralai/Mistral-7B-Instruct-v0.3

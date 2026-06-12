@@ -15,6 +15,7 @@ var starterConfig = `apiVersion: slemify/v1
 # Project identity
 project:
   name: my-project                   # DNS-compatible name (lowercase, hyphens)
+  task: generation                   # generation | classification | scoring | extraction | reranking | embedding
   domain: "Describe your task here"  # e.g., "Alert triage and severity classification"
 
 # Base model for fine-tuning (HuggingFace model ID)
