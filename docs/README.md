@@ -10,14 +10,27 @@ New to Slemify? Start here:
 
 - [Getting Started: Build a Multi-Agent K8s Expert](getting-started.md). End-to-end tutorial that walks you through training two SLMs and wiring them into a multi-agent demo.
 
+## Task families
+
+Slemify produces two kinds of specialist model, selected by `project.task`:
+
+- **Generation** (`task: generation`) — a causal LM fine-tuned with QLoRA on
+  GPU, exported to GGUF, served on CPU via llama.cpp. For free-form output:
+  reasoning, audit reports, structured generation.
+- **Encoder-head** (`task: classification`, and later `scoring`, `extraction`,
+  `reranking`) — a frozen encoder plus a lightweight head, trained and served
+  entirely on CPU. For label/score output: routing, intent, guardrails.
+
+The deep dives below note where the two paths differ.
+
 ## Stages
 
 | Stage | Doc | What it covers |
 |-------|-----|----------------|
 | Data | [data.md](deep-dive/data.md) | Raw data quality, synthetic generation, label taxonomy, class balance, independent evaluation |
-| Training | [training.md](deep-dive/training.md) | QLoRA fine-tuning, model sizing, Spot GPU, checkpointing, loss curves |
-| Serving | [serving.md](deep-dive/serving.md) | Reference deployment, CPU inference, latency optimization, autoscaling guidance |
-| Report | [report.md](deep-dive/report.md) | Accuracy measurement, SLM vs LLM comparison, cost projections |
+| Training | [training.md](deep-dive/training.md) | Generation: QLoRA fine-tuning, sizing, Spot GPU, GGUF. Classification: frozen-encoder + head fit on CPU |
+| Serving | [serving.md](deep-dive/serving.md) | Generation: llama.cpp + GGUF. Classification: encoder + head. CPU inference, latency, autoscaling |
+| Report | [report.md](deep-dive/report.md) | Generation: LLM-as-judge. Classification: exact-match accuracy + per-class P/R/F1. Cost projections |
 
 ## Further Reading
 

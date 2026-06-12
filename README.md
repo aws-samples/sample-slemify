@@ -1,12 +1,17 @@
 # Slemify
 
-Generate, fine-tune, and validate Small Language Models. One YAML, one command.
+Generate, train, and validate small specialist models. One YAML, one command.
 
-SLMs handle the high-volume, repetitive tasks in your AI workflows (classification, routing, extraction) so your LLMs can focus on what they're best at. Slemify automates the path from raw data to a validated, production-ready GGUF model. How you deploy that model is up to you.
+Small specialist models handle the high-volume, repetitive tasks in your AI workflows (classification, routing, extraction) so your LLMs can focus on what they're best at. Slemify automates the path from raw data to a validated, production-ready model — a fine-tuned generative SLM (GGUF) for free-form tasks, or a CPU-trained encoder classifier for routing and labeling. How you deploy that model is up to you.
 
 ```bash
 slemify deploy --config expert.yaml
 ```
+
+Slemify picks the right model family from `project.task`:
+
+- `task: generation` — a causal LM fine-tuned with QLoRA on GPU, served on CPU (GGUF/llama.cpp). For reasoning and free-form output.
+- `task: classification` — a frozen encoder + a lightweight head, trained and served entirely on CPU in seconds. For routing, intent, and labeling. (`scoring`, `extraction`, and `reranking` extend this family.)
 
 ## When to Use an SLM
 
@@ -204,7 +209,7 @@ A: For general tasks, no. For YOUR specific structured task with YOUR categories
 A: SLMs and RAG solve different problems. RAG retrieves relevant context for knowledge questions. SLMs handle classification, routing, and extraction where you don't need retrieval. you need a fast decision. They work well together: SLM routes the query, RAG handles the knowledge lookup.
 
 **Q: Can I use a different base model?**
-A: Yes. Any HuggingFace-compatible model supported by Unsloth. The auto-sizer adjusts infrastructure based on model size.
+A: Yes. For `task: generation`, any HuggingFace causal LM supported by Unsloth. For `task: classification`, any sentence-transformers encoder (e.g. `BAAI/bge-base-en-v1.5`). The auto-sizer adjusts infrastructure based on the task and model size.
 
 **Q: What happens during a Spot interruption?**
 A: Training checkpoints sync to S3 every 500 steps. The next pod resumes from the last checkpoint automatically. Max work lost: ~20 minutes.
@@ -224,8 +229,8 @@ Or reference the skill directly:
 ```
 
 The skill includes templates for two patterns:
-- **Router Agent** (1-4B): fast classification and routing decisions
-- **Analyst Agent** (7-8B): structured reasoning grounded by RAG
+- **Router Agent** (`task: classification`): a CPU encoder classifier for fast routing and intent decisions
+- **Analyst Agent** (`task: generation`, 7-8B): structured reasoning grounded by RAG
 
 ## References
 

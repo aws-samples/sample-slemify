@@ -190,49 +190,60 @@ After generation, the pipeline checks the distribution of labels and warns when 
 
 The pipeline warns. You decide based on your domain knowledge.
 
-## Output format: pipe-delimited
+## Output shape by task
 
-Slemify supports two output formats, configured via `project.output_format` in `expert.yaml`:
+The shape of the synthetic data the pipeline generates is determined by
+`project.task` (and, for generation, by `project.output_format`).
 
-### Pipe-delimited (default)
+### Label output (classification and other encoder-head tasks)
 
-For classification, routing, and extraction tasks. The model outputs structured labels separated by pipes.
+For `task: classification`, the pipeline generates `input → label` pairs, where
+the label is one value from your `project.labels` taxonomy (e.g. `hpa_config`).
+Validation drops records with empty output, and the label-balance check warns
+about underrepresented classes.
 
-```yaml
-project:
-  output_format: pipe_delimited  # default, can be omitted
-```
+The label is consumed by the classifier head, not by a language model, so there
+is no "output format" to choose — the encoder embeds the input and the head
+predicts the class. Confidence is the head's probability, not a generated token.
 
-Slemify trains models to output pipe-delimited labels (e.g., `critical|page`). The pipeline validates this format and drops records that don't comply.
+> Historically Slemify expressed classification as a generative model emitting a
+> `pipe_delimited` string. That was replaced by the encoder-head classification
+> path, which is faster, deterministic, and CPU-trained. The `pipe_delimited`
+> output format has been retired.
 
-The choice of pipe-delimited over JSON is deliberate:
+### Free-form output (generation tasks)
 
-- **Fewer tokens.** A pipe-delimited label is 2-3 tokens. The equivalent JSON is 15+ tokens. Fewer output tokens means faster inference, which matters when you're running on CPU.
-- **Simpler parsing.** A single `split("|")` call vs. JSON parsing with error handling.
-- **Consistent training signal.** The model learns one output pattern, not a mix of JSON and prose.
-
-<details>
-<summary>When format matters vs. when it doesn't</summary>
-
-If the SLM output is consumed by **code** (a routing function, API gateway, switch statement), format compliance is critical. Use constrained decoding ([llama.cpp grammars](https://github.com/ggerganov/llama.cpp/blob/master/grammars/README.md), Bedrock structured outputs) to enforce it at the decoding level.
-
-If the SLM output is consumed by **another LLM** (an orchestrating agent in a multi-agent system), format matters less. The orchestrator can parse any format: JSON, pipe-delimited, markdown, free text. What matters is whether the SLM gets the classification right, regardless of how it's formatted.
-
-This distinction comes from the [Microsoft Multi-Agent Reference Architecture](https://www.microsoft.com/en-us/research/publication/multi-agent-reference-architecture/) (2025), which describes the "Semantic Router" pattern: an SLM outputs an intent label, and the orchestrator routes based on it. The orchestrator is an LLM. It doesn't need structured output to understand the intent.
-</details>
-
-### Free-form (reasoning tasks)
-
-For audit, analysis, and reasoning tasks where the model needs to produce structured explanations rather than labels.
+For `task: generation` with `output_format: free_form`, the pipeline generates
+`input → reasoning` pairs: structured explanations (identification, analysis,
+correction, risk assessment) rather than labels.
 
 ```yaml
 project:
+  task: generation
   output_format: free_form
 ```
 
-In free-form mode, the pipeline uses a different generation prompt that asks Bedrock to produce structured reasoning output (identification, analysis, correction, risk assessment). Validation checks for non-empty output instead of pipe-delimited format. Evaluation uses keyword overlap scoring instead of exact label match.
+Validation checks for non-empty output instead of a label. Free-form is designed
+for larger models (7B+) that serve as expert auditors in a tiered architecture.
+The `project.labels` field still guides the output structure: labels become
+section headings (e.g., "Error Type: deprecated_api, Severity: critical") rather
+than the predicted value.
 
-Free-form is designed for larger models (7B+) that serve as expert auditors in a tiered architecture. The `project.labels` field still guides the output structure. labels become section headings (e.g., "Error Type: deprecated_api, Severity: critical") rather than pipe-delimited values.
+<details>
+<summary>When output format matters vs. when it doesn't</summary>
+
+If a generative SLM's output is consumed by **code** (a routing function, API
+gateway, switch statement), format compliance is critical — use constrained
+decoding ([llama.cpp grammars](https://github.com/ggerganov/llama.cpp/blob/master/grammars/README.md),
+Bedrock structured outputs) to enforce it. (For pure routing, prefer
+`task: classification` — a classifier returns a clean label with no parsing.)
+
+If the output is consumed by **another LLM** (an orchestrating agent), format
+matters less. The orchestrator can parse JSON, markdown, or free text. What
+matters is whether the model gets the answer right.
+
+This distinction comes from the [Microsoft Multi-Agent Reference Architecture](https://www.microsoft.com/en-us/research/publication/multi-agent-reference-architecture/) (2025), which describes the "Semantic Router" pattern: a model outputs an intent label, and an LLM orchestrator routes based on it.
+</details>
 
 Use free-form when the downstream consumer needs to understand *why*, not just *what*. For example, a triage classifier outputs `billing_question|high`. An auditor outputs a paragraph explaining what's wrong with a configuration and how to fix it.
 

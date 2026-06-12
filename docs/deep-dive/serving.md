@@ -6,6 +6,34 @@ It also serves as a reference for how to deploy SLMs in your own environment. Th
 
 The GGUF model that Slemify produces can be served with any compatible runtime: llama.cpp, vLLM, Ollama, or anything that reads GGUF files.
 
+## Two serving paths
+
+How a model is served depends on its `project.task`:
+
+- **Generation** (`task: generation`) → **llama.cpp + GGUF**. The rest of this
+  document describes this path: S3-mounted GGUF, llama.cpp flags, KEDA scaling on
+  queue depth, TTFT/streaming. This is the bulk of the serving surface.
+- **Classification** (`task: classification`) → **encoder + head**. A CPU pod
+  runs Slemify's managed encoder image in "classifier mode": it loads the trained
+  `head.json` from S3, embeds the query in-process, applies the logistic head,
+  and returns a label. There is no GGUF and no llama.cpp.
+
+The classifier serving pod deliberately exposes the **same OpenAI-compatible
+`/v1/chat/completions` contract** as the generative path, returning
+`"<label>|<confidence>"` as the message content (confidence is the softmax
+probability mapped to high/medium/low). This makes a classifier a drop-in
+replacement for a generative router: an orchestrator pointed at the inference
+Service needs no changes when you swap one for the other. The response also
+includes the raw probability under a `slemify` field for clients that want the
+numeric score.
+
+Because the classifier embeds in-process and applies a tiny matrix, its latency
+is dominated by the encoder forward pass (~25ms for bge-base on CPU) — there is
+no token-by-token decode phase, so the latency-planning tables below (which model
+the generation decode loop) do not apply to it.
+
+The remainder of this document covers the generation (llama.cpp + GGUF) path.
+
 ## What happens in the reference deployment
 
 ```

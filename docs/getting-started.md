@@ -1,6 +1,6 @@
 # Getting Started: Build a Multi-Agent K8s Expert
 
-This guide walks you through building a complete multi-agent system using Slemify. By the end, you'll have two fine-tuned SLMs running on CPUs that audit Kubernetes autoscaling configurations, backed by a RAG knowledge base and an LLM fallback for edge cases.
+This guide walks you through building a complete multi-agent system using Slemify. By the end, you'll have two specialist models running on CPUs that audit Kubernetes autoscaling configurations, backed by a RAG knowledge base and an LLM fallback for edge cases. One is a CPU-trained encoder classifier (triage), the other a GPU-fine-tuned generative SLM (auditor).
 
 Total time: ~2 hours (mostly waiting for training). Cost: ~$30 (synthetic data + Spot GPU training).
 
@@ -16,7 +16,7 @@ These hallucinations are hard to catch because the output is well-formatted and 
 User question or YAML config
         |
         v
-[Triage SLM - 4B, CPU, ~1.5s]
+[Triage classifier - encoder + head, CPU, ~25ms]
   Routes to the right handler
         |
         |-- noise --> rejected
@@ -28,11 +28,15 @@ User question or YAML config
                             (error type, severity, fix)
 ```
 
-Two models, one pipeline:
-- **Triage** (4B): classifies intent and confidence in ~1.5s
-- **Auditor** (8B): produces structured config analysis, streamed over ~14s
+Two specialists, one pipeline — and they use two different model families:
+- **Triage** (`task: classification`): a frozen encoder + logistic head that
+  classifies intent in ~25ms. CPU-trained in seconds, deterministic.
+- **Auditor** (`task: generation`): an 8B causal LM fine-tuned with QLoRA that
+  produces structured config analysis, streamed.
 
-Both run on Graviton4 CPUs. No GPUs. The LLM API is only called for the ~10-20% of queries where the triage model isn't confident.
+Both run on Graviton4 CPUs at inference time. No GPUs serve traffic. (Only the
+auditor's *training* uses a GPU; the triage classifier trains on CPU.) The LLM
+API is called only for the ~10-20% of queries where triage isn't confident.
 
 ## Prerequisites
 
@@ -86,16 +90,21 @@ aws s3 sync ./data/queries s3://slemify-data/k8s-autoscaling/data/queries/
 
 ## Step 2: Define the triage model
 
-The triage model is a fast classifier. It reads the query and outputs a routing label + confidence level. Create `triage/expert.yaml`:
+The triage model is a fast classifier. It reads the query and routes it to the
+right category. Because routing is a closed-set classification problem, it uses
+Slemify's **classification** task (`task: classification`) — a frozen encoder
+plus a lightweight trained head, not a generative model. This trains on CPU in
+seconds and serves deterministically in ~25ms. Create `triage/expert.yaml`:
 
 ```yaml
 apiVersion: slemify/v1
 
 project:
   name: k8s-autoscaling-triage
+  task: classification
   domain: >
     Classify Kubernetes autoscaling support queries into a routing
-    category and confidence level.
+    category.
   labels:
     routing:
       - karpenter_config
@@ -105,14 +114,10 @@ project:
       - spot_interruption
       - multi_resource
       - noise
-    confidence:
-      - high
-      - medium
-      - low
 
 model:
-  base: ""  # HuggingFace model ID (4B recommended for fast classification)
-  quantize: q4_k_m
+  base: ""        # encoder model ID (e.g. BAAI/bge-base-en-v1.5)
+  head: logistic  # classifier head: logistic | linear | mlp
 
 data:
   bucket: slemify-data
@@ -129,9 +134,17 @@ training:
 ```
 
 Key choices:
-- **4B model**: small enough for sub-2s inference on CPU, large enough for multi-class classification
-- **q4_k_m**: best quality-to-size ratio for CPU inference
-- **1200 synthetic pairs**: Bedrock generates training examples from your raw queries, covering all label combinations
+- **`task: classification`**: routes through the encoder-head path. No GPU, no
+  GGUF — the encoder is frozen and only a small classifier head is trained.
+- **encoder base** (e.g. `BAAI/bge-base-en-v1.5`): turns each query into a
+  768-dim vector. A single pretrained encoder serves any classification domain.
+- **`head: logistic`**: a logistic-regression head over the embeddings. Fast to
+  fit, deterministic, and emits a calibrated confidence (the softmax
+  probability) used for routing to the LLM fallback.
+- **no `confidence` label**: confidence is the model's probability, not a
+  predicted label, so it isn't part of the taxonomy.
+- **1200 synthetic pairs**: Bedrock generates `query → category` examples from
+  your raw queries.
 
 ## Step 3: Define the auditor model
 
@@ -142,6 +155,7 @@ apiVersion: slemify/v1
 
 project:
   name: k8s-autoscaling-auditor
+  task: generation
   output_format: free_form
   domain: >
     Expert auditor for Kubernetes autoscaling configurations on EKS.
@@ -163,7 +177,7 @@ project:
       - info
 
 model:
-  base: ""  # HuggingFace model ID (8B recommended for structured reasoning)
+  base: ""  # HuggingFace causal LM (8B recommended for structured reasoning)
   quantize: q4_k_m
 
 data:
@@ -181,8 +195,11 @@ training:
 ```
 
 Key choices:
+- **`task: generation`**: routes through the generative path — a causal LM
+  fine-tuned with QLoRA on GPU, exported to GGUF, served on CPU. Unlike triage,
+  the auditor must *write* a report, which only a generative model can do.
 - **8B model**: large enough for structured reasoning with YAML output
-- **free_form output**: the auditor generates paragraphs, not just labels
+- **`output_format: free_form`**: the auditor generates paragraphs, not labels
 - **2500 synthetic pairs**: more training data because the output space is larger
 
 ## Step 4: Train and deploy
@@ -254,7 +271,7 @@ The tmux dashboard shows all three pods processing in sequence, proving it's a m
 |------|-----|
 | Different domain | Change `project.domain` and `labels` in expert.yaml |
 | More training data | Add .txt files to your data directory, re-run pipeline |
-| Different base model | Change `model.base` (any HuggingFace-compatible model supported by Unsloth) |
+| Different base model | Change `model.base` (a causal LM for `task: generation`; a sentence-transformers encoder for `task: classification`) |
 | Larger context | Increase `CHUNK_SIZE` in index-knowledge.py for longer RAG chunks |
 | Different vector DB | Replace OpenSearch with any k-NN capable store |
 | GPU inference | Use vLLM instead of llama.cpp (different project, same GGUF model) |

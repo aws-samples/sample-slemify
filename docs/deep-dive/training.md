@@ -4,6 +4,32 @@ The training stage is fully automated. Once you've verified your synthetic data 
 
 Your only decision at this stage is which base model to use and whether to enable Spot instances. Everything else is auto-sized based on the model and dataset.
 
+## Two training paths
+
+Slemify has two training engines, chosen by `project.task`. The rest of this
+document describes the **generation** path in detail; the **classification**
+path is summarized here and shares the data and report stages.
+
+| | Generation (`task: generation`) | Classification (`task: classification`) |
+|---|---|---|
+| What's trained | A causal LM, via QLoRA | A small head on a frozen encoder |
+| Engine | Unsloth + TRL (SFTTrainer) | scikit-learn (logistic regression) |
+| Hardware | GPU (Spot) | **CPU** |
+| Time | ~10-30 min | **seconds to a couple of minutes** |
+| Output | GGUF (quantized) | `head.json` + `labels.json` |
+| Why | The model must *generate* text | The encoder already understands language; only a decision rule is learned |
+
+The classification path is fast because nothing in the billion-parameter encoder
+is updated. Each training input is embedded once (a forward pass through the
+frozen encoder, served by Slemify's managed encoder service), and a logistic
+head — roughly `embedding_dim × num_classes` weights — is fit over those vectors.
+There is no backpropagation through the encoder, no epochs, and no GPU. The
+expensive, GPU-hungry work (learning language) was already done once when the
+encoder was pretrained; every classification task rides on top of it cheaply.
+
+Everything below — QLoRA, model sizing, Spot recovery, quantization — applies to
+the **generation** path.
+
 ## What happens during training
 
 ```
