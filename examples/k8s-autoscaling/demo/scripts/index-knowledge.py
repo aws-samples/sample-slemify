@@ -14,6 +14,7 @@ Requires: pip install opensearch-py httpx gitpython requests beautifulsoup4
 """
 
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -105,8 +106,13 @@ def chunk_text(text: str, source: str, section: str) -> list[dict]:
     current_section = section
     current_text = ""
 
+    # Match real markdown headings ("# " ... "###### "), not shebangs
+    # (#!/bin/bash) or code comments (#foo), which would otherwise create tiny
+    # junk chunks.
+    heading_re = re.compile(r"^#{1,6}\s+\S")
+
     for line in text.split("\n"):
-        if line.startswith("#"):
+        if heading_re.match(line):
             if len(current_text.strip()) > 100:
                 chunks.append({"text": current_text.strip(), "source": source, "section": current_section})
             current_section = line.lstrip("#").strip()
