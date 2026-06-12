@@ -236,3 +236,27 @@ func TestAutoSizeConstantDefaults(t *testing.T) {
 		t.Errorf("KEDAMaxReplicas = %d, want 10", sized.KEDAMaxReplicas)
 	}
 }
+
+func TestAutoSizeClassificationIsCPU(t *testing.T) {
+	sized := AutoSizeForTask(
+		ModelConfig{Base: "BAAI/bge-base-en-v1.5"},
+		baseData(1200),
+		TrainingConfig{},
+		TaskClassification,
+	)
+	if sized.TrainingGPU != "none (CPU)" {
+		t.Errorf("classification TrainingGPU = %q, want 'none (CPU)'", sized.TrainingGPU)
+	}
+	if sized.InferenceCPU == "" || sized.InferenceMemory == "" {
+		t.Error("classification sizing must set inference CPU and memory")
+	}
+}
+
+func TestAutoSizeForTaskGenerationMatchesAutoSize(t *testing.T) {
+	model := ModelConfig{Base: "mistralai/Mistral-7B-Instruct-v0.3"}
+	a := AutoSize(model, baseData(500), TrainingConfig{})
+	b := AutoSizeForTask(model, baseData(500), TrainingConfig{}, TaskGeneration)
+	if a.InferenceCPU != b.InferenceCPU || a.TrainingGPU != b.TrainingGPU {
+		t.Error("AutoSize and AutoSizeForTask(generation) should agree")
+	}
+}

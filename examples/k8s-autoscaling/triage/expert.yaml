@@ -2,8 +2,7 @@ apiVersion: slemify/v1
 
 project:
   name: k8s-autoscaling-triage
-  task: generation
-  output_format: pipe_delimited
+  task: classification
   domain: >
     Classify Kubernetes autoscaling support queries into a routing
     category and confidence level. Each message should be classified
@@ -25,14 +24,10 @@ project:
       - spot_interruption
       - multi_resource
       - noise
-    confidence:
-      - high
-      - medium
-      - low
 
 model:
-  base: ""  # HuggingFace model ID (1-8B parameters recommended)
-  quantize: q4_k_m
+  base: ""  # encoder model ID for classification (e.g. BAAI/bge-base-en-v1.5, 768d)
+  head: logistic               # logistic | linear | mlp
 
 data:
   bucket: slemify-data

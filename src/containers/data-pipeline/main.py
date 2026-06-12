@@ -104,10 +104,16 @@ def main():
     domain = config["project"]["domain"]
     labels_config = config.get("project", {}).get("labels")
     task = config.get("project", {}).get("task", "generation")
-    # output_format applies only to task=generation (free_form vs pipe_delimited).
-    # For non-generation tasks the data shape is determined by the task itself
-    # (handled in later phases); default keeps generation behavior unchanged.
-    output_format = config.get("project", {}).get("output_format", "pipe_delimited")
+    output_format = config.get("project", {}).get("output_format", "")
+
+    # Determine the data shape for synthetic generation and validation:
+    #   - free_form: prose/reasoning output (only task=generation + output_format=free_form)
+    #   - labels:    structured label output, pipe-separated (classification and
+    #                any generation expert not marked free_form)
+    # The encoder-head classification path consumes the same label-shaped data
+    # as the legacy pipe-delimited generation path; only the trainer differs.
+    is_free_form = (task == "generation" and output_format == "free_form")
+    gen_format = "free_form" if is_free_form else "pipe_delimited"
     synthetic_cfg = data_cfg.get("synthetic", {})
 
     # Phase 1: Read raw source files from S3
@@ -128,7 +134,7 @@ def main():
         domain=domain,
         tools=config.get("project", {}).get("domain", ""),
         labels=labels_config,
-        output_format=output_format,
+        output_format=gen_format,
     )
     logger.info("Generated %d training records", len(records))
 
@@ -137,26 +143,26 @@ def main():
         sys.exit(1)
 
     # Validate output format
-    if output_format == "free_form":
+    if is_free_form:
         # For free-form, only drop empty outputs
         valid = [r for r in records if r.get("output", "").strip()]
         dropped = len(records) - len(valid)
         if dropped:
             logger.warning("Dropped %d records with empty output", dropped)
     else:
-        # For pipe-delimited, enforce pipe format
+        # For label output, enforce pipe format
         valid = [r for r in records if "|" in r.get("output", "")]
         dropped = len(records) - len(valid)
         if dropped:
-            logger.warning("Dropped %d records with non-pipe-delimited output", dropped)
+            logger.warning("Dropped %d records with non-label output", dropped)
     records = valid
 
     if not records:
         logger.error("No valid records after validation")
         sys.exit(1)
 
-    # Check label distribution (only meaningful for pipe-delimited)
-    if output_format != "free_form":
+    # Check label distribution (only meaningful for label output)
+    if not is_free_form:
         _check_label_balance(records, labels_config)
 
     # Phase 3: Generate eval data and write to S3
@@ -184,15 +190,15 @@ def main():
             domain=domain,
             tools=config.get("project", {}).get("domain", ""),
             labels=labels_config,
-            output_format=output_format,
+            output_format=gen_format,
         )
-        if output_format == "free_form":
+        if is_free_form:
             eval_valid = [r for r in eval_records if r.get("output", "").strip()]
         else:
             eval_valid = [r for r in eval_records if "|" in r.get("output", "")]
         eval_dropped = len(eval_records) - len(eval_valid)
         if eval_dropped:
-            logger.warning("Dropped %d eval records with non-pipe-delimited output", eval_dropped)
+            logger.warning("Dropped %d eval records with non-label output", eval_dropped)
         eval_records = eval_valid
         logger.info("Generated %d independent eval records", len(eval_records))
     else:

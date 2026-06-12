@@ -100,12 +100,48 @@ func TestValidateUnknownTask(t *testing.T) {
 }
 
 func TestValidateNotYetSupportedTask(t *testing.T) {
-	// classification is a valid schema value but not implemented in Phase 1.
+	// scoring is a valid schema value but not implemented yet.
 	cfg := validConfig()
-	cfg.Project.Task = TaskClassification
+	cfg.Project.Task = TaskScoring
 	errs := Validate(cfg)
 	if !hasFieldError(errs, "project.task") {
-		t.Errorf("expected 'not yet supported' error for classification, got: %v", errs)
+		t.Errorf("expected 'not yet supported' error for scoring, got: %v", errs)
+	}
+}
+
+func TestValidateClassificationRequiresLabels(t *testing.T) {
+	cfg := validConfig()
+	cfg.Project.Task = TaskClassification
+	cfg.Model.Base = "BAAI/bge-base-en-v1.5"
+	cfg.Model.Quantize = "" // quantize not allowed for classification
+	// no labels set
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "project.labels") {
+		t.Errorf("expected labels-required error for classification, got: %v", errs)
+	}
+}
+
+func TestValidateClassificationValid(t *testing.T) {
+	cfg := validConfig()
+	cfg.Project.Task = TaskClassification
+	cfg.Project.Labels = map[string][]string{"routing": {"a", "b"}}
+	cfg.Model.Base = "BAAI/bge-base-en-v1.5"
+	cfg.Model.Quantize = ""
+	errs := Validate(cfg)
+	if len(errs) > 0 {
+		t.Errorf("expected valid classification config, got: %v", errs)
+	}
+}
+
+func TestValidateClassificationRejectsQuantize(t *testing.T) {
+	cfg := validConfig()
+	cfg.Project.Task = TaskClassification
+	cfg.Project.Labels = map[string][]string{"routing": {"a", "b"}}
+	cfg.Model.Base = "BAAI/bge-base-en-v1.5"
+	cfg.Model.Quantize = "q4_k_m"
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "model.quantize") {
+		t.Errorf("expected quantize-not-allowed error for classification, got: %v", errs)
 	}
 }
 

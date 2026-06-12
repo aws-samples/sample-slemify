@@ -48,7 +48,7 @@ var validateCmd = &cobra.Command{
 		}
 
 		errs := config.Validate(cfg)
-		sized := config.AutoSize(cfg.Model, cfg.Data, cfg.Training)
+		sized := config.AutoSizeForTask(cfg.Model, cfg.Data, cfg.Training, cfg.Project.Task)
 
 		if jsonOutput() {
 			r := validateResult{

@@ -23,7 +23,7 @@ var analyzeCmd = &cobra.Command{
 			return fmt.Errorf("config has %d validation error(s)", len(errs))
 		}
 
-		sized := config.AutoSize(cfg.Model, cfg.Data, cfg.Training)
+		sized := config.AutoSizeForTask(cfg.Model, cfg.Data, cfg.Training, cfg.Project.Task)
 
 		// TODO: Send benchmark prompts to deployed inference endpoint,
 		// measure tokens/sec at concurrency levels 1/5/10/20,

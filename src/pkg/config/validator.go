@@ -57,6 +57,38 @@ func Validate(cfg *ExpertConfig) []ValidationError {
 		})
 	}
 
+	// Task-aware field rules.
+	if cfg.Project.IsEncoderHead() {
+		// Classification (and other encoder-head tasks) require a label taxonomy
+		// and must not set generation-only fields.
+		if len(cfg.Project.Labels) == 0 {
+			errs = append(errs, ValidationError{
+				Field:   "project.labels",
+				Message: fmt.Sprintf("task %q requires a labels taxonomy", cfg.Project.Task),
+			})
+		}
+		if cfg.Project.OutputFormat != "" {
+			errs = append(errs, ValidationError{
+				Field:   "project.output_format",
+				Message: "output_format applies only to task=generation",
+			})
+		}
+		if cfg.Model.Quantize != "" {
+			errs = append(errs, ValidationError{
+				Field:   "model.quantize",
+				Message: "quantize applies only to task=generation (encoder-head models are not quantized to GGUF)",
+			})
+		}
+	} else {
+		// Non-encoder-head tasks must not set the classifier head.
+		if cfg.Model.Head != "" {
+			errs = append(errs, ValidationError{
+				Field:   "model.head",
+				Message: "head applies only to encoder-head tasks (classification, scoring, extraction, reranking)",
+			})
+		}
+	}
+
 	// Security: validate inputs used in K8s names, S3 paths, and shell commands
 	if cfg.Project.Name != "" && !safeName.MatchString(cfg.Project.Name) {
 		errs = append(errs, ValidationError{

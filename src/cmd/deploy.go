@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -49,7 +50,7 @@ var deployCmd = &cobra.Command{
 }
 
 func deploySingleExpert(ctx context.Context, cmd *cobra.Command, cfg *config.ExpertConfig, stage string, dryRun bool) error {
-	sized := config.AutoSize(cfg.Model, cfg.Data, cfg.Training)
+	sized := config.AutoSizeForTask(cfg.Model, cfg.Data, cfg.Training, cfg.Project.Task)
 
 	// Load output token stats from S3 (written by data pipeline)
 	// These drive max_tokens and reasoning_budget for inference
@@ -110,9 +111,17 @@ func deploySingleExpert(ctx context.Context, cmd *cobra.Command, cfg *config.Exp
 			return err
 		}
 		runner.RegisterStage(pipeline.StageData, data.Stage(client, cfg, namespace, pc))
-		runner.RegisterStage(pipeline.StageTraining, training.Stage(client, cfg, sized, namespace, pc))
-		runner.RegisterStage(pipeline.StageQuantize, func(ctx context.Context) ([]string, error) { return nil, nil })
-		runner.RegisterStage(pipeline.StageServing, serving.Stage(client, cfg, sized, namespace, pc))
+		if cfg.Project.IsEncoderHead() {
+			// Encoder-head (classification, ...): deploy the managed encoder,
+			// then train the classifier head on CPU. No GPU, no GGUF quantize.
+			runner.RegisterStage(pipeline.StageTraining, training.ClassifierStage(client, cfg, namespace, pc))
+			runner.RegisterStage(pipeline.StageQuantize, func(ctx context.Context) ([]string, error) { return nil, nil })
+			runner.RegisterStage(pipeline.StageServing, serving.Stage(client, cfg, sized, namespace, pc))
+		} else {
+			runner.RegisterStage(pipeline.StageTraining, training.Stage(client, cfg, sized, namespace, pc))
+			runner.RegisterStage(pipeline.StageQuantize, func(ctx context.Context) ([]string, error) { return nil, nil })
+			runner.RegisterStage(pipeline.StageServing, serving.Stage(client, cfg, sized, namespace, pc))
+		}
 	} else {
 		fmt.Printf("⚠ No K8s cluster available (%v), running in dry-run mode\n\n", k8sErr)
 		registerDryRunStages(runner, cfg, sized, pc)
@@ -241,6 +250,27 @@ func setupClusterInfrastructure(ctx context.Context, client *k8s.Client, cfg *co
 		fmt.Println("  Install it for faster pod startup: https://docs.aws.amazon.com/eks/latest/userguide/s3-csi-create.html")
 	}
 	fmt.Println()
+
+	// Encoder-head tasks need a managed encoder service that both the training
+	// job and the classifier serving pod embed against. Deploy it up front so
+	// the training stage can reach it.
+	if cfg.Project.IsEncoderHead() {
+		fmt.Println("Deploying managed encoder (TEI, CPU)...")
+		enc := serving.GenerateEncoderManifests(cfg, namespace, pc)
+		if err := client.ApplyDeployment(ctx, enc.Deployment); err != nil {
+			return fmt.Errorf("applying encoder Deployment: %w", err)
+		}
+		if err := client.ApplyService(ctx, enc.Service); err != nil {
+			return fmt.Errorf("applying encoder Service: %w", err)
+		}
+		fmt.Printf("  Waiting for encoder readiness (%s)...\n", cfg.Model.Base)
+		encName := serving.EncoderDeploymentName(cfg.Project.Name)
+		if err := client.WaitForDeploymentReady(ctx, encName, 5*time.Minute); err != nil {
+			return fmt.Errorf("encoder Deployment not ready: %w", err)
+		}
+		fmt.Printf("  Encoder ready at %s\n", serving.EncoderServiceURL(cfg.Project.Name, namespace))
+		fmt.Println()
+	}
 	return nil
 }
 
@@ -254,6 +284,32 @@ func registerDryRunStages(runner *pipeline.Runner, cfg *config.ExpertConfig, siz
 			fmt.Sprintf("s3://%s/%s/processed/eval.jsonl", cfg.Data.Bucket, cfg.Project.Name),
 		}, nil
 	})
+
+	if cfg.Project.IsEncoderHead() {
+		// Encoder-head (classification, ...): managed encoder + CPU head training,
+		// no GPU, no GGUF quantization.
+		runner.RegisterStage(pipeline.StageTraining, func(ctx context.Context) ([]string, error) {
+			fmt.Printf("  Encoder: %s (managed TEI, CPU)\n", cfg.Model.Base)
+			fmt.Printf("  Head: %s\n", cfg.Model.HeadType())
+			fmt.Printf("  Engine: encoder-head (CPU, no GPU)\n")
+			return []string{
+				fmt.Sprintf("s3://%s/models/%s/head.json", cfg.Data.Bucket, cfg.Project.Name),
+			}, nil
+		})
+		runner.RegisterStage(pipeline.StageQuantize, func(ctx context.Context) ([]string, error) {
+			fmt.Printf("  Quantization: n/a (encoder-head model)\n")
+			return nil, nil
+		})
+		runner.RegisterStage(pipeline.StageServing, func(ctx context.Context) ([]string, error) {
+			fmt.Printf("  Instance: %s\n", sized.InferenceInstance)
+			fmt.Printf("  Encoder + classifier head served on CPU\n")
+			return []string{
+				fmt.Sprintf("%s-inference.%s.svc.cluster.local:8080", cfg.Project.Name, namespace),
+			}, nil
+		})
+		return
+	}
+
 	runner.RegisterStage(pipeline.StageTraining, func(ctx context.Context) ([]string, error) {
 		fmt.Printf("  Base model: %s\n", cfg.Model.Base)
 		fmt.Printf("  Instance: %s (%s)\n", sized.TrainingInstance, sized.TrainingGPU)

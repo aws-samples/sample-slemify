@@ -11,6 +11,53 @@ import (
 // It determines GPU count, instance types, checkpoint frequency, KEDA scaling
 // thresholds, and Karpenter NodePool configurations.
 func AutoSize(model ModelConfig, data DataConfig, training TrainingConfig) SizedConfig {
+	return AutoSizeForTask(model, data, training, TaskGeneration)
+}
+
+// AutoSizeForTask maps model/task to infrastructure decisions. Encoder-head
+// tasks (classification, etc.) train and serve on CPU — no GPU, no GGUF, no
+// generation token budgets.
+func AutoSizeForTask(model ModelConfig, data DataConfig, training TrainingConfig, task string) SizedConfig {
+	if isEncoderHeadTask(task) {
+		return autoSizeEncoderHead(data, training)
+	}
+	return autoSizeGeneration(model, data, training)
+}
+
+// isEncoderHeadTask mirrors ProjectConfig.IsEncoderHead for the sizing helper.
+func isEncoderHeadTask(task string) bool {
+	switch task {
+	case TaskClassification, TaskScoring, TaskExtraction, TaskReranking:
+		return true
+	}
+	return false
+}
+
+// autoSizeEncoderHead returns CPU-only sizing for the encoder-head family.
+// Training is a frozen-encoder embed + lightweight head fit (CPU, minutes);
+// serving is the encoder + head on CPU. No GPU, no quantization, no token budgets.
+func autoSizeEncoderHead(data DataConfig, training TrainingConfig) SizedConfig {
+	sized := SizedConfig{
+		TrainingGPU:       "none (CPU)",
+		TrainingInstance:  "Spot CPU (Karpenter selects)",
+		InferenceInstance: "Spot CPU (Karpenter selects)",
+		InferenceCPU:      "2",
+		InferenceMemory:   "4Gi",
+		InferenceThreads:  "2",
+		Scheduler:         "none",
+		KEDAMaxReplicas:   10,
+	}
+	// Epochs/LR are not used by the head trainer (logistic regression solves
+	// directly), but keep sane values for display/repro.
+	sized.Epochs = 1
+	if training.Epochs > 0 {
+		sized.Epochs = training.Epochs
+	}
+	return sized
+}
+
+// autoSizeGeneration is the original generative (causal LM) sizing logic.
+func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingConfig) SizedConfig {
 	modelSize := estimateModelSize(model.Base)
 	sampleCount := estimateSampleCount(data)
 
