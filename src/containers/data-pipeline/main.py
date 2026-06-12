@@ -150,11 +150,13 @@ def main():
         if dropped:
             logger.warning("Dropped %d records with empty output", dropped)
     else:
-        # For label output, enforce pipe format
-        valid = [r for r in records if "|" in r.get("output", "")]
+        # For label output, require a non-empty label. Single-dimension
+        # classification emits a bare label (no pipe); multi-dimension emits
+        # pipe-separated labels. Both are valid as long as output is non-empty.
+        valid = [r for r in records if r.get("output", "").strip()]
         dropped = len(records) - len(valid)
         if dropped:
-            logger.warning("Dropped %d records with non-label output", dropped)
+            logger.warning("Dropped %d records with empty label output", dropped)
     records = valid
 
     if not records:
@@ -192,13 +194,11 @@ def main():
             labels=labels_config,
             output_format=gen_format,
         )
-        if is_free_form:
-            eval_valid = [r for r in eval_records if r.get("output", "").strip()]
-        else:
-            eval_valid = [r for r in eval_records if "|" in r.get("output", "")]
+        # Both free-form and label output are valid when non-empty.
+        eval_valid = [r for r in eval_records if r.get("output", "").strip()]
         eval_dropped = len(eval_records) - len(eval_valid)
         if eval_dropped:
-            logger.warning("Dropped %d eval records with non-label output", eval_dropped)
+            logger.warning("Dropped %d eval records with empty output", eval_dropped)
         eval_records = eval_valid
         logger.info("Generated %d independent eval records", len(eval_records))
     else:

@@ -41,15 +41,16 @@ func TestGenerateEncoderManifests(t *testing.T) {
 	}
 	c := m.Deployment.Spec.Template.Spec.Containers[0]
 
-	// Encoder must serve the configured base model.
-	foundModel := false
-	for i, a := range c.Args {
-		if a == "--model-id" && i+1 < len(c.Args) && c.Args[i+1] == "BAAI/bge-base-en-v1.5" {
+	// Encoder must be a Slemify-built image and serve the configured base model
+	// via the EMBEDDING_MODEL_NAME env var (downloaded at startup).
+	var foundModel bool
+	for _, e := range c.Env {
+		if e.Name == "EMBEDDING_MODEL_NAME" && e.Value == "BAAI/bge-base-en-v1.5" {
 			foundModel = true
 		}
 	}
 	if !foundModel {
-		t.Errorf("encoder args missing --model-id BAAI/bge-base-en-v1.5: %v", c.Args)
+		t.Errorf("encoder env missing EMBEDDING_MODEL_NAME=BAAI/bge-base-en-v1.5: %v", c.Env)
 	}
 
 	// Security: must have a non-nil SecurityContext with no priv escalation.

@@ -19,6 +19,7 @@ type ContainerDef struct {
 func AllContainers() []ContainerDef {
 	return []ContainerDef{
 		{Name: "data-pipeline", ContextDir: "containers/data-pipeline"},
+		{Name: "encoder", ContextDir: "containers/encoder"},
 	}
 }
 

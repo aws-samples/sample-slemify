@@ -16,11 +16,6 @@ import (
 	"github.com/aws-samples/sample-slemify/pkg/pipeline"
 )
 
-// teiImage is the Hugging Face Text Embeddings Inference CPU image, pinned.
-// TEI serves a sentence-transformer encoder over an HTTP /embed endpoint that
-// accepts {"inputs": <str|list[str]>} and returns embedding vectors.
-const teiImage = "ghcr.io/huggingface/text-embeddings-inference:cpu-1.5"
-
 // EncoderDeploymentName returns the Deployment/Service name for a project's
 // managed encoder.
 func EncoderDeploymentName(project string) string {
@@ -84,18 +79,16 @@ func GenerateEncoderManifests(cfg *config.ExpertConfig, ns string, pc *pipeline.
 					},
 					Containers: []corev1.Container{
 						{
-							Name:  "tei",
-							Image: teiImage,
-							Args: []string{
-								"--model-id", cfg.Model.Base,
-								"--port", "8080",
-							},
+							Name:  "encoder",
+							Image: pc.Image("encoder"),
 							Ports: []corev1.ContainerPort{
 								{Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP},
 							},
 							Env: []corev1.EnvVar{
-								// TEI needs a writable cache dir; /tmp is mounted emptyDir.
-								{Name: "HUGGINGFACE_HUB_CACHE", Value: "/tmp/hf-cache"},
+								// The encoder downloads this model at startup and
+								// caches it under HF_HOME (writable /tmp emptyDir).
+								{Name: "EMBEDDING_MODEL_NAME", Value: cfg.Model.Base},
+								{Name: "HF_HOME", Value: "/tmp/hf-cache"},
 							},
 							SecurityContext: &corev1.SecurityContext{
 								AllowPrivilegeEscalation: &noEscalation,

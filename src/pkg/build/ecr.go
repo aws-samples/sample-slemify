@@ -62,11 +62,14 @@ func (m *ECRManager) AccountID() string {
 	return m.accountID
 }
 
-// ContainerRepos returns the list of ECR repository names slemify needs.
+// ContainerRepos returns the list of ECR repository names slemify needs,
+// derived from the buildable containers so the two never drift.
 func ContainerRepos() []string {
-	return []string{
-		"slemify/data-pipeline",
+	var repos []string
+	for _, c := range AllContainers() {
+		repos = append(repos, "slemify/"+c.Name)
 	}
+	return repos
 }
 
 // EnsureRepositories creates ECR repositories if they don't exist.
