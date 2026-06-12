@@ -77,6 +77,17 @@ def load():
 
     with open(os.path.join(ARTIFACT_DIR, "head.json")) as f:
         _head = json.load(f)
+
+    # Warm up the inference path before marking ready. The readiness probe only
+    # confirms the model is *loaded*; ONNX Runtime still pays first-run graph
+    # optimization and thread-pool spin-up on the first real Run(). Doing one
+    # throwaway classification here moves that cost off the first user request.
+    try:
+        _classify("warmup")
+        print("Inference path warmed up", flush=True)
+    except Exception as e:
+        print(f"Warmup failed (non-fatal): {e}", flush=True)
+
     print(f"Classifier ready: {len(_head['classes'])} classes", flush=True)
 
 
