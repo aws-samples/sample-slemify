@@ -10,6 +10,20 @@ import (
 	"github.com/aws-samples/sample-slemify/pkg/pipeline"
 )
 
+func classifierConfig() *config.ExpertConfig {
+	return &config.ExpertConfig{
+		APIVersion: "slemify/v1",
+		Project: config.ProjectConfig{
+			Name:   "k8s-autoscaling-triage",
+			Domain: "Classify k8s autoscaling queries",
+			Task:   config.TaskClassification,
+			Labels: map[string][]string{"routing": {"a", "b"}},
+		},
+		Model: config.ModelConfig{Base: "BAAI/bge-base-en-v1.5", Head: "logistic"},
+		Data:  config.DataConfig{Bucket: "my-bucket", Path: "data/", Synthetic: config.SyntheticConfig{Model: "claude", Pairs: 500}},
+	}
+}
+
 func TestClassifierServingIsCPUClassifierMode(t *testing.T) {
 	cfg := classifierConfig()
 	sized := config.AutoSizeForTask(cfg.Model, cfg.Data, cfg.Training, cfg.Project.Task)
@@ -22,7 +36,7 @@ func TestClassifierServingIsCPUClassifierMode(t *testing.T) {
 		t.Error("classifier serving must not request a GPU")
 	}
 
-	// Classifier mode requires S3_BUCKET + PROJECT env (to load head.json).
+	// Classifier serving (ONNX) loads artifacts from S3 — needs S3_BUCKET + PROJECT.
 	env := map[string]string{}
 	for _, e := range c.Env {
 		env[e.Name] = e.Value
@@ -30,8 +44,9 @@ func TestClassifierServingIsCPUClassifierMode(t *testing.T) {
 	if env["S3_BUCKET"] != "my-bucket" || env["PROJECT"] != "k8s-autoscaling-triage" {
 		t.Errorf("classifier serving missing S3_BUCKET/PROJECT env: %v", env)
 	}
-	if env["EMBEDDING_MODEL_NAME"] != "BAAI/bge-base-en-v1.5" {
-		t.Errorf("classifier serving missing EMBEDDING_MODEL_NAME: %v", env)
+	// Serving is the lean ONNX image (no torch / sentence-transformers).
+	if c.Image == "" {
+		t.Error("classifier serving image not set")
 	}
 
 	// Security + limits.

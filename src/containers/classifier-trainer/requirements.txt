@@ -1,0 +1,6 @@
+boto3>=1.35.0
+numpy<2
+scikit-learn==1.5.2
+sentence-transformers==3.3.1
+optimum[exporters,onnxruntime]==1.23.3
+transformers==4.46.3

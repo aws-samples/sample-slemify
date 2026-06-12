@@ -18,9 +18,10 @@ import (
 )
 
 // ClassifierStage runs the encoder-head classifier training as a CPU K8s Job.
-// It embeds training inputs against the managed encoder service and fits a
-// classifier head — no GPU, no GGUF. Artifacts (head.json, labels.json,
-// metrics.json) are uploaded to S3 by the job itself.
+// It embeds training inputs in-process (sentence-transformers), fits a
+// classifier head, and exports the encoder to ONNX — no GPU, no GGUF. Artifacts
+// (head.json, labels.json, metrics.json, encoder.onnx, tokenizer.json) are
+// uploaded to S3 by the job itself, ready for the ONNX serving pod.
 func ClassifierStage(client *k8s.Client, cfg *config.ExpertConfig, ns string, pc *pipeline.PipelineContext) pipeline.StageFunc {
 	return func(ctx context.Context) ([]string, error) {
 		job := ClassifierJobManifest(cfg, ns, pc)
@@ -33,7 +34,7 @@ func ClassifierStage(client *k8s.Client, cfg *config.ExpertConfig, ns string, pc
 		fmt.Printf("  Job submitted: %s\n", jobName)
 		fmt.Printf("  Encoder: %s\n", cfg.Model.Base)
 		fmt.Printf("  Head: %s\n", cfg.Model.HeadType())
-		fmt.Printf("  Engine: encoder-head (CPU, no GPU)\n")
+		fmt.Printf("  Engine: encoder-head (CPU, no GPU); exports ONNX for serving\n")
 
 		if pc.NoWait {
 			return []string{fmt.Sprintf("job/%s submitted", jobName)}, nil
@@ -56,18 +57,18 @@ func ClassifierStage(client *k8s.Client, cfg *config.ExpertConfig, ns string, pc
 
 		return []string{
 			fmt.Sprintf("s3://%s/models/%s/head.json", cfg.Data.Bucket, cfg.Project.Name),
+			fmt.Sprintf("s3://%s/models/%s/encoder.onnx", cfg.Data.Bucket, cfg.Project.Name),
 		}, nil
 	}
 }
 
 // ClassifierJobManifest builds the CPU K8s Job for encoder-head training.
-// It reuses the data-pipeline image (which bundles classifier_train.py and
-// scikit-learn) and runs on the SLM (CPU) node pool.
+// It uses the classifier-trainer image (sentence-transformers + sklearn +
+// optimum) to embed in-process, fit the head, and export the encoder to ONNX.
+// Runs on the SLM (CPU) node pool — no GPU.
 func ClassifierJobManifest(cfg *config.ExpertConfig, ns string, pc *pipeline.PipelineContext) *batchv1.Job {
 	backoffLimit := int32(2)
 	automountSA := pc.ServiceAccount != ""
-
-	encoderURL := fmt.Sprintf("http://%s-encoder.%s.svc.cluster.local:8080", cfg.Project.Name, ns)
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -106,24 +107,26 @@ func ClassifierJobManifest(cfg *config.ExpertConfig, ns string, pc *pipeline.Pip
 					Containers: []corev1.Container{
 						{
 							Name:            "classifier-training",
-							Image:           pc.Image("data-pipeline"),
+							Image:           pc.Image("classifier-trainer"),
 							ImagePullPolicy: corev1.PullAlways,
-							Command:         []string{"python3", "classifier_train.py"},
 							SecurityContext: k8s.RestrictedSecurityContext(),
 							Env: []corev1.EnvVar{
 								{Name: "PYTHONUNBUFFERED", Value: "1"},
 								{Name: "S3_BUCKET", Value: cfg.Data.Bucket},
 								{Name: "PROJECT", Value: cfg.Project.Name},
-								{Name: "ENCODER_URL", Value: encoderURL},
+								{Name: "EMBEDDING_MODEL_NAME", Value: cfg.Model.Base},
 								{Name: "HEAD", Value: cfg.Model.HeadType()},
+								{Name: "HF_HOME", Value: "/tmp/hf-cache"},
 							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
-									corev1.ResourceMemory: resource.MustParse("2Gi"),
-									corev1.ResourceCPU:    resource.MustParse("1"),
+									// Embedding + ONNX export load torch and the
+									// encoder into memory; size accordingly.
+									corev1.ResourceMemory: resource.MustParse("6Gi"),
+									corev1.ResourceCPU:    resource.MustParse("2"),
 								},
 								Limits: corev1.ResourceList{
-									corev1.ResourceMemory: resource.MustParse("2Gi"),
+									corev1.ResourceMemory: resource.MustParse("6Gi"),
 								},
 							},
 							VolumeMounts: []corev1.VolumeMount{

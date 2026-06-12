@@ -4,7 +4,6 @@
 package training
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/aws-samples/sample-slemify/pkg/config"
@@ -41,23 +40,20 @@ func TestClassifierJobIsCPUOnly(t *testing.T) {
 		t.Errorf("classifier job should target slm workload, got %v", job.Spec.Template.Spec.NodeSelector)
 	}
 
-	// Must run the classifier training script.
-	if strings.Join(c.Command, " ") != "python3 classifier_train.py" {
-		t.Errorf("unexpected command: %v", c.Command)
-	}
-
-	// Must pass the encoder URL and head via env.
-	var hasEncoder, hasHead bool
+	// The trainer embeds in-process (no encoder service): needs the encoder
+	// model name and the head type. The training entrypoint is baked into the
+	// classifier-trainer image (no explicit Command override).
+	var hasModel, hasHead bool
 	for _, e := range c.Env {
-		if e.Name == "ENCODER_URL" && strings.Contains(e.Value, "-encoder.") {
-			hasEncoder = true
+		if e.Name == "EMBEDDING_MODEL_NAME" && e.Value == "BAAI/bge-base-en-v1.5" {
+			hasModel = true
 		}
 		if e.Name == "HEAD" && e.Value == "logistic" {
 			hasHead = true
 		}
 	}
-	if !hasEncoder {
-		t.Error("classifier job missing ENCODER_URL env")
+	if !hasModel {
+		t.Error("classifier job missing EMBEDDING_MODEL_NAME env")
 	}
 	if !hasHead {
 		t.Error("classifier job missing HEAD env")

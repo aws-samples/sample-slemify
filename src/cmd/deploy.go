@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -250,27 +249,6 @@ func setupClusterInfrastructure(ctx context.Context, client *k8s.Client, cfg *co
 		fmt.Println("  Install it for faster pod startup: https://docs.aws.amazon.com/eks/latest/userguide/s3-csi-create.html")
 	}
 	fmt.Println()
-
-	// Encoder-head tasks need a managed encoder service that both the training
-	// job and the classifier serving pod embed against. Deploy it up front so
-	// the training stage can reach it.
-	if cfg.Project.IsEncoderHead() {
-		fmt.Println("Deploying managed encoder (TEI, CPU)...")
-		enc := serving.GenerateEncoderManifests(cfg, namespace, pc)
-		if err := client.ApplyDeployment(ctx, enc.Deployment); err != nil {
-			return fmt.Errorf("applying encoder Deployment: %w", err)
-		}
-		if err := client.ApplyService(ctx, enc.Service); err != nil {
-			return fmt.Errorf("applying encoder Service: %w", err)
-		}
-		fmt.Printf("  Waiting for encoder readiness (%s)...\n", cfg.Model.Base)
-		encName := serving.EncoderDeploymentName(cfg.Project.Name)
-		if err := client.WaitForDeploymentReady(ctx, encName, 5*time.Minute); err != nil {
-			return fmt.Errorf("encoder Deployment not ready: %w", err)
-		}
-		fmt.Printf("  Encoder ready at %s\n", serving.EncoderServiceURL(cfg.Project.Name, namespace))
-		fmt.Println()
-	}
 	return nil
 }
 

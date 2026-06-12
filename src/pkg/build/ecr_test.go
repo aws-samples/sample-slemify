@@ -60,13 +60,14 @@ func TestImageURIWithVersion(t *testing.T) {
 func TestContainerRepos(t *testing.T) {
 	repos := ContainerRepos()
 
-	if len(repos) != 2 {
-		t.Fatalf("ContainerRepos() returned %d repos, want 2", len(repos))
+	if len(repos) != 3 {
+		t.Fatalf("ContainerRepos() returned %d repos, want 3", len(repos))
 	}
 
 	expected := map[string]bool{
-		"slemify/data-pipeline": true,
-		"slemify/encoder":       true,
+		"slemify/data-pipeline":      true,
+		"slemify/classifier-trainer": true,
+		"slemify/classifier-serving": true,
 	}
 
 	for _, repo := range repos {

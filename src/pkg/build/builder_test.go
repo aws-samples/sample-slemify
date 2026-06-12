@@ -13,8 +13,8 @@ import (
 func TestAllContainers(t *testing.T) {
 	containers := AllContainers()
 
-	if len(containers) != 2 {
-		t.Fatalf("AllContainers() returned %d, want 2", len(containers))
+	if len(containers) != 3 {
+		t.Fatalf("AllContainers() returned %d, want 3", len(containers))
 	}
 
 	names := map[string]bool{}
@@ -25,7 +25,7 @@ func TestAllContainers(t *testing.T) {
 		}
 	}
 
-	for _, expected := range []string{"data-pipeline", "encoder"} {
+	for _, expected := range []string{"data-pipeline", "classifier-trainer", "classifier-serving"} {
 		if !names[expected] {
 			t.Errorf("missing container %q", expected)
 		}

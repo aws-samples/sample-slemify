@@ -17,11 +17,11 @@ import (
 )
 
 // GenerateClassifierInferenceManifests builds the serving manifests for an
-// encoder-head classifier. The serving pod runs the same encoder image in
-// "classifier mode" (S3_BUCKET + PROJECT set): it loads the trained head from
-// S3, embeds in-process, and exposes an OpenAI-compatible /v1/chat/completions
-// endpoint returning "<label>|<confidence>" — a drop-in for the generative
-// triage SLM. No GGUF, no GPU.
+// encoder-head classifier. The serving pod runs the lean ONNX classifier image:
+// it downloads encoder.onnx + tokenizer.json + head.json from S3, embeds with
+// onnxruntime + tokenizers (no torch), applies the head, and exposes an
+// OpenAI-compatible /v1/chat/completions endpoint returning "<label>|<confidence>"
+// — a drop-in for the generative triage SLM. No GGUF, no GPU.
 func GenerateClassifierInferenceManifests(cfg *config.ExpertConfig, sized config.SizedConfig, ns string, pc *pipeline.PipelineContext) *InferenceManifests {
 	labels := map[string]string{
 		"slemify.io/project":           cfg.Project.Name,
@@ -71,11 +71,10 @@ func GenerateClassifierInferenceManifests(cfg *config.ExpertConfig, sized config
 					Containers: []corev1.Container{
 						{
 							Name:  "classifier",
-							Image: pc.Image("encoder"),
+							Image: pc.Image("classifier-serving"),
 							Env: []corev1.EnvVar{
-								{Name: "EMBEDDING_MODEL_NAME", Value: cfg.Model.Base},
-								{Name: "HF_HOME", Value: "/tmp/hf-cache"},
-								// Enabling classifier mode: load head.json from S3.
+								// Downloads encoder.onnx + tokenizer.json + head.json
+								// from s3://<bucket>/models/<project>/ at startup.
 								{Name: "S3_BUCKET", Value: cfg.Data.Bucket},
 								{Name: "PROJECT", Value: cfg.Project.Name},
 							},
