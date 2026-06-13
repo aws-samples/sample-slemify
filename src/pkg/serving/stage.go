@@ -74,10 +74,17 @@ func Stage(client *k8s.Client, cfg *config.ExpertConfig, sized config.SizedConfi
 		endpoint := fmt.Sprintf("http://%s-inference.%s.svc.cluster.local:8080", cfg.Project.Name, ns)
 
 		if cfg.Project.IsEncoderHead() {
-			// Classification metrics were computed by the training job (exact-match
-			// accuracy + per-class P/R/F1) and written to metrics.json. Surface
-			// those instead of running the generative LLM-as-judge report.
-			if m, err := report.LoadClassificationMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
+			// Encoder-head metrics were computed by the training job and written
+			// to metrics.json. Surface those instead of the generative
+			// LLM-as-judge report. Scoring uses regression metrics (MAE/R²);
+			// classification uses exact-match accuracy + per-class P/R/F1.
+			if cfg.Project.IsScoring() {
+				if m, err := report.LoadScoringMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
+					fmt.Printf("  ⚠ Could not load scoring metrics: %v\n", err)
+				} else {
+					report.PrintScoringMetrics(m)
+				}
+			} else if m, err := report.LoadClassificationMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
 				fmt.Printf("  ⚠ Could not load classification metrics: %v\n", err)
 			} else {
 				report.PrintEncoderHeadMetrics(m)

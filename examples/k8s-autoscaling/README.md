@@ -6,8 +6,9 @@ A complete example of training and deploying domain-specific SLMs for Kubernetes
 
 ```
 k8s-autoscaling/
-├── auditor/          # Auditor model config (8B, config analysis)
-├── triage/           # Triage model config (4B, intent classification)
+├── auditor/          # Auditor model config (8B generation, config analysis)
+├── triage/           # Triage model config (encoder classifier, intent routing)
+├── risk-scorer/      # Risk scorer config (encoder regression, 0.0-1.0 risk score)
 ├── data/
 │   ├── queries/      # 76 training queries (real-world K8s configs)
 │   └── eval-queries/ # 14 held-out evaluation queries
@@ -23,19 +24,22 @@ k8s-autoscaling/
 
 | Model | Base | Task | Latency |
 |-------|------|------|---------|
-| Triage | 4B (q4_k_m) | Intent classification + confidence | ~1.5s |
-| Auditor | 8B (q4_k_m) | Structured config analysis | ~14s streaming |
+| Triage | encoder (bge-base, 768d) | `classification` — intent routing + confidence | ~25ms |
+| Risk Scorer | encoder (bge-base, 768d) | `scoring` — operational risk 0.0-1.0 | ~25ms |
+| Auditor | 8B (q4_k_m) | `generation` — structured config analysis | ~14s streaming |
 
-Both run on Graviton4 CPUs (c8g.4xlarge) with no GPU required.
+All run on Graviton CPUs with no GPU required for serving. The auditor is fine-tuned on GPU (QLoRA); the encoder-head models (triage, risk scorer) train on CPU in seconds.
 
 ## Quick Start
 
 ```bash
-# Train and deploy both models
+# Train and deploy the models you need
 slemify train --config auditor/expert.yaml
 slemify train --config triage/expert.yaml
+slemify train --config risk-scorer/expert.yaml
 slemify deploy --config auditor/expert.yaml
 slemify deploy --config triage/expert.yaml
+slemify deploy --config risk-scorer/expert.yaml
 
 # Run the demo
 cd demo && ./scripts/deploy.sh

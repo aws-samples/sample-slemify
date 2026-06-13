@@ -100,12 +100,25 @@ func TestValidateUnknownTask(t *testing.T) {
 }
 
 func TestValidateNotYetSupportedTask(t *testing.T) {
-	// scoring is a valid schema value but not implemented yet.
+	// extraction is a valid schema value but not implemented yet.
 	cfg := validConfig()
-	cfg.Project.Task = TaskScoring
+	cfg.Project.Task = TaskExtraction
 	errs := Validate(cfg)
 	if !hasFieldError(errs, "project.task") {
-		t.Errorf("expected 'not yet supported' error for scoring, got: %v", errs)
+		t.Errorf("expected 'not yet supported' error for extraction, got: %v", errs)
+	}
+}
+
+func TestValidateScoringValid(t *testing.T) {
+	// scoring is supported, needs no labels, and outputs a number.
+	cfg := validConfig()
+	cfg.Project.Task = TaskScoring
+	cfg.Model.Base = "BAAI/bge-base-en-v1.5"
+	cfg.Model.Quantize = "" // quantize not allowed for encoder-head
+	cfg.Project.Labels = nil
+	errs := Validate(cfg)
+	if len(errs) > 0 {
+		t.Errorf("expected valid scoring config (no labels required), got: %v", errs)
 	}
 }
 

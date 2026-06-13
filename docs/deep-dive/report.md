@@ -2,6 +2,14 @@
 
 The report stage runs your fine-tuned model against evaluation data and presents the results so you can decide if it's ready for your use case. It does not tell you whether the model is "good" or "bad." It shows you what the model does, how confident it is, how it compares to an LLM API, and what it would cost to run.
 
+The metric is chosen by `project.task`:
+
+- **Generation** (`task: generation`) → the LLM-as-judge report described in the rest of this document (semantic correctness, confidence from logprobs, LLM baseline, cost projections).
+- **Classification** (`task: classification`) → exact-match accuracy plus per-class precision/recall/F1, computed by the training job and printed at the end of serving. No LLM judge — the labels are a closed set, so exact match is the honest metric.
+- **Scoring** (`task: scoring`) → regression metrics: MAE (mean absolute error), RMSE, R², and the correlation between predicted and true scores. Lower MAE is better; R² near 1.0 and high correlation mean the head tracks the rubric. These are computed on the held-out eval set by the training job.
+
+The rest of this document covers the generation path's report in detail.
+
 ## What the report does
 
 ```

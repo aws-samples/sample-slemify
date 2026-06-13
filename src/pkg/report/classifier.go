@@ -33,6 +33,22 @@ type ClassMetric struct {
 	F1        float64 `json:"f1"`
 }
 
+// ScoringMetrics mirrors the metrics.json written by the classifier training
+// job for task=scoring (regression head). Holds error/correlation metrics.
+type ScoringMetrics struct {
+	Task         string  `json:"task"`
+	EmbeddingDim int     `json:"embedding_dim"`
+	Head         string  `json:"head"`
+	TrainSamples int     `json:"train_samples"`
+	EvalSamples  int     `json:"eval_samples"`
+	MAE          float64 `json:"mae"`
+	RMSE         float64 `json:"rmse"`
+	R2           float64 `json:"r2"`
+	Correlation  float64 `json:"correlation"`
+	Total        int     `json:"total"`
+	EmbedMSPerQ  float64 `json:"embed_ms_per_query"`
+}
+
 // S3Downloader abstracts the single S3 read needed here, avoiding a dependency
 // on the k8s package (and any import cycle).
 type S3Downloader interface {
@@ -82,6 +98,36 @@ func PrintEncoderHeadMetrics(m *EncoderHeadMetrics) {
 			}
 			fmt.Printf("    %-28s P=%.2f R=%.2f F1=%.2f\n", c.name, c.m.Precision, c.m.Recall, c.m.F1)
 		}
+	}
+	fmt.Printf("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+}
+
+// LoadScoringMetrics reads models/<project>/metrics.json from S3 for a
+// scoring (regression) head.
+func LoadScoringMetrics(ctx context.Context, dl S3Downloader, bucket, project string) (*ScoringMetrics, error) {
+	key := fmt.Sprintf("models/%s/metrics.json", project)
+	data, err := dl.DownloadFromS3(ctx, bucket, key)
+	if err != nil {
+		return nil, fmt.Errorf("downloading metrics.json: %w", err)
+	}
+	var m ScoringMetrics
+	if err := json.Unmarshal([]byte(data), &m); err != nil {
+		return nil, fmt.Errorf("parsing metrics.json: %w", err)
+	}
+	return &m, nil
+}
+
+// PrintScoringMetrics renders the scoring (encoder-head regression) report.
+func PrintScoringMetrics(m *ScoringMetrics) {
+	fmt.Printf("\n  ━━━ Scoring Report (encoder-head regression) ━━━\n")
+	fmt.Printf("  MAE:         %.4f (mean absolute error, lower is better)\n", m.MAE)
+	fmt.Printf("  RMSE:        %.4f\n", m.RMSE)
+	fmt.Printf("  R²:          %.3f (1.0 = perfect, 0 = predicts the mean)\n", m.R2)
+	fmt.Printf("  Correlation: %.3f (predicted vs true score)\n", m.Correlation)
+	fmt.Printf("  Head:        %s (%dd embeddings)\n", m.Head, m.EmbeddingDim)
+	fmt.Printf("  Data:        %d train / %d eval\n", m.TrainSamples, m.EvalSamples)
+	if m.EmbedMSPerQ > 0 {
+		fmt.Printf("  Latency:     ~%.0fms/query (embed) + <1ms score (CPU)\n", m.EmbedMSPerQ)
 	}
 	fmt.Printf("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 }

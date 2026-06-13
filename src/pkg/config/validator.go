@@ -59,9 +59,9 @@ func Validate(cfg *ExpertConfig) []ValidationError {
 
 	// Task-aware field rules.
 	if cfg.Project.IsEncoderHead() {
-		// Classification (and other encoder-head tasks) require a label taxonomy
-		// and must not set generation-only fields.
-		if len(cfg.Project.Labels) == 0 {
+		// Classification and extraction predict from a label taxonomy, so it's
+		// required. Scoring outputs a number and needs no labels.
+		if cfg.Project.UsesLabels() && len(cfg.Project.Labels) == 0 {
 			errs = append(errs, ValidationError{
 				Field:   "project.labels",
 				Message: fmt.Sprintf("task %q requires a labels taxonomy", cfg.Project.Task),

@@ -19,15 +19,22 @@ How a model is served depends on its `project.task`:
   with ONNX Runtime (CLS pooling + L2 normalize), applies the logistic head, and
   returns a label. The encoder is exported to ONNX by the training job, so the
   embeddings match training exactly and serving carries no heavyweight ML deps.
+- **Scoring** (`task: scoring`) → **the same ONNX encoder pod with a regression
+  head**. The pod embeds the query identically, then computes `weights · vector +
+  intercept` and clamps the result to `[0,1]`, returning a single number instead
+  of a label. Same image, same artifacts layout — only the head shape differs.
 
-The classifier serving pod deliberately exposes the **same OpenAI-compatible
-`/v1/chat/completions` contract** as the generative path, returning
-`"<label>|<confidence>"` as the message content (confidence is the softmax
-probability mapped to high/medium/low). This makes a classifier a drop-in
+The encoder-head serving pod deliberately exposes the **same OpenAI-compatible
+`/v1/chat/completions` contract** as the generative path. For classification it
+returns `"<label>|<confidence>"` as the message content (confidence is the softmax
+probability mapped to high/medium/low); for scoring it returns the bare number
+(e.g. `"0.8123"`). This makes an encoder-head model a drop-in
 replacement for a generative router: an orchestrator pointed at the inference
 Service needs no changes when you swap one for the other. The response also
-includes the raw probability under a `slemify` field for clients that want the
-numeric score.
+includes the raw value under a `slemify` field (`probability` for classification,
+`score` for scoring) for clients that want the numeric value directly. Scoring
+models additionally expose a native `POST /score` endpoint that takes
+`{"input": "..."}` and returns `{"score": <float>}`.
 
 Because the classifier embeds in-process and applies a tiny matrix, its latency
 is dominated by the encoder forward pass (~25ms for bge-base on CPU) — there is

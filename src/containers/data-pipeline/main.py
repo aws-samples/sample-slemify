@@ -6,9 +6,10 @@
 Users provide raw, unlabeled data (emails, logs, documents) in S3.
 Bedrock generates labeled training pairs from that raw data.
 
-Supports two output formats:
+Supports three output shapes:
 - pipe_delimited (default): Structured label output (e.g., "label1|label2").
 - free_form: Structured reasoning output for audit/analysis tasks.
+- scoring: A single numeric target in [0,1] for regression/guardrail tasks.
 """
 
 import json
@@ -88,6 +89,34 @@ Output one JSON object per line. No array brackets, no markdown, no explanation:
 {{"instruction": "...", "input": "...", "output": "..."}}"""
 
 
+SCORING_GENERATION_PROMPT = """You are generating synthetic training data for a Small Language Model that produces a single numeric score.
+
+DOMAIN CONTEXT:
+{domain}
+
+TOOL DESCRIPTION:
+{tool_description}
+
+SOURCE EXAMPLES (real data — use as style/content reference):
+{source_samples}
+
+SCORING GUIDELINES:
+{scoring_guidelines}
+
+TASK:
+Generate exactly {batch_size} training examples.
+Each example is a JSON object on its own line (JSONL format) with three fields:
+- "instruction": A short, consistent task instruction describing the scoring task.
+- "input": A realistic input reflecting the domain's real-world messiness (configs, questions, messages). Keep each input under 200 words.
+- "output": A SINGLE decimal number between 0.0 and 1.0 (inclusive) representing the score for this input. Output ONLY the number — no labels, no words, no JSON, no percent sign.
+
+Spread the scores across the full 0.0–1.0 range: include clearly low cases (near 0.0), clearly high cases (near 1.0), and ambiguous middle cases (around 0.4–0.6). Do not cluster every example near the same value.
+
+Output one JSON object per line. No array brackets, no markdown, no explanation:
+{{"instruction": "...", "input": "...", "output": "0.12"}}
+{{"instruction": "...", "input": "...", "output": "0.87"}}"""
+
+
 # === Pipeline ===
 
 def main():
@@ -108,12 +137,19 @@ def main():
 
     # Determine the data shape for synthetic generation and validation:
     #   - free_form: prose/reasoning output (only task=generation + output_format=free_form)
+    #   - scoring:   a single numeric target in [0,1] (task=scoring, regression head)
     #   - labels:    structured label output, pipe-separated (classification and
     #                any generation expert not marked free_form)
     # The encoder-head classification path consumes the same label-shaped data
     # as the legacy pipe-delimited generation path; only the trainer differs.
     is_free_form = (task == "generation" and output_format == "free_form")
-    gen_format = "free_form" if is_free_form else "pipe_delimited"
+    is_scoring = (task == "scoring")
+    if is_free_form:
+        gen_format = "free_form"
+    elif is_scoring:
+        gen_format = "scoring"
+    else:
+        gen_format = "pipe_delimited"
     synthetic_cfg = data_cfg.get("synthetic", {})
 
     # Phase 1: Read raw source files from S3
@@ -149,6 +185,12 @@ def main():
         dropped = len(records) - len(valid)
         if dropped:
             logger.warning("Dropped %d records with empty output", dropped)
+    elif is_scoring:
+        # For scoring, keep only records whose output parses as a number in [0,1].
+        valid = _validate_scoring(records)
+        dropped = len(records) - len(valid)
+        if dropped:
+            logger.warning("Dropped %d records with non-numeric or out-of-range score", dropped)
     else:
         # For label output, require a non-empty label. Single-dimension
         # classification emits a bare label (no pipe); multi-dimension emits
@@ -164,8 +206,10 @@ def main():
         sys.exit(1)
 
     # Check label distribution (only meaningful for label output)
-    if not is_free_form:
+    if not is_free_form and not is_scoring:
         _check_label_balance(records, labels_config)
+    elif is_scoring:
+        _check_score_distribution(records)
 
     # Phase 3: Generate eval data and write to S3
     bucket = data_cfg["bucket"]
@@ -195,7 +239,10 @@ def main():
             output_format=gen_format,
         )
         # Both free-form and label output are valid when non-empty.
-        eval_valid = [r for r in eval_records if r.get("output", "").strip()]
+        if is_scoring:
+            eval_valid = _validate_scoring(eval_records)
+        else:
+            eval_valid = [r for r in eval_records if r.get("output", "").strip()]
         eval_dropped = len(eval_records) - len(eval_valid)
         if eval_dropped:
             logger.warning("Dropped %d eval records with empty output", eval_dropped)
@@ -306,6 +353,14 @@ def generate_synthetic(records, model, endpoint, target_pairs, domain, tools=Non
                     batch_size=batch_size,
                     output_guidelines=_extract_output_guidelines(domain, labels),
                 )
+            elif output_format == "scoring":
+                prompt = SCORING_GENERATION_PROMPT.format(
+                    domain=domain,
+                    tool_description=tool_description or "(not specified)",
+                    source_samples=batch_samples or "(no source data)",
+                    batch_size=batch_size,
+                    scoring_guidelines=_extract_scoring_guidelines(domain),
+                )
             else:
                 prompt = GENERATION_PROMPT.format(
                     domain=domain,
@@ -355,7 +410,7 @@ def _parse_jsonl(response):
             continue
         try:
             obj = json.loads(line)
-            if isinstance(obj, dict) and obj.get("output") and obj.get("input"):
+            if isinstance(obj, dict) and obj.get("output") is not None and obj.get("input"):
                 records.append({
                     "instruction": str(obj.get("instruction", "")).strip(),
                     "input": str(obj.get("input", "")).strip(),
@@ -409,6 +464,83 @@ def _check_label_balance(records, labels_config=None, min_per_class=50):
     if low:
         logger.warning("%d label(s) below %d samples: %s", len(low), min_per_class, ", ".join(low))
         logger.warning("Add more raw source data for underrepresented labels to improve accuracy.")
+
+
+def _validate_scoring(records, lo=0.0, hi=1.0):
+    """Keep only records whose output parses as a float within [lo, hi].
+
+    The model is asked to emit a bare decimal; normalize the stored output to a
+    canonical string form so the trainer can parse it deterministically.
+    """
+    valid = []
+    for r in records:
+        raw = r.get("output", "").strip()
+        # Strip stray characters the model may add (%, quotes, trailing words).
+        cleaned = raw.replace("%", "").strip().strip('"').strip()
+        # Take the first whitespace-separated token in case of extra prose.
+        token = cleaned.split()[0] if cleaned.split() else ""
+        try:
+            val = float(token)
+        except ValueError:
+            continue
+        # A percent-style value (e.g. "85") gets normalized to [0,1].
+        if val > hi and "%" in raw:
+            val = val / 100.0
+        if lo <= val <= hi:
+            r = dict(r)
+            r["output"] = f"{val:.4f}"
+            valid.append(r)
+    return valid
+
+
+def _check_score_distribution(records):
+    """Log score distribution across coarse buckets so we can spot clustering."""
+    buckets = {"0.0-0.2": 0, "0.2-0.4": 0, "0.4-0.6": 0, "0.6-0.8": 0, "0.8-1.0": 0}
+    vals = []
+    for r in records:
+        try:
+            v = float(r.get("output", ""))
+        except ValueError:
+            continue
+        vals.append(v)
+        if v < 0.2:
+            buckets["0.0-0.2"] += 1
+        elif v < 0.4:
+            buckets["0.2-0.4"] += 1
+        elif v < 0.6:
+            buckets["0.4-0.6"] += 1
+        elif v < 0.8:
+            buckets["0.6-0.8"] += 1
+        else:
+            buckets["0.8-1.0"] += 1
+    total = len(vals)
+    if not total:
+        return
+    mean = sum(vals) / total
+    logger.info("Score distribution (%d records, mean=%.3f):", total, mean)
+    for rng, count in buckets.items():
+        pct = count / total * 100
+        marker = " ⚠ EMPTY" if count == 0 else ""
+        logger.info("  %s: %d (%.1f%%)%s", rng, count, pct, marker)
+    empty = [rng for rng, c in buckets.items() if c == 0]
+    if empty:
+        logger.warning("Score buckets with no examples: %s", ", ".join(empty))
+        logger.warning("A regression head learns best when scores span the full range.")
+
+
+def _extract_scoring_guidelines(domain_text):
+    """Build scoring guidelines for the scoring generation prompt.
+
+    The domain description carries the rubric (what makes a score high vs low);
+    pass it through so the generator anchors the numbers to the task's meaning.
+    """
+    return (
+        "Use the DOMAIN CONTEXT above as the scoring rubric: it defines what a "
+        "high score (near 1.0) versus a low score (near 0.0) means for this task. "
+        "Assign each input a score consistent with that rubric. Be calibrated — "
+        "reserve extreme values for clear cases and use mid-range values for "
+        "genuinely ambiguous inputs."
+    )
 
 
 def _extract_valid_labels(domain_text, labels_config=None):

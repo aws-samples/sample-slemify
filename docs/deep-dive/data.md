@@ -143,6 +143,31 @@ Using a different model for evaluation makes this worse. Each model has its own 
 Amazon Bedrock's [Structured Outputs](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters.html) feature (2025) uses JSON Schema with enum fields for guaranteed label compliance. Slemify applies the same principle at the prompt level, which works across all model providers.
 </details>
 
+## Scoring data (numeric targets)
+
+For `task: scoring`, the pipeline generates a numeric target instead of a label. There is no `project.labels` taxonomy — the rubric lives in `project.domain`, which describes what a high score (near 1.0) versus a low score (near 0.0) means. Bedrock reads each raw input and emits a single decimal in `[0,1]`.
+
+The flow differs from classification in three ways:
+
+1. **Generation.** The prompt asks for a bare number per example and explicitly asks for a spread across the full range (clear-low, clear-high, and ambiguous mid-range cases) so the regression head sees the whole scale.
+2. **Validation.** Each output is parsed as a float. Records that aren't numeric, or fall outside `[0,1]`, are dropped. Stray characters (a `%` sign, quotes, trailing words) are stripped, and percent-style values are normalized to `[0,1]`.
+3. **Balance check.** Instead of label counts, the pipeline logs a score histogram across five buckets (`0.0-0.2` … `0.8-1.0`) and warns if any bucket is empty. A regression head learns best when targets span the full range; clustering near one value produces a model that always predicts that value.
+
+```yaml
+# Example: config risk scorer
+project:
+  name: k8s-autoscaling-risk-scorer
+  task: scoring
+  domain: >
+    Score the operational risk of a Kubernetes autoscaling config from
+    0.0 (safe, routine) to 1.0 (dangerous, likely to cause an outage).
+    A LOW score means conservative, well-guarded config; a HIGH score means
+    unbounded limits, no disruption budget, or scaling a stateful workload to zero.
+# no project.labels — the rubric is the domain description
+```
+
+The biggest data lever for scoring is the same as for classification: diverse raw source data. If every raw example describes a safe config, the generator can't anchor the high end of the scale, and the histogram warning will tell you so.
+
 ## Independent evaluation data
 
 Training and evaluation data must be generated independently. If you split a single batch 90/10, you're testing memorization, not generalization. The eval samples are stylistically identical to the training samples because they came from the same generation run.

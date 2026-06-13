@@ -7,25 +7,29 @@ Your only decision at this stage is which base model to use and whether to enabl
 ## Two training paths
 
 Slemify has two training engines, chosen by `project.task`. The rest of this
-document describes the **generation** path in detail; the **classification**
-path is summarized here and shares the data and report stages.
+document describes the **generation** path in detail; the **encoder-head**
+path (`classification`, `scoring`) is summarized here and shares the data and
+report stages.
 
-| | Generation (`task: generation`) | Classification (`task: classification`) |
+| | Generation (`task: generation`) | Encoder-head (`classification`, `scoring`) |
 |---|---|---|
 | What's trained | A causal LM, via QLoRA | A small head on a frozen encoder |
-| Engine | Unsloth + TRL (SFTTrainer) | scikit-learn (logistic regression) |
+| Engine | Unsloth + TRL (SFTTrainer) | scikit-learn (logistic regression for classification, ridge regression for scoring) |
 | Hardware | GPU (Spot) | **CPU** |
 | Time | ~10-30 min | **seconds to a couple of minutes** |
 | Output | GGUF (quantized) | `head.json` + `encoder.onnx` + `tokenizer.json` |
 | Why | The model must *generate* text | The encoder already understands language; only a decision rule is learned |
 
-The classification path is fast because nothing in the billion-parameter encoder
-is updated. Each training input is embedded once (a forward pass through the
-frozen encoder, served by Slemify's managed encoder service), and a logistic
-head — roughly `embedding_dim × num_classes` weights — is fit over those vectors.
-There is no backpropagation through the encoder, no epochs, and no GPU. The
-expensive, GPU-hungry work (learning language) was already done once when the
-encoder was pretrained; every classification task rides on top of it cheaply.
+The encoder-head path is fast because nothing in the billion-parameter encoder
+is updated. The training job embeds each input once (a forward pass through the
+frozen encoder, run in-process with sentence-transformers), then fits a small
+head over those vectors: a logistic head (`embedding_dim × num_classes` weights)
+for classification, or a ridge regression head (`embedding_dim` weights + an
+intercept) for scoring. There is no backpropagation through the encoder, no
+epochs, and no GPU. The same job then exports the frozen encoder to ONNX so
+serving needs neither torch nor sentence-transformers. The expensive, GPU-hungry
+work (learning language) was already done once when the encoder was pretrained;
+every encoder-head task rides on top of it cheaply.
 
 Everything below — QLoRA, model sizing, Spot recovery, quantization — applies to
 the **generation** path.

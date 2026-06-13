@@ -17,9 +17,11 @@ Slemify produces two kinds of specialist model, selected by `project.task`:
 - **Generation** (`task: generation`) — a causal LM fine-tuned with QLoRA on
   GPU, exported to GGUF, served on CPU via llama.cpp. For free-form output:
   reasoning, audit reports, structured generation.
-- **Encoder-head** (`task: classification`, and later `scoring`, `extraction`,
-  `reranking`) — a frozen encoder plus a lightweight head, trained and served
-  entirely on CPU. For label/score output: routing, intent, guardrails.
+- **Encoder-head** (`task: classification` and `task: scoring`, with `extraction`
+  and `reranking` to follow) — a frozen encoder plus a lightweight head, trained
+  and served entirely on CPU. Classification emits a label + confidence; scoring
+  emits a single number in [0,1]. For routing, intent, guardrails, and risk/quality
+  scores.
 
 The deep dives below note where the two paths differ.
 

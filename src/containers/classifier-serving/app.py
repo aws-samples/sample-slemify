@@ -3,7 +3,9 @@
 Loads a project's encoder ONNX graph, tokenizer, and trained logistic head from
 S3 at startup, then serves classification over an OpenAI-compatible
 /v1/chat/completions endpoint returning "<label>|<confidence>" — a drop-in for
-the generative triage SLM. Embeds with onnxruntime + tokenizers (no torch, no
+the generative triage SLM. For scoring (regression) heads it returns a single
+numeric score in [0,1] as the message content (and a native /score endpoint).
+Embeds with onnxruntime + tokenizers (no torch, no
 sentence-transformers), so the image is small and starts fast.
 
 Config via environment variables:
@@ -83,12 +85,18 @@ def load():
     # optimization and thread-pool spin-up on the first real Run(). Doing one
     # throwaway classification here moves that cost off the first user request.
     try:
-        _classify("warmup")
+        if _head.get("type") == "regression":
+            _score("warmup")
+        else:
+            _classify("warmup")
         print("Inference path warmed up", flush=True)
     except Exception as e:
         print(f"Warmup failed (non-fatal): {e}", flush=True)
 
-    print(f"Classifier ready: {len(_head['classes'])} classes", flush=True)
+    if _head.get("type") == "regression":
+        print("Scoring head ready (regression)", flush=True)
+    else:
+        print(f"Classifier ready: {len(_head['classes'])} classes", flush=True)
 
 
 @app.get("/health")
@@ -131,6 +139,21 @@ def _classify(text: str) -> tuple[str, float]:
     return classes[best], float(probs[best])
 
 
+def _score(text: str) -> float:
+    """Regression inference: encoder vector · weight + intercept, clamped to range."""
+    vec = _embed(text)
+    coef = np.asarray(_head["coef"], dtype=np.float32)
+    intercept = float(_head["intercept"])
+    raw = float(coef @ vec) + intercept
+    lo = float(_head.get("score_min", 0.0))
+    hi = float(_head.get("score_max", 1.0))
+    return max(lo, min(hi, raw))
+
+
+def _is_scoring() -> bool:
+    return bool(_head) and _head.get("type") == "regression"
+
+
 def _confidence_word(p: float) -> str:
     if p >= CONF_HIGH:
         return "high"
@@ -142,6 +165,19 @@ def _confidence_word(p: float) -> str:
 @app.post("/v1/chat/completions")
 def chat_completions(req: ChatRequest):
     text = req.messages[-1].content if req.messages else ""
+    if _is_scoring():
+        score = _score(text)
+        # Return the bare score as message content so the orchestrator can read
+        # it the same way it reads a label — a drop-in for the chat contract.
+        content = f"{score:.4f}"
+        return {
+            "choices": [
+                {"index": 0,
+                 "message": {"role": "assistant", "content": content},
+                 "finish_reason": "stop"}
+            ],
+            "slemify": {"score": round(score, 4)},
+        }
     label, prob = _classify(text)
     content = f"{label}|{_confidence_word(prob)}"
     return {
@@ -152,6 +188,20 @@ def chat_completions(req: ChatRequest):
         ],
         "slemify": {"label": label, "probability": round(prob, 4)},
     }
+
+
+class ScoreRequest(BaseModel):
+    input: str
+
+
+@app.post("/score")
+def score(req: ScoreRequest):
+    """Native scoring endpoint. Returns {"score": <float in [0,1]>}."""
+    if not _is_scoring():
+        return JSONResponse(
+            {"error": "this model is a classifier, not a scoring head"},
+            status_code=400)
+    return {"score": round(_score(req.input), 4)}
 
 
 if __name__ == "__main__":

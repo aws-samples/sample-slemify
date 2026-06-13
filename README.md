@@ -11,7 +11,8 @@ slemify deploy --config expert.yaml
 Slemify picks the right model family from `project.task`:
 
 - `task: generation` — a causal LM fine-tuned with QLoRA on GPU, served on CPU (GGUF/llama.cpp). For reasoning and free-form output.
-- `task: classification` — a frozen encoder + a lightweight head, trained and served entirely on CPU in seconds. For routing, intent, and labeling. (`scoring`, `extraction`, and `reranking` extend this family.)
+- `task: classification` — a frozen encoder + a lightweight head, trained and served entirely on CPU in seconds. For routing, intent, and labeling.
+- `task: scoring` — the same encoder-head family with a regression head, trained and served on CPU. Returns a single number in [0,1]. For risk/quality/confidence guardrails. (`extraction` and `reranking` also extend this family.)
 
 ## When to Use an SLM
 
@@ -20,6 +21,7 @@ Not every task needs a frontier model. Most agentic AI systems have "hot spots".
 | Task Type | Example | Why SLM |
 |-----------|---------|---------|
 | Classification | Alert triage, intent routing, document categorization | Same pattern, different inputs. Fast, predictable output. |
+| Scoring | Risk/quality/confidence guardrails on a config, answer, or request | One number in [0,1] decides auto-approve vs escalate. Cheap on every request. |
 | Extraction | Pull structured fields from logs, invoices, clinical notes | Rigid output schema. Doesn't need world knowledge. |
 | Routing | Pick which tool/API/agent handles a request | Binary or multi-class decision. Sub-100ms matters. |
 | Validation | Safety checks, compliance gates, format verification | Rule-based logic baked into weights. Runs on every request. |
@@ -142,6 +144,7 @@ Downloads the HTML report from S3 and opens it in your browser. The report inclu
 | Task Type | Training Examples | Notes |
 |-----------|------------------|-------|
 | Classification (routing, triage) | 200-500 | Binary or multi-class. Clear categories. |
+| Scoring (risk, quality, confidence) | 500-1,200 | Regression target in [0,1]. Spread examples across the full range. |
 | Extraction (fields from text) | 500-1,000 | More examples = better edge case coverage. |
 | Structured generation (commands, configs) | 500-1,000 | Model needs to learn output format precisely. |
 
@@ -160,6 +163,7 @@ Inference cost depends on how you deploy. The reference deployment (llama.cpp on
 ## Examples
 
 - [K8s Autoscaling Auditor](examples/k8s-autoscaling/). Tiered SLM system: a triage classifier routes queries, an 8B auditor produces structured reasoning about Karpenter/KEDA/HPA misconfigurations
+- [K8s Autoscaling Risk Scorer](examples/k8s-autoscaling/risk-scorer/). A `task: scoring` encoder-head model that rates a config change's operational risk 0.0–1.0 on CPU — a cheap guardrail that auto-approves low-risk changes and escalates high-risk ones to the auditor
 
 ## Deep Dives
 
@@ -209,7 +213,7 @@ A: For general tasks, no. For YOUR specific structured task with YOUR categories
 A: SLMs and RAG solve different problems. RAG retrieves relevant context for knowledge questions. SLMs handle classification, routing, and extraction where you don't need retrieval. you need a fast decision. They work well together: SLM routes the query, RAG handles the knowledge lookup.
 
 **Q: Can I use a different base model?**
-A: Yes. For `task: generation`, any HuggingFace causal LM supported by Unsloth. For `task: classification`, any sentence-transformers encoder (e.g. `BAAI/bge-base-en-v1.5`). The auto-sizer adjusts infrastructure based on the task and model size.
+A: Yes. For `task: generation`, any HuggingFace causal LM supported by Unsloth. For encoder-head tasks (`task: classification`, `task: scoring`), any sentence-transformers encoder (e.g. `BAAI/bge-base-en-v1.5`). The auto-sizer adjusts infrastructure based on the task and model size.
 
 **Q: What happens during a Spot interruption?**
 A: Training checkpoints sync to S3 every 500 steps. The next pod resumes from the last checkpoint automatically. Max work lost: ~20 minutes.

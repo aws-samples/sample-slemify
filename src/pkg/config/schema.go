@@ -33,6 +33,7 @@ const (
 var supportedTasks = map[string]bool{
 	TaskGeneration:     true,
 	TaskClassification: true,
+	TaskScoring:        true,
 }
 
 // IsSupportedTask returns true if the task's pipeline is implemented.
@@ -76,6 +77,22 @@ func (p ProjectConfig) IsEncoderHead() bool {
 // IsEmbedding returns true for the contrastive embedding family.
 func (p ProjectConfig) IsEmbedding() bool {
 	return p.Task == TaskEmbedding
+}
+
+// IsScoring returns true for the regression/scoring task (numeric output).
+func (p ProjectConfig) IsScoring() bool {
+	return p.Task == TaskScoring
+}
+
+// UsesLabels returns true for tasks whose output is drawn from a label
+// taxonomy (classification, extraction). Scoring outputs a number, embedding
+// outputs a vector, and generation is free-form — none of those need labels.
+func (p ProjectConfig) UsesLabels() bool {
+	switch p.Task {
+	case TaskClassification, TaskExtraction:
+		return true
+	}
+	return false
 }
 
 // IsFreeForm returns true if a generation expert uses free-form output

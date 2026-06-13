@@ -116,6 +116,7 @@ func ClassifierJobManifest(cfg *config.ExpertConfig, ns string, pc *pipeline.Pip
 								{Name: "PROJECT", Value: cfg.Project.Name},
 								{Name: "EMBEDDING_MODEL_NAME", Value: cfg.Model.Base},
 								{Name: "HEAD", Value: cfg.Model.HeadType()},
+								{Name: "TASK", Value: cfg.Project.Task},
 								{Name: "HF_HOME", Value: "/tmp/hf-cache"},
 							},
 							Resources: corev1.ResourceRequirements{

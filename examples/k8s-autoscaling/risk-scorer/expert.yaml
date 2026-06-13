@@ -1,0 +1,44 @@
+apiVersion: slemify/v1
+
+project:
+  name: k8s-autoscaling-risk-scorer
+  task: scoring
+  domain: >
+    Score the operational risk of a Kubernetes autoscaling configuration or
+    change request on a scale from 0.0 (safe, routine, low blast radius) to
+    1.0 (dangerous, likely to cause an outage or data loss). Inputs are
+    Karpenter NodePool / EC2NodeClass, KEDA ScaledObject, HorizontalPodAutoscaler,
+    or PodDisruptionBudget snippets, often pasted into a Slack-style message
+    with a question. A LOW score (near 0.0) means the config is conservative and
+    well-guarded: sensible limits, disruption budgets in place, gradual
+    consolidation, validated images. A HIGH score (near 1.0) means the config
+    invites an incident: unbounded node limits, aggressive consolidation with no
+    PodDisruptionBudget, scaling to zero on a stateful workload, removing
+    termination grace, or replacing a whole NodePool at once on Spot. MID-range
+    scores (around 0.4-0.6) are ambiguous changes that need a human or the
+    expensive auditor to look closer. The score is used as a cheap CPU guardrail:
+    low-risk configs are auto-approved, high-risk configs are escalated to the
+    generative auditor for a full review.
+
+model:
+  base: ""  # encoder model ID for scoring (e.g. BAAI/bge-base-en-v1.5, 768d)
+  head: linear                 # logistic | linear | mlp (linear = regression)
+
+data:
+  bucket: slemify-data
+  path: k8s-autoscaling/data/
+  sources:
+    - path: queries/
+      type: raw
+  synthetic:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 1200
+  evaluation:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 150
+    sources:
+      - path: eval-queries/
+        type: raw
+
+training:
+  spot: true
