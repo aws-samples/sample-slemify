@@ -131,3 +131,70 @@ func PrintScoringMetrics(m *ScoringMetrics) {
 	}
 	fmt.Printf("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 }
+
+// RetrievalMetrics holds recall@k and MRR for a retrieval run.
+type RetrievalMetrics struct {
+	Recall1     float64 `json:"recall@1"`
+	Recall5     float64 `json:"recall@5"`
+	Recall10    float64 `json:"recall@10"`
+	MRR         float64 `json:"mrr"`
+	EvalQueries int     `json:"eval_queries"`
+}
+
+// EmbeddingMetrics mirrors the metrics.json written by the embedding training
+// job (contrastive fine-tune). It holds baseline (stock encoder) and tuned
+// retrieval metrics so the gain is visible.
+type EmbeddingMetrics struct {
+	Task         string           `json:"task"`
+	EmbeddingDim int              `json:"embedding_dim"`
+	TrainSamples int              `json:"train_samples"`
+	EvalQueries  int              `json:"eval_queries"`
+	CorpusSize   int              `json:"corpus_size"`
+	Epochs       int              `json:"epochs"`
+	TrainSeconds float64          `json:"train_seconds"`
+	Baseline     RetrievalMetrics `json:"baseline"`
+	Tuned        RetrievalMetrics `json:"tuned"`
+}
+
+// LoadEmbeddingMetrics reads models/<project>/metrics.json from S3 for an
+// embedding (contrastive) model.
+func LoadEmbeddingMetrics(ctx context.Context, dl S3Downloader, bucket, project string) (*EmbeddingMetrics, error) {
+	key := fmt.Sprintf("models/%s/metrics.json", project)
+	data, err := dl.DownloadFromS3(ctx, bucket, key)
+	if err != nil {
+		return nil, fmt.Errorf("downloading metrics.json: %w", err)
+	}
+	var m EmbeddingMetrics
+	if err := json.Unmarshal([]byte(data), &m); err != nil {
+		return nil, fmt.Errorf("parsing metrics.json: %w", err)
+	}
+	return &m, nil
+}
+
+// PrintEmbeddingMetrics renders the embedding (contrastive) retrieval report,
+// showing the stock encoder baseline next to the domain-tuned result.
+func PrintEmbeddingMetrics(m *EmbeddingMetrics) {
+	delta := func(tuned, base float64) string {
+		d := (tuned - base) * 100
+		sign := "+"
+		if d < 0 {
+			sign = ""
+		}
+		return fmt.Sprintf("%s%.1f pts", sign, d)
+	}
+	fmt.Printf("\n  ━━━ Embedding Report (contrastive retriever) ━━━\n")
+	fmt.Printf("  Metric        Stock     Tuned     Δ\n")
+	fmt.Printf("  Recall@1      %5.1f%%   %5.1f%%   %s\n",
+		m.Baseline.Recall1*100, m.Tuned.Recall1*100, delta(m.Tuned.Recall1, m.Baseline.Recall1))
+	fmt.Printf("  Recall@5      %5.1f%%   %5.1f%%   %s\n",
+		m.Baseline.Recall5*100, m.Tuned.Recall5*100, delta(m.Tuned.Recall5, m.Baseline.Recall5))
+	fmt.Printf("  Recall@10     %5.1f%%   %5.1f%%   %s\n",
+		m.Baseline.Recall10*100, m.Tuned.Recall10*100, delta(m.Tuned.Recall10, m.Baseline.Recall10))
+	fmt.Printf("  MRR           %5.3f    %5.3f    %s\n",
+		m.Baseline.MRR, m.Tuned.MRR, delta(m.Tuned.MRR, m.Baseline.MRR))
+	fmt.Printf("  Encoder:     %dd embeddings, %d epoch(s), %.0fs CPU train\n",
+		m.EmbeddingDim, m.Epochs, m.TrainSeconds)
+	fmt.Printf("  Data:        %d pairs / %d eval queries / %d-doc corpus\n",
+		m.TrainSamples, m.EvalQueries, m.CorpusSize)
+	fmt.Printf("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+}

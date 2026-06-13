@@ -25,7 +25,7 @@ import (
 func Stage(client *k8s.Client, cfg *config.ExpertConfig, sized config.SizedConfig, ns string, pc *pipeline.PipelineContext) pipeline.StageFunc {
 	return func(ctx context.Context) ([]string, error) {
 		var manifests *InferenceManifests
-		if cfg.Project.IsEncoderHead() {
+		if cfg.Project.IsEncoderHead() || cfg.Project.IsEmbedding() {
 			manifests = GenerateClassifierInferenceManifests(cfg, sized, ns, pc)
 		} else {
 			manifests = GenerateInferenceManifests(cfg, sized, ns, pc)
@@ -34,9 +34,9 @@ func Stage(client *k8s.Client, cfg *config.ExpertConfig, sized config.SizedConfi
 		fmt.Printf("  Instance: %s\n", sized.InferenceInstance)
 
 		// Apply S3 mount PV/PVC if Mountpoint CSI driver is being used.
-		// Only the generative (GGUF) path mounts a model from S3; the classifier
-		// loads its head.json directly via the AWS SDK at startup.
-		if pc.UseS3Mount && !cfg.Project.IsEncoderHead() {
+		// Only the generative (GGUF) path mounts a model from S3; the encoder
+		// family loads its ONNX artifacts directly via the AWS SDK at startup.
+		if pc.UseS3Mount && !cfg.Project.IsEncoderHead() && !cfg.Project.IsEmbedding() {
 			fmt.Printf("  Setting up S3 mount for model (Mountpoint CSI driver)...\n")
 			s3Manifests := S3MountManifests(cfg.Project.Name, cfg.Data.Bucket, ns)
 			for _, doc := range pipeline.SplitYAMLDocs(s3Manifests) {
@@ -73,12 +73,19 @@ func Stage(client *k8s.Client, cfg *config.ExpertConfig, sized config.SizedConfi
 
 		endpoint := fmt.Sprintf("http://%s-inference.%s.svc.cluster.local:8080", cfg.Project.Name, ns)
 
-		if cfg.Project.IsEncoderHead() {
-			// Encoder-head metrics were computed by the training job and written
+		if cfg.Project.IsEncoderHead() || cfg.Project.IsEmbedding() {
+			// Encoder family metrics were computed by the training job and written
 			// to metrics.json. Surface those instead of the generative
 			// LLM-as-judge report. Scoring uses regression metrics (MAE/R²);
+			// embedding uses retrieval metrics (recall@k/MRR, baseline vs tuned);
 			// classification uses exact-match accuracy + per-class P/R/F1.
-			if cfg.Project.IsScoring() {
+			if cfg.Project.IsEmbedding() {
+				if m, err := report.LoadEmbeddingMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
+					fmt.Printf("  ⚠ Could not load embedding metrics: %v\n", err)
+				} else {
+					report.PrintEmbeddingMetrics(m)
+				}
+			} else if cfg.Project.IsScoring() {
 				if m, err := report.LoadScoringMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
 					fmt.Printf("  ⚠ Could not load scoring metrics: %v\n", err)
 				} else {

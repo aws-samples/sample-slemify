@@ -34,6 +34,7 @@ var supportedTasks = map[string]bool{
 	TaskGeneration:     true,
 	TaskClassification: true,
 	TaskScoring:        true,
+	TaskEmbedding:      true,
 }
 
 // IsSupportedTask returns true if the task's pipeline is implemented.
@@ -82,6 +83,17 @@ func (p ProjectConfig) IsEmbedding() bool {
 // IsScoring returns true for the regression/scoring task (numeric output).
 func (p ProjectConfig) IsScoring() bool {
 	return p.Task == TaskScoring
+}
+
+// UsesPairs returns true for tasks that train on (query, document) pairs or
+// (query, positive, negative) triples rather than labeled single inputs:
+// embedding (contrastive) and reranking (cross-encoder).
+func (p ProjectConfig) UsesPairs() bool {
+	switch p.Task {
+	case TaskEmbedding, TaskReranking:
+		return true
+	}
+	return false
 }
 
 // UsesLabels returns true for tasks whose output is drawn from a label

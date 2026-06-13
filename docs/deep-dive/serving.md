@@ -23,6 +23,11 @@ How a model is served depends on its `project.task`:
   head**. The pod embeds the query identically, then computes `weights · vector +
   intercept` and clamps the result to `[0,1]`, returning a single number instead
   of a label. Same image, same artifacts layout — only the head shape differs.
+- **Embedding** (`task: embedding`) → **the same ONNX encoder pod, no head**.
+  There is no `head.json`; the pod returns the L2-normalized vector directly over
+  a TEI-compatible `POST /embed` (single string or batch) — a drop-in for a stock
+  embedding service, now domain-tuned. The vector is also available over
+  chat-completions as JSON for clients on that contract.
 
 The encoder-head serving pod deliberately exposes the **same OpenAI-compatible
 `/v1/chat/completions` contract** as the generative path. For classification it

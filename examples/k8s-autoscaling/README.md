@@ -9,6 +9,7 @@ k8s-autoscaling/
 ├── auditor/          # Auditor model config (8B generation, config analysis)
 ├── triage/           # Triage model config (encoder classifier, intent routing)
 ├── risk-scorer/      # Risk scorer config (encoder regression, 0.0-1.0 risk score)
+├── retriever/        # Retriever config (embedding, domain-tuned RAG vectors)
 ├── data/
 │   ├── queries/      # 76 training queries (real-world K8s configs)
 │   └── eval-queries/ # 14 held-out evaluation queries
@@ -26,9 +27,10 @@ k8s-autoscaling/
 |-------|------|------|---------|
 | Triage | encoder (bge-base, 768d) | `classification` — intent routing + confidence | ~25ms |
 | Risk Scorer | encoder (bge-base, 768d) | `scoring` — operational risk 0.0-1.0 | ~25ms |
+| Retriever | encoder (bge-base, 768d) | `embedding` — domain-tuned RAG vectors | ~25ms |
 | Auditor | 8B (q4_k_m) | `generation` — structured config analysis | ~14s streaming |
 
-All run on Graviton CPUs with no GPU required for serving. The auditor is fine-tuned on GPU (QLoRA); the encoder-head models (triage, risk scorer) train on CPU in seconds.
+All run on Graviton CPUs with no GPU required for serving. The auditor is fine-tuned on GPU (QLoRA); the encoder-family models (triage, risk scorer, retriever) train on CPU — the triage and scorer in seconds, the retriever in a few minutes (contrastive fine-tune).
 
 ## Quick Start
 
@@ -37,9 +39,11 @@ All run on Graviton CPUs with no GPU required for serving. The auditor is fine-t
 slemify train --config auditor/expert.yaml
 slemify train --config triage/expert.yaml
 slemify train --config risk-scorer/expert.yaml
+slemify train --config retriever/expert.yaml
 slemify deploy --config auditor/expert.yaml
 slemify deploy --config triage/expert.yaml
 slemify deploy --config risk-scorer/expert.yaml
+slemify deploy --config retriever/expert.yaml
 
 # Run the demo
 cd demo && ./scripts/deploy.sh

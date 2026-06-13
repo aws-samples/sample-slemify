@@ -117,6 +117,27 @@ Output one JSON object per line. No array brackets, no markdown, no explanation:
 {{"instruction": "...", "input": "...", "output": "0.87"}}"""
 
 
+EMBEDDING_QUERY_PROMPT = """You are generating training data for a domain-tuned text embedding model used in retrieval (RAG).
+
+DOMAIN CONTEXT:
+{domain}
+
+You are given a DOCUMENT CHUNK from the knowledge base. Write {n_queries} realistic, diverse questions that this specific chunk answers well. Each question must be answerable from THIS chunk — a retrieval system should return this chunk for that question.
+
+DOCUMENT CHUNK:
+{chunk}
+
+Guidelines:
+- Write natural questions a practitioner would actually type or ask in chat.
+- Vary phrasing: some keyword-style, some full sentences, some with typos or noise.
+- Do NOT copy sentences verbatim from the chunk; ask about what it explains.
+- Keep each question under 30 words. Do not number them.
+
+Output exactly {n_queries} JSON objects, one per line (JSONL). No array brackets, no markdown:
+{{"query": "..."}}
+{{"query": "..."}}"""
+
+
 # === Pipeline ===
 
 def main():
@@ -144,6 +165,7 @@ def main():
     # as the legacy pipe-delimited generation path; only the trainer differs.
     is_free_form = (task == "generation" and output_format == "free_form")
     is_scoring = (task == "scoring")
+    is_embedding = (task == "embedding")
     if is_free_form:
         gen_format = "free_form"
     elif is_scoring:
@@ -156,6 +178,14 @@ def main():
     raw_content = read_raw_sources(
         data_cfg["bucket"], data_cfg["path"], data_cfg.get("sources", []))
     logger.info("Read %d raw source files", len(raw_content))
+
+    # Embedding (contrastive) has a different data shape — (query, positive)
+    # pairs mined from the document corpus, not {instruction, input, output}
+    # records — so it runs a dedicated pipeline and returns early.
+    if is_embedding:
+        run_embedding_pipeline(config, data_cfg, project_name, domain,
+                               raw_content, synthetic_cfg)
+        return
 
     # Phase 2: Generate training pairs via Bedrock
     if not synthetic_cfg.get("model") or not synthetic_cfg.get("pairs", 0):
@@ -264,6 +294,159 @@ def main():
     _write_output_stats(bucket, project_name, train_records)
 
     logger.info("Data pipeline complete")
+
+
+# === Embedding (contrastive) pipeline ===
+
+def _chunk_documents(raw_content, chunk_chars=1200, overlap=150, min_chars=200):
+    """Split raw source files into retrieval-sized chunks.
+
+    Each chunk becomes a "positive" document; Bedrock writes the queries it
+    answers. Chunks are paragraph-aware (split on blank lines) and then packed
+    to roughly chunk_chars so they fit comfortably under the encoder's token cap.
+    """
+    chunks = []
+    for rec in raw_content:
+        content = rec.get("content", "").strip()
+        source = rec.get("source", "unknown")
+        if len(content) < min_chars:
+            if content:
+                chunks.append({"text": content, "source": source})
+            continue
+        paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
+        buf = ""
+        for para in paragraphs:
+            if len(buf) + len(para) + 2 > chunk_chars and len(buf) >= min_chars:
+                chunks.append({"text": buf.strip(), "source": source})
+                buf = buf[-overlap:] + "\n\n" + para
+            else:
+                buf = (buf + "\n\n" + para) if buf else para
+        if len(buf.strip()) >= min_chars:
+            chunks.append({"text": buf.strip(), "source": source})
+    return chunks
+
+
+def _generate_queries_for_chunk(backend, domain, chunk_text, n_queries):
+    """Ask the backend for n_queries questions answerable by this chunk."""
+    prompt = EMBEDDING_QUERY_PROMPT.format(
+        domain=domain, chunk=chunk_text[:4000], n_queries=n_queries)
+    response = _call_with_retry(backend, prompt)
+    if not response:
+        return []
+    queries = []
+    for line in response.strip().splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+            q = str(obj.get("query", "")).strip()
+            if q:
+                queries.append(q)
+        except json.JSONDecodeError:
+            continue
+    return queries
+
+
+def _generate_pairs(raw_content, model, endpoint, target_pairs, domain, queries_per_chunk=3):
+    """Generate (query, positive) pairs by writing queries for each doc chunk."""
+    backend = _select_backend(model, endpoint)
+    concurrency = _calculate_concurrency(model) if not endpoint else 20
+
+    chunks = _chunk_documents(raw_content)
+    if not chunks:
+        return [], []
+    logger.info("Chunked corpus into %d document chunks", len(chunks))
+
+    # Only process as many chunks as needed to hit the target pair count.
+    needed_chunks = min(len(chunks), (target_pairs + queries_per_chunk - 1) // queries_per_chunk)
+    selected = random.sample(chunks, needed_chunks)
+
+    pairs = []
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {
+            pool.submit(_generate_queries_for_chunk, backend, domain,
+                        c["text"], queries_per_chunk): c
+            for c in selected
+        }
+        done = 0
+        for future in as_completed(futures):
+            chunk = futures[future]
+            done += 1
+            try:
+                queries = future.result()
+            except Exception as e:
+                logger.warning("Query generation failed: %s", e)
+                continue
+            for q in queries:
+                pairs.append({"query": q, "positive": chunk["text"],
+                              "source": chunk.get("source", "")})
+            if done % 25 == 0:
+                logger.info("  %d/%d chunks processed, %d pairs so far",
+                            done, len(selected), len(pairs))
+
+    # Return both the pairs and the full chunk corpus (used as the retrieval
+    # index for eval recall@k).
+    return pairs[:target_pairs], chunks
+
+
+def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, synthetic_cfg):
+    """Generate contrastive (query, positive) pairs and a retrieval corpus.
+
+    Writes:
+      <project>/processed/train.jsonl  — {query, positive} pairs for training
+      <project>/processed/eval.jsonl   — {query, positive, source} held-out pairs
+      <project>/processed/corpus.jsonl — {text, source} all chunks (eval index)
+    """
+    if not synthetic_cfg.get("model") or not synthetic_cfg.get("pairs", 0):
+        logger.error("synthetic.model and synthetic.pairs are required")
+        sys.exit(1)
+    if not raw_content:
+        logger.error("task=embedding requires source documents to mine pairs from")
+        sys.exit(1)
+
+    bucket = data_cfg["bucket"]
+    logger.info("Generating %d (query, positive) pairs via %s...",
+                synthetic_cfg["pairs"], synthetic_cfg["model"])
+
+    pairs, chunks = _generate_pairs(
+        raw_content=raw_content,
+        model=synthetic_cfg["model"],
+        endpoint=synthetic_cfg.get("endpoint", ""),
+        target_pairs=synthetic_cfg["pairs"],
+        domain=domain,
+    )
+    if not pairs:
+        logger.error("No (query, positive) pairs generated")
+        sys.exit(1)
+    logger.info("Generated %d pairs from %d chunks", len(pairs), len(chunks))
+
+    # Independent eval: prefer a separate eval source/model when configured,
+    # otherwise hold out a slice of the generated pairs.
+    eval_cfg = data_cfg.get("evaluation") or {}
+    if eval_cfg.get("model") and eval_cfg.get("pairs", 0):
+        eval_sources = eval_cfg.get("sources", data_cfg.get("sources", []))
+        eval_raw = read_raw_sources(bucket, data_cfg["path"], eval_sources) or raw_content
+        eval_pairs, _ = _generate_pairs(
+            raw_content=eval_raw, model=eval_cfg["model"], endpoint="",
+            target_pairs=eval_cfg["pairs"], domain=domain)
+        train_pairs = pairs
+    else:
+        split_ratio = data_cfg.get("split_ratio", 0.9)
+        split_idx = int(len(pairs) * split_ratio)
+        train_pairs = pairs[:split_idx]
+        eval_pairs = pairs[split_idx:]
+
+    if not eval_pairs:
+        # Guarantee a non-empty eval set even for tiny corpora.
+        eval_pairs = train_pairs[-max(1, len(train_pairs) // 10):]
+
+    logger.info("Writing %d train / %d eval pairs and %d-chunk corpus to s3://%s/",
+                len(train_pairs), len(eval_pairs), len(chunks), bucket)
+    write_jsonl_to_s3(bucket, f"{project_name}/processed/train.jsonl", train_pairs)
+    write_jsonl_to_s3(bucket, f"{project_name}/processed/eval.jsonl", eval_pairs)
+    write_jsonl_to_s3(bucket, f"{project_name}/processed/corpus.jsonl", chunks)
+    logger.info("Embedding data pipeline complete")
 
 
 # === S3 I/O ===

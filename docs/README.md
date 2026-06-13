@@ -30,9 +30,9 @@ The deep dives below note where the two paths differ.
 | Stage | Doc | What it covers |
 |-------|-----|----------------|
 | Data | [data.md](deep-dive/data.md) | Raw data quality, synthetic generation, label taxonomy, class balance, independent evaluation |
-| Training | [training.md](deep-dive/training.md) | Generation: QLoRA fine-tuning, sizing, Spot GPU, GGUF. Classification: frozen-encoder + head fit on CPU |
-| Serving | [serving.md](deep-dive/serving.md) | Generation: llama.cpp + GGUF. Classification: encoder + head. CPU inference, latency, autoscaling |
-| Report | [report.md](deep-dive/report.md) | Generation: LLM-as-judge. Classification: exact-match accuracy + per-class P/R/F1. Cost projections |
+| Training | [training.md](deep-dive/training.md) | Generation: QLoRA fine-tuning, sizing, Spot GPU, GGUF. Encoder-head: frozen-encoder + head fit on CPU. Embedding: contrastive fine-tune on CPU |
+| Serving | [serving.md](deep-dive/serving.md) | Generation: llama.cpp + GGUF. Encoder family: encoder + head/vector via ONNX. CPU inference, latency, autoscaling |
+| Report | [report.md](deep-dive/report.md) | Generation: LLM-as-judge. Classification: accuracy + per-class P/R/F1. Scoring: MAE/R². Embedding: recall@k/MRR. Cost projections |
 
 ## Further Reading
 

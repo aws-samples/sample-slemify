@@ -70,6 +70,15 @@ func ClassifierJobManifest(cfg *config.ExpertConfig, ns string, pc *pipeline.Pip
 	backoffLimit := int32(2)
 	automountSA := pc.ServiceAccount != ""
 
+	// Encoder-head tasks (classification, scoring) only fit a small head on
+	// frozen embeddings — 6Gi is plenty. Embedding (contrastive) actually
+	// backprops through the encoder via the HF Trainer (model + optimizer
+	// state + gradients), which needs materially more memory.
+	trainMem := "6Gi"
+	if cfg.Project.IsEmbedding() {
+		trainMem = "12Gi"
+	}
+
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-training", cfg.Project.Name),
@@ -117,17 +126,18 @@ func ClassifierJobManifest(cfg *config.ExpertConfig, ns string, pc *pipeline.Pip
 								{Name: "EMBEDDING_MODEL_NAME", Value: cfg.Model.Base},
 								{Name: "HEAD", Value: cfg.Model.HeadType()},
 								{Name: "TASK", Value: cfg.Project.Task},
+								{Name: "EPOCHS", Value: fmt.Sprintf("%d", cfg.Training.Epochs)},
 								{Name: "HF_HOME", Value: "/tmp/hf-cache"},
 							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
 									// Embedding + ONNX export load torch and the
 									// encoder into memory; size accordingly.
-									corev1.ResourceMemory: resource.MustParse("6Gi"),
+									corev1.ResourceMemory: resource.MustParse(trainMem),
 									corev1.ResourceCPU:    resource.MustParse("2"),
 								},
 								Limits: corev1.ResourceList{
-									corev1.ResourceMemory: resource.MustParse("6Gi"),
+									corev1.ResourceMemory: resource.MustParse(trainMem),
 								},
 							},
 							VolumeMounts: []corev1.VolumeMount{

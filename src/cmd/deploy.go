@@ -110,9 +110,10 @@ func deploySingleExpert(ctx context.Context, cmd *cobra.Command, cfg *config.Exp
 			return err
 		}
 		runner.RegisterStage(pipeline.StageData, data.Stage(client, cfg, namespace, pc))
-		if cfg.Project.IsEncoderHead() {
-			// Encoder-head (classification, ...): deploy the managed encoder,
-			// then train the classifier head on CPU. No GPU, no GGUF quantize.
+		if cfg.Project.IsEncoderHead() || cfg.Project.IsEmbedding() {
+			// Encoder family (classification/scoring/embedding): train on CPU
+			// (frozen-head fit or contrastive fine-tune) and export ONNX. No GPU,
+			// no GGUF quantize.
 			runner.RegisterStage(pipeline.StageTraining, training.ClassifierStage(client, cfg, namespace, pc))
 			runner.RegisterStage(pipeline.StageQuantize, func(ctx context.Context) ([]string, error) { return nil, nil })
 			runner.RegisterStage(pipeline.StageServing, serving.Stage(client, cfg, sized, namespace, pc))
@@ -263,8 +264,8 @@ func registerDryRunStages(runner *pipeline.Runner, cfg *config.ExpertConfig, siz
 		}, nil
 	})
 
-	if cfg.Project.IsEncoderHead() {
-		// Encoder-head (classification, ...): managed encoder + CPU head training,
+	if cfg.Project.IsEncoderHead() || cfg.Project.IsEmbedding() {
+		// Encoder family (classification/scoring/embedding): CPU training + ONNX,
 		// no GPU, no GGUF quantization.
 		runner.RegisterStage(pipeline.StageTraining, func(ctx context.Context) ([]string, error) {
 			fmt.Printf("  Encoder: %s (managed TEI, CPU)\n", cfg.Model.Base)

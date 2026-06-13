@@ -8,17 +8,17 @@ Your only decision at this stage is which base model to use and whether to enabl
 
 Slemify has two training engines, chosen by `project.task`. The rest of this
 document describes the **generation** path in detail; the **encoder-head**
-path (`classification`, `scoring`) is summarized here and shares the data and
-report stages.
+path (`classification`, `scoring`) and the **embedding** path are summarized
+here and share the data and report stages.
 
-| | Generation (`task: generation`) | Encoder-head (`classification`, `scoring`) |
-|---|---|---|
-| What's trained | A causal LM, via QLoRA | A small head on a frozen encoder |
-| Engine | Unsloth + TRL (SFTTrainer) | scikit-learn (logistic regression for classification, ridge regression for scoring) |
-| Hardware | GPU (Spot) | **CPU** |
-| Time | ~10-30 min | **seconds to a couple of minutes** |
-| Output | GGUF (quantized) | `head.json` + `encoder.onnx` + `tokenizer.json` |
-| Why | The model must *generate* text | The encoder already understands language; only a decision rule is learned |
+| | Generation (`task: generation`) | Encoder-head (`classification`, `scoring`) | Embedding (`task: embedding`) |
+|---|---|---|---|
+| What's trained | A causal LM, via QLoRA | A small head on a frozen encoder | The encoder itself, contrastively |
+| Engine | Unsloth + TRL (SFTTrainer) | scikit-learn (logistic/ridge) | sentence-transformers (MultipleNegativesRankingLoss) |
+| Hardware | GPU (Spot) | **CPU** | **CPU** |
+| Time | ~10-30 min | **seconds to a couple of minutes** | **a few minutes** |
+| Output | GGUF (quantized) | `head.json` + `encoder.onnx` + `tokenizer.json` | `encoder.onnx` + `tokenizer.json` (no head) |
+| Why | The model must *generate* text | The encoder already understands language; only a decision rule is learned | The encoder must learn *your domain's* notion of similarity |
 
 The encoder-head path is fast because nothing in the billion-parameter encoder
 is updated. The training job embeds each input once (a forward pass through the
@@ -30,6 +30,17 @@ epochs, and no GPU. The same job then exports the frozen encoder to ONNX so
 serving needs neither torch nor sentence-transformers. The expensive, GPU-hungry
 work (learning language) was already done once when the encoder was pretrained;
 every encoder-head task rides on top of it cheaply.
+
+The **embedding** path is the one encoder family that *does* update the encoder.
+It runs contrastive training: each `(query, positive)` pair is pulled together
+in vector space while the other documents in the same batch act as in-batch
+negatives (MultipleNegativesRankingLoss). This is still CPU-feasible for the
+small encoders Slemify targets — sequence length is capped (256 tokens) and the
+batch kept modest to bound memory. The job measures retrieval recall@k/MRR
+before and after fine-tuning (stock vs tuned) so the gain is explicit, saves the
+tuned encoder, and exports *that* to ONNX. A domain corpus typically lifts
+recall@1 by 10+ points over a stock general-purpose encoder in a couple of
+minutes of CPU training.
 
 Everything below — QLoRA, model sizing, Spot recovery, quantization — applies to
 the **generation** path.

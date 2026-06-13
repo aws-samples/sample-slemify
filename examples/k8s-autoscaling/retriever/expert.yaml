@@ -1,0 +1,42 @@
+apiVersion: slemify/v1
+
+project:
+  name: k8s-autoscaling-retriever
+  task: embedding
+  domain: >
+    Domain-tuned text embeddings for Kubernetes autoscaling knowledge
+    retrieval (RAG). The corpus is real-world Karpenter, KEDA, HPA, and
+    PodDisruptionBudget scenarios — NodePool and EC2NodeClass configs, KEDA
+    ScaledObjects, scaling and Spot-interruption questions, drift and
+    consolidation issues. The embedding model maps a practitioner's question
+    and the documents that answer it into the same vector space so that vector
+    search returns the right document. Fine-tuning on in-domain (question,
+    document) pairs sharpens retrieval over a stock general-purpose encoder.
+
+# No project.labels — embedding output is a vector, not a label.
+# No model.head — contrastive training fine-tunes the encoder itself.
+
+model:
+  base: ""  # encoder model ID to fine-tune (e.g. BAAI/bge-base-en-v1.5, 768d)
+
+data:
+  bucket: slemify-data
+  path: k8s-autoscaling/data/
+  # The corpus to mine (query, document) pairs from. Each document chunk gets
+  # synthetic questions written for it; pairs train the retriever.
+  sources:
+    - path: queries/
+      type: raw
+  synthetic:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 1000
+  evaluation:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 150
+    sources:
+      - path: eval-queries/
+        type: raw
+
+training:
+  spot: true
+  epochs: 2  # contrastive fine-tune epochs

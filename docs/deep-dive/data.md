@@ -168,6 +168,35 @@ project:
 
 The biggest data lever for scoring is the same as for classification: diverse raw source data. If every raw example describes a safe config, the generator can't anchor the high end of the scale, and the histogram warning will tell you so.
 
+## Embedding data (query/document pairs)
+
+For `task: embedding`, the pipeline produces a different shape entirely: `(query, positive)` pairs, not `{instruction, input, output}` records. The corpus you point `data.sources` at becomes the set of documents; for each document chunk, Bedrock writes the realistic questions that chunk answers. Those question→document pairs are what contrastive training learns from.
+
+The flow:
+
+1. **Chunk.** Each raw source file is split into retrieval-sized chunks (paragraph-aware, ~1200 chars). Each chunk is a candidate "positive" document.
+2. **Generate.** For each chunk, Bedrock writes a few diverse questions answerable by that chunk. Each becomes a `{query, positive}` pair.
+3. **Write.** The pipeline writes `train.jsonl` and `eval.jsonl` (the pairs) plus `corpus.jsonl` (every chunk). The corpus is the retrieval index the report uses to measure recall@k.
+
+```yaml
+# Example: domain retriever
+project:
+  name: k8s-autoscaling-retriever
+  task: embedding
+  domain: >
+    Domain-tuned embeddings for Kubernetes autoscaling knowledge retrieval.
+# no project.labels — output is a vector
+data:
+  sources:
+    - path: queries/   # the corpus to mine pairs from
+      type: raw
+  synthetic:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 1000
+```
+
+The retrieval metric only works if each eval query's gold document exists in the index, so the trainer adds the eval positives to the corpus (with the training chunks as distractors). The data lever here is corpus coverage: the documents you want retrievable in production must be in your sources.
+
 ## Independent evaluation data
 
 Training and evaluation data must be generated independently. If you split a single batch 90/10, you're testing memorization, not generalization. The eval samples are stylistically identical to the training samples because they came from the same generation run.

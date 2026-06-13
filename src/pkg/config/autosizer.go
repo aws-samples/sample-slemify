@@ -21,6 +21,12 @@ func AutoSizeForTask(model ModelConfig, data DataConfig, training TrainingConfig
 	if isEncoderHeadTask(task) {
 		return autoSizeEncoderHead(data, training)
 	}
+	if task == TaskEmbedding {
+		// Contrastive embedding training runs on CPU (backprop through a small
+		// encoder is feasible for the sizes Slemify targets). Serving is the
+		// fine-tuned encoder via ONNX on CPU.
+		return autoSizeEncoderHead(data, training)
+	}
 	return autoSizeGeneration(model, data, training)
 }
 

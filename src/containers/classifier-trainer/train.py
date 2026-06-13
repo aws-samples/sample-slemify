@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-"""Slemify encoder-head classifier trainer (CPU, no GPU, no GGUF).
+"""Slemify encoder-head trainer (CPU, no GPU, no GGUF).
 
-Runs as a K8s Job. Embeds training inputs in-process with sentence-transformers,
-fits a classifier head, and exports the encoder to ONNX so serving needs neither
-torch nor sentence-transformers.
+Runs as a K8s Job. Handles three CPU model families that all export the encoder
+to ONNX so serving needs neither torch nor sentence-transformers:
 
-Steps:
-  1. Read train.jsonl / eval.jsonl from S3.
-  2. Embed inputs in-process (sentence-transformers, CLS pooling, normalized).
-  3. Fit a logistic head on embeddings -> labels; evaluate on eval.
-  4. Export the encoder to ONNX (optimum) + tokenizer.
-  5. Upload head.json, labels.json, metrics.json, encoder.onnx, tokenizer.json.
+  - classification: embed inputs with a frozen encoder, fit a logistic head.
+  - scoring:        embed inputs with a frozen encoder, fit a ridge regression head.
+  - embedding:      contrastively fine-tune the encoder itself (MultipleNegatives
+                    RankingLoss) on (query, positive) pairs, then export it.
 
 Config via environment variables:
-  S3_BUCKET, PROJECT, EMBEDDING_MODEL_NAME, HEAD
+  S3_BUCKET, PROJECT, EMBEDDING_MODEL_NAME, HEAD, TASK, EPOCHS
 """
 import json
 import os
@@ -31,8 +28,13 @@ S3_BUCKET = os.environ.get("S3_BUCKET", "")
 PROJECT = os.environ.get("PROJECT", "")
 MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "BAAI/bge-base-en-v1.5")
 HEAD = os.environ.get("HEAD", "logistic")
-# TASK selects classification (label head) vs scoring (regression head).
+# TASK selects classification (label head), scoring (regression head), or
+# embedding (contrastive fine-tune of the encoder).
 TASK = os.environ.get("TASK", "classification")
+# EPOCHS applies to contrastive embedding training (head tasks solve directly).
+EPOCHS = int(os.environ.get("EPOCHS", "2") or "2")
+if EPOCHS < 1:
+    EPOCHS = 2
 
 s3 = boto3.client("s3")
 
@@ -81,10 +83,14 @@ def to_xy_scoring(rows):
     return X, np.asarray(y, dtype=np.float32)
 
 
-def export_onnx(out_dir):
-    """Export the encoder to ONNX via optimum (transformers library path)."""
+def export_onnx(out_dir, source=None):
+    """Export an encoder to ONNX via optimum (transformers library path).
+
+    source defaults to the configured HF model id; for embedding training it
+    points at the locally fine-tuned model directory.
+    """
     from optimum.exporters.onnx import main_export
-    main_export(MODEL_NAME, output=out_dir, task="feature-extraction",
+    main_export(source or MODEL_NAME, output=out_dir, task="feature-extraction",
                 library_name="transformers")
 
 
@@ -103,7 +109,9 @@ def main():
     log(f"Loaded train={len(train_rows)} eval={len(eval_rows)}")
 
     is_scoring = (TASK == "scoring")
-    if is_scoring:
+    if TASK == "embedding":
+        train_embedding(model, train_rows, eval_rows)
+    elif is_scoring:
         train_scoring(model, train_rows, eval_rows)
     else:
         train_classification(model, train_rows, eval_rows)
@@ -116,12 +124,16 @@ def _embed(model, texts):
                      show_progress_bar=False), dtype=np.float32)
 
 
-def _export_and_upload_encoder(prefix):
-    """Export the frozen encoder to ONNX and upload encoder.onnx + tokenizer.json."""
+def _export_and_upload_encoder(prefix, source=None):
+    """Export the encoder to ONNX and upload encoder.onnx + tokenizer.json.
+
+    source defaults to the configured HF model id; embedding training passes the
+    locally fine-tuned model directory so the exported graph is the tuned model.
+    """
     log("Exporting encoder to ONNX...")
     onnx_dir = "/tmp/onnx-export"
     os.makedirs(onnx_dir, exist_ok=True)
-    export_onnx(onnx_dir)
+    export_onnx(onnx_dir, source=source)
     for fname in ("model.onnx", "tokenizer.json"):
         fpath = os.path.join(onnx_dir, fname)
         key = f"{prefix}/encoder.onnx" if fname == "model.onnx" else f"{prefix}/tokenizer.json"
@@ -252,6 +264,133 @@ def train_scoring(model, train_rows, eval_rows):
                   Body=json.dumps(metrics, indent=2).encode(), ContentType="application/json")
 
     _export_and_upload_encoder(prefix)
+    log(f"Artifacts uploaded to s3://{S3_BUCKET}/{prefix}/")
+    log("=== Training complete ===")
+
+
+def _retrieval_metrics(model, eval_pairs, corpus_texts, ks=(1, 5, 10)):
+    """Compute recall@k and MRR for query->positive retrieval over the corpus.
+
+    Each eval pair's positive document is located in the corpus; we embed all
+    corpus docs once and each query, then rank by cosine similarity.
+    """
+    if not eval_pairs or not corpus_texts:
+        return {}
+    # Map positive text -> its index in the corpus (exact match on chunk text).
+    corpus_index = {t: i for i, t in enumerate(corpus_texts)}
+    queries, gold = [], []
+    for p in eval_pairs:
+        pos = p.get("positive", "")
+        if pos in corpus_index:
+            queries.append(p.get("query", ""))
+            gold.append(corpus_index[pos])
+    if not queries:
+        return {}
+
+    doc_vecs = _embed(model, corpus_texts)
+    q_vecs = _embed(model, queries)
+    # Cosine similarity (vectors are already L2-normalized) -> [n_queries, n_docs].
+    sims = q_vecs @ doc_vecs.T
+
+    max_k = max(ks)
+    # Top-k doc indices per query, best first.
+    topk = np.argsort(-sims, axis=1)[:, :max_k]
+    metrics = {}
+    for k in ks:
+        hits = sum(1 for i, g in enumerate(gold) if g in topk[i, :k])
+        metrics[f"recall@{k}"] = hits / len(gold)
+    # MRR over the top max_k.
+    rr = 0.0
+    for i, g in enumerate(gold):
+        row = topk[i].tolist()
+        if g in row:
+            rr += 1.0 / (row.index(g) + 1)
+    metrics["mrr"] = rr / len(gold)
+    metrics["eval_queries"] = len(gold)
+    return metrics
+
+
+def train_embedding(model, train_rows, eval_rows):
+    """Contrastively fine-tune the encoder on (query, positive) pairs."""
+    from sentence_transformers import InputExample, losses
+    from torch.utils.data import DataLoader
+
+    # Cap sequence length to keep CPU activation memory bounded. Retrieval
+    # chunks and queries are short; 256 tokens is ample and ~4x lighter than the
+    # 512 default for the contrastive forward/backward pass.
+    model.max_seq_length = min(getattr(model, "max_seq_length", 256) or 256, 256)
+
+    pairs = [(r.get("query", ""), r.get("positive", ""))
+             for r in train_rows if r.get("query") and r.get("positive")]
+    if not pairs:
+        log("ERROR: no (query, positive) training pairs")
+        sys.exit(1)
+    log(f"Training pairs: {len(pairs)} (max_seq_length={model.max_seq_length})")
+
+    # Build the retrieval corpus for eval: prefer corpus.jsonl, fall back to the
+    # set of positive documents seen in train+eval.
+    try:
+        corpus_rows = load_jsonl_s3(f"{PROJECT}/processed/corpus.jsonl")
+        corpus_texts = [c.get("text", "") for c in corpus_rows if c.get("text")]
+    except Exception:
+        corpus_texts = []
+    if not corpus_texts:
+        seen = {r.get("positive", "") for r in train_rows + eval_rows if r.get("positive")}
+        corpus_texts = sorted(t for t in seen if t)
+    # Eval pairs are generated from an independent source, so their gold
+    # documents may not be in the training corpus. Add them so each eval query
+    # has its positive present; the training chunks act as distractors. This
+    # keeps recall@k honest (gold among a realistic candidate set).
+    eval_positives = {r.get("positive", "") for r in eval_rows if r.get("positive")}
+    corpus_set = set(corpus_texts)
+    corpus_texts = corpus_texts + [t for t in eval_positives if t and t not in corpus_set]
+    log(f"Retrieval corpus: {len(corpus_texts)} documents")
+
+    # Baseline retrieval metrics (stock encoder) for a before/after comparison.
+    baseline = _retrieval_metrics(model, eval_rows, corpus_texts)
+    if baseline:
+        log(f"Baseline (stock encoder): recall@5={baseline.get('recall@5', 0):.3f} "
+            f"mrr={baseline.get('mrr', 0):.3f}")
+
+    # Contrastive fine-tune with in-batch negatives (MultipleNegativesRankingLoss).
+    examples = [InputExample(texts=[q, p]) for q, p in pairs]
+    loader = DataLoader(examples, shuffle=True, batch_size=16, drop_last=True)
+    loss = losses.MultipleNegativesRankingLoss(model)
+    warmup = max(1, int(len(loader) * EPOCHS * 0.1))
+    log(f"Fine-tuning: {EPOCHS} epoch(s), {len(loader)} batches/epoch, warmup={warmup}")
+    # sentence-transformers 3.x routes fit() through the HF Trainer, which writes
+    # a relative "checkpoints/" dir. The container root filesystem is read-only;
+    # only /tmp is writable, so run from there.
+    os.makedirs("/tmp/st-train", exist_ok=True)
+    os.chdir("/tmp/st-train")
+    t0 = time.time()
+    model.fit(train_objectives=[(loader, loss)], epochs=EPOCHS,
+              warmup_steps=warmup, show_progress_bar=False)
+    train_s = time.time() - t0
+    log(f"Fine-tune complete in {train_s:.0f}s")
+
+    tuned = _retrieval_metrics(model, eval_rows, corpus_texts)
+    if tuned:
+        log(f"Tuned encoder: recall@5={tuned.get('recall@5', 0):.3f} "
+            f"mrr={tuned.get('mrr', 0):.3f}")
+
+    dim = int(model.get_sentence_embedding_dimension())
+    metrics = {"task": "embedding", "embedding_dim": dim,
+               "train_samples": len(pairs), "eval_queries": tuned.get("eval_queries", 0),
+               "corpus_size": len(corpus_texts), "epochs": EPOCHS,
+               "train_seconds": round(train_s, 1),
+               "baseline": baseline, "tuned": tuned}
+
+    # Persist the fine-tuned model, then export THAT to ONNX.
+    tuned_dir = "/tmp/tuned-model"
+    model.save(tuned_dir)
+
+    prefix = f"models/{PROJECT}"
+    log("Uploading metrics to S3...")
+    s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}/metrics.json",
+                  Body=json.dumps(metrics, indent=2).encode(), ContentType="application/json")
+
+    _export_and_upload_encoder(prefix, source=tuned_dir)
     log(f"Artifacts uploaded to s3://{S3_BUCKET}/{prefix}/")
     log("=== Training complete ===")
 

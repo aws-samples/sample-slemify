@@ -75,8 +75,11 @@ func GenerateClassifierInferenceManifests(cfg *config.ExpertConfig, sized config
 							Env: []corev1.EnvVar{
 								// Downloads encoder.onnx + tokenizer.json + head.json
 								// from s3://<bucket>/models/<project>/ at startup.
+								// Embedding models have no head.json; TASK tells the
+								// pod to skip it and serve vectors.
 								{Name: "S3_BUCKET", Value: cfg.Data.Bucket},
 								{Name: "PROJECT", Value: cfg.Project.Name},
+								{Name: "TASK", Value: cfg.Project.Task},
 							},
 							Ports: []corev1.ContainerPort{
 								{Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP},

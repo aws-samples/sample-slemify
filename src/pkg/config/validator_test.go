@@ -122,6 +122,47 @@ func TestValidateScoringValid(t *testing.T) {
 	}
 }
 
+func TestValidateEmbeddingValid(t *testing.T) {
+	// embedding is supported, needs sources (a corpus), no labels, no head.
+	cfg := validConfig()
+	cfg.Project.Task = TaskEmbedding
+	cfg.Model.Base = "BAAI/bge-base-en-v1.5"
+	cfg.Model.Quantize = ""
+	cfg.Model.Head = ""
+	cfg.Project.Labels = nil
+	cfg.Data.Sources = []SourceConfig{{Path: "queries/", Type: "raw"}}
+	errs := Validate(cfg)
+	if len(errs) > 0 {
+		t.Errorf("expected valid embedding config, got: %v", errs)
+	}
+}
+
+func TestValidateEmbeddingRequiresSources(t *testing.T) {
+	cfg := validConfig()
+	cfg.Project.Task = TaskEmbedding
+	cfg.Model.Base = "BAAI/bge-base-en-v1.5"
+	cfg.Model.Quantize = ""
+	cfg.Project.Labels = nil
+	cfg.Data.Sources = nil
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "data.sources") {
+		t.Errorf("expected sources-required error for embedding, got: %v", errs)
+	}
+}
+
+func TestValidateEmbeddingRejectsLabels(t *testing.T) {
+	cfg := validConfig()
+	cfg.Project.Task = TaskEmbedding
+	cfg.Model.Base = "BAAI/bge-base-en-v1.5"
+	cfg.Model.Quantize = ""
+	cfg.Project.Labels = map[string][]string{"routing": {"a", "b"}}
+	cfg.Data.Sources = []SourceConfig{{Path: "queries/", Type: "raw"}}
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "project.labels") {
+		t.Errorf("expected labels-rejected error for embedding, got: %v", errs)
+	}
+}
+
 func TestValidateClassificationRequiresLabels(t *testing.T) {
 	cfg := validConfig()
 	cfg.Project.Task = TaskClassification

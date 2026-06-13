@@ -79,8 +79,43 @@ func Validate(cfg *ExpertConfig) []ValidationError {
 				Message: "quantize applies only to task=generation (encoder-head models are not quantized to GGUF)",
 			})
 		}
+	} else if cfg.Project.IsEmbedding() {
+		// Embedding (contrastive) trains an encoder on (query, document) pairs
+		// synthesized from the raw corpus. It has no label taxonomy, no
+		// classifier head, and is not quantized to GGUF.
+		if len(cfg.Project.Labels) > 0 {
+			errs = append(errs, ValidationError{
+				Field:   "project.labels",
+				Message: "labels do not apply to task=embedding (output is a vector, not a label)",
+			})
+		}
+		if cfg.Model.Head != "" {
+			errs = append(errs, ValidationError{
+				Field:   "model.head",
+				Message: "head applies only to encoder-head tasks (classification, scoring, extraction, reranking)",
+			})
+		}
+		if cfg.Model.Quantize != "" {
+			errs = append(errs, ValidationError{
+				Field:   "model.quantize",
+				Message: "quantize applies only to task=generation",
+			})
+		}
+		if cfg.Project.OutputFormat != "" {
+			errs = append(errs, ValidationError{
+				Field:   "project.output_format",
+				Message: "output_format applies only to task=generation",
+			})
+		}
+		// Contrastive training needs source documents to mine pairs from.
+		if len(cfg.Data.Sources) == 0 {
+			errs = append(errs, ValidationError{
+				Field:   "data.sources",
+				Message: "task=embedding requires at least one data source (the corpus to mine query/document pairs from)",
+			})
+		}
 	} else {
-		// Non-encoder-head tasks must not set the classifier head.
+		// Generation: must not set the classifier head.
 		if cfg.Model.Head != "" {
 			errs = append(errs, ValidationError{
 				Field:   "model.head",

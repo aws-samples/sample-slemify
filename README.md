@@ -13,6 +13,7 @@ Slemify picks the right model family from `project.task`:
 - `task: generation` — a causal LM fine-tuned with QLoRA on GPU, served on CPU (GGUF/llama.cpp). For reasoning and free-form output.
 - `task: classification` — a frozen encoder + a lightweight head, trained and served entirely on CPU in seconds. For routing, intent, and labeling.
 - `task: scoring` — the same encoder-head family with a regression head, trained and served on CPU. Returns a single number in [0,1]. For risk/quality/confidence guardrails. (`extraction` and `reranking` also extend this family.)
+- `task: embedding` — a domain-tuned text embedding model, contrastively fine-tuned and served on CPU (ONNX). Returns a vector. For retrieval (RAG) over your own corpus.
 
 ## When to Use an SLM
 
@@ -164,6 +165,7 @@ Inference cost depends on how you deploy. The reference deployment (llama.cpp on
 
 - [K8s Autoscaling Auditor](examples/k8s-autoscaling/). Tiered SLM system: a triage classifier routes queries, an 8B auditor produces structured reasoning about Karpenter/KEDA/HPA misconfigurations
 - [K8s Autoscaling Risk Scorer](examples/k8s-autoscaling/risk-scorer/). A `task: scoring` encoder-head model that rates a config change's operational risk 0.0–1.0 on CPU — a cheap guardrail that auto-approves low-risk changes and escalates high-risk ones to the auditor
+- [K8s Autoscaling Retriever](examples/k8s-autoscaling/retriever/). A `task: embedding` model contrastively fine-tuned on in-domain (question, document) pairs — a domain-tuned RAG retriever that beats a stock encoder on recall, trained and served on CPU
 
 ## Deep Dives
 
@@ -210,10 +212,10 @@ A: If the task is repetitive, structured, and runs more than ~1,000 times/day. o
 A: For general tasks, no. For YOUR specific structured task with YOUR categories, a fine-tuned 3B model matches or beats general-purpose LLMs. [Salesforce's xLAM-2-8B](https://huggingface.co/Salesforce/Llama-xLAM-2-8b-fc-r) beat GPT-4o and Claude 3.5 at tool calling on the [Berkeley Function-Calling Leaderboard](https://gorilla.cs.berkeley.edu/leaderboard.html). Specialization beats size.
 
 **Q: What about RAG?**
-A: SLMs and RAG solve different problems. RAG retrieves relevant context for knowledge questions. SLMs handle classification, routing, and extraction where you don't need retrieval. you need a fast decision. They work well together: SLM routes the query, RAG handles the knowledge lookup.
+A: SLMs and RAG solve different problems, and Slemify now covers both sides. RAG retrieves relevant context for knowledge questions; the retrieval step itself is an embedding model, which you can domain-tune with `task: embedding`. The classification/scoring tasks handle routing and guardrails where you don't need retrieval, you need a fast decision. They work well together: an encoder classifier routes the query, a domain-tuned embedding model retrieves the knowledge, and a generative SLM writes the answer.
 
 **Q: Can I use a different base model?**
-A: Yes. For `task: generation`, any HuggingFace causal LM supported by Unsloth. For encoder-head tasks (`task: classification`, `task: scoring`), any sentence-transformers encoder (e.g. `BAAI/bge-base-en-v1.5`). The auto-sizer adjusts infrastructure based on the task and model size.
+A: Yes. For `task: generation`, any HuggingFace causal LM supported by Unsloth. For encoder-head tasks (`task: classification`, `task: scoring`) and `task: embedding`, any sentence-transformers encoder (e.g. `BAAI/bge-base-en-v1.5`). The auto-sizer adjusts infrastructure based on the task and model size.
 
 **Q: What happens during a Spot interruption?**
 A: Training checkpoints sync to S3 every 500 steps. The next pod resumes from the last checkpoint automatically. Max work lost: ~20 minutes.
