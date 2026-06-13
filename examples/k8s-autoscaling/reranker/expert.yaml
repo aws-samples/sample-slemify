@@ -1,0 +1,41 @@
+apiVersion: slemify/v1
+
+project:
+  name: k8s-autoscaling-reranker
+  task: reranking
+  domain: >
+    Domain-tuned cross-encoder reranker for Kubernetes autoscaling knowledge
+    retrieval (RAG). After a first-stage vector search returns a handful of
+    candidate documents, the reranker reads each (question, document) pair
+    together and scores how well the document actually answers the question —
+    far more precise than embedding cosine similarity. The corpus is real-world
+    Karpenter, KEDA, HPA, and PodDisruptionBudget scenarios. Fine-tuning on
+    in-domain (question, document) pairs sharpens the final ranking over a stock
+    general-purpose reranker.
+
+# No project.labels — reranking output is a relevance score, not a label.
+
+model:
+  base: ""  # cross-encoder model ID to fine-tune (e.g. BAAI/bge-reranker-base)
+
+data:
+  bucket: slemify-data
+  path: k8s-autoscaling/data/
+  # The corpus to mine (query, document) pairs from. Positives get synthetic
+  # questions; negatives are sampled from other documents at train time.
+  sources:
+    - path: queries/
+      type: raw
+  synthetic:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 1000
+  evaluation:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 150
+    sources:
+      - path: eval-queries/
+        type: raw
+
+training:
+  spot: true
+  epochs: 2  # cross-encoder fine-tune epochs

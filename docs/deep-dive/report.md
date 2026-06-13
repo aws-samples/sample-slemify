@@ -8,6 +8,7 @@ The metric is chosen by `project.task`:
 - **Classification** (`task: classification`) → exact-match accuracy plus per-class precision/recall/F1, computed by the training job and printed at the end of serving. No LLM judge — the labels are a closed set, so exact match is the honest metric.
 - **Scoring** (`task: scoring`) → regression metrics: MAE (mean absolute error), RMSE, R², and the correlation between predicted and true scores. Lower MAE is better; R² near 1.0 and high correlation mean the head tracks the rubric. These are computed on the held-out eval set by the training job.
 - **Embedding** (`task: embedding`) → retrieval metrics: recall@1/5/10 and MRR, reported as **stock vs tuned** so the fine-tuning gain is explicit. Each eval query's gold document must be retrieved from the corpus; higher recall@1 means the right document ranks first more often. Computed by the training job on the held-out query set.
+- **Reranking** (`task: reranking`) → ranking metrics over candidate lists: NDCG@5, recall@1/5, and MRR, also **stock vs tuned**. Note that strong general-purpose cross-encoders already score high on in-domain QA relevance, so fine-tuning only helps when you supply hard negatives; the side-by-side report makes a regression obvious rather than hiding it.
 
 The rest of this document covers the generation path's report in detail.
 

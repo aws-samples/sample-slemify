@@ -71,11 +71,11 @@ func ClassifierJobManifest(cfg *config.ExpertConfig, ns string, pc *pipeline.Pip
 	automountSA := pc.ServiceAccount != ""
 
 	// Encoder-head tasks (classification, scoring) only fit a small head on
-	// frozen embeddings — 6Gi is plenty. Embedding (contrastive) actually
-	// backprops through the encoder via the HF Trainer (model + optimizer
-	// state + gradients), which needs materially more memory.
+	// frozen embeddings — 6Gi is plenty. Embedding (contrastive) and reranking
+	// (cross-encoder) actually backprop through the encoder via the HF Trainer
+	// (model + optimizer state + gradients), which needs materially more memory.
 	trainMem := "6Gi"
-	if cfg.Project.IsEmbedding() {
+	if cfg.Project.IsEmbedding() || cfg.Project.IsReranking() {
 		trainMem = "12Gi"
 	}
 

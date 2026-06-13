@@ -101,17 +101,22 @@ def main():
         log("ERROR: S3_BUCKET and PROJECT are required")
         sys.exit(1)
 
-    from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer(MODEL_NAME, device="cpu")
-
     train_rows = load_jsonl_s3(f"{PROJECT}/processed/train.jsonl")
     eval_rows = load_jsonl_s3(f"{PROJECT}/processed/eval.jsonl")
     log(f"Loaded train={len(train_rows)} eval={len(eval_rows)}")
 
-    is_scoring = (TASK == "scoring")
+    # Reranking uses a CrossEncoder, not a bi-encoder SentenceTransformer, so it
+    # loads its own model inside the trainer to avoid holding both in memory.
+    if TASK == "reranking":
+        train_reranking(train_rows, eval_rows)
+        return
+
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer(MODEL_NAME, device="cpu")
+
     if TASK == "embedding":
         train_embedding(model, train_rows, eval_rows)
-    elif is_scoring:
+    elif TASK == "scoring":
         train_scoring(model, train_rows, eval_rows)
     else:
         train_classification(model, train_rows, eval_rows)
@@ -391,6 +396,158 @@ def train_embedding(model, train_rows, eval_rows):
                   Body=json.dumps(metrics, indent=2).encode(), ContentType="application/json")
 
     _export_and_upload_encoder(prefix, source=tuned_dir)
+    log(f"Artifacts uploaded to s3://{S3_BUCKET}/{prefix}/")
+    log("=== Training complete ===")
+
+
+def _build_ranking_eval(eval_rows, corpus_texts, candidates_per_query=20, seed=13):
+    """For each eval query build a candidate list = its positive + sampled
+    distractors. Returns a list of (query, [docs], gold_index)."""
+    import random as _r
+    rng = _r.Random(seed)
+    items = []
+    for r in eval_rows:
+        q, pos = r.get("query", ""), r.get("positive", "")
+        if not q or not pos:
+            continue
+        distractors = [d for d in corpus_texts if d != pos]
+        if len(distractors) > candidates_per_query - 1:
+            distractors = rng.sample(distractors, candidates_per_query - 1)
+        docs = distractors + [pos]
+        rng.shuffle(docs)
+        items.append((q, docs, docs.index(pos)))
+    return items
+
+
+def _rerank_metrics(predict_fn, eval_items, ks=(1, 5, 10)):
+    """recall@k, MRR, and NDCG@k for a scoring function over candidate lists.
+
+    predict_fn(query, docs) -> list[float] relevance scores aligned with docs.
+    Single relevant doc per query, so NDCG@k = 1/log2(rank+1) when gold is in
+    the top k (IDCG = 1).
+    """
+    import math
+    if not eval_items:
+        return {}
+    recall = {k: 0 for k in ks}
+    ndcg = {k: 0.0 for k in ks}
+    rr = 0.0
+    for q, docs, gold in eval_items:
+        scores = predict_fn(q, docs)
+        order = sorted(range(len(docs)), key=lambda i: scores[i], reverse=True)
+        rank = order.index(gold) + 1  # 1-based rank of the gold doc
+        rr += 1.0 / rank
+        for k in ks:
+            if rank <= k:
+                recall[k] += 1
+                ndcg[k] += 1.0 / math.log2(rank + 1)
+    n = len(eval_items)
+    out = {f"recall@{k}": recall[k] / n for k in ks}
+    out.update({f"ndcg@{k}": ndcg[k] / n for k in ks})
+    out["mrr"] = rr / n
+    out["eval_queries"] = n
+    return out
+
+
+def train_reranking(train_rows, eval_rows):
+    """Fine-tune a cross-encoder to score (query, document) relevance."""
+    from sentence_transformers import CrossEncoder, InputExample
+    from torch.utils.data import DataLoader
+
+    # Positives from the mined pairs.
+    positives = [(r.get("query", ""), r.get("positive", ""))
+                 for r in train_rows if r.get("query") and r.get("positive")]
+    if not positives:
+        log("ERROR: no (query, positive) training pairs")
+        sys.exit(1)
+
+    # Retrieval corpus (also the pool to sample negatives from).
+    try:
+        corpus_rows = load_jsonl_s3(f"{PROJECT}/processed/corpus.jsonl")
+        corpus_texts = [c.get("text", "") for c in corpus_rows if c.get("text")]
+    except Exception:
+        corpus_texts = []
+    if not corpus_texts:
+        corpus_texts = sorted({p for _, p in positives})
+    # Ensure eval positives are retrievable as candidates.
+    eval_positives = [r.get("positive", "") for r in eval_rows if r.get("positive")]
+    corpus_set = set(corpus_texts)
+    corpus_texts = corpus_texts + [t for t in eval_positives if t and t not in corpus_set]
+    log(f"Train positives: {len(positives)}, corpus: {len(corpus_texts)} docs")
+
+    # Build training examples: each positive (label 1) plus sampled hard-ish
+    # negatives (label 0) drawn from other corpus documents.
+    import random as _r
+    rng = _r.Random(13)
+    neg_per_pos = 3
+    examples = []
+    for q, pos in positives:
+        examples.append(InputExample(texts=[q, pos], label=1.0))
+        pool = [d for d in corpus_texts if d != pos]
+        for neg in rng.sample(pool, min(neg_per_pos, len(pool))):
+            examples.append(InputExample(texts=[q, neg], label=0.0))
+    rng.shuffle(examples)
+    log(f"Training examples (pos+neg): {len(examples)}")
+
+    # CrossEncoder with a single regression-style relevance output.
+    model = CrossEncoder(MODEL_NAME, num_labels=1, max_length=256, device="cpu")
+
+    eval_items = _build_ranking_eval(eval_rows, corpus_texts)
+    baseline = _rerank_metrics(
+        lambda q, docs: model.predict([(q, d) for d in docs]).tolist(), eval_items)
+    if baseline:
+        log(f"Baseline (stock cross-encoder): ndcg@5={baseline.get('ndcg@5', 0):.3f} "
+            f"mrr={baseline.get('mrr', 0):.3f}")
+
+    loader = DataLoader(examples, shuffle=True, batch_size=16, drop_last=True)
+    warmup = max(1, int(len(loader) * EPOCHS * 0.1))
+    log(f"Fine-tuning: {EPOCHS} epoch(s), {len(loader)} batches/epoch, warmup={warmup}")
+    # CrossEncoder.fit writes a relative output dir; run from writable /tmp.
+    os.makedirs("/tmp/ce-train", exist_ok=True)
+    os.chdir("/tmp/ce-train")
+    t0 = time.time()
+    model.fit(train_dataloader=loader, epochs=EPOCHS, warmup_steps=warmup,
+              show_progress_bar=False)
+    train_s = time.time() - t0
+    log(f"Fine-tune complete in {train_s:.0f}s")
+
+    tuned = _rerank_metrics(
+        lambda q, docs: model.predict([(q, d) for d in docs]).tolist(), eval_items)
+    if tuned:
+        log(f"Tuned cross-encoder: ndcg@5={tuned.get('ndcg@5', 0):.3f} "
+            f"mrr={tuned.get('mrr', 0):.3f}")
+
+    metrics = {"task": "reranking", "train_samples": len(examples),
+               "eval_queries": tuned.get("eval_queries", 0),
+               "corpus_size": len(corpus_texts), "epochs": EPOCHS,
+               "train_seconds": round(train_s, 1),
+               "baseline": baseline, "tuned": tuned}
+
+    # Save the fine-tuned cross-encoder and export to ONNX. A cross-encoder is a
+    # sequence-classification model (1 logit), so export with that task.
+    tuned_dir = "/tmp/tuned-reranker"
+    model.save(tuned_dir)
+
+    prefix = f"models/{PROJECT}"
+    log("Uploading metrics to S3...")
+    s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}/metrics.json",
+                  Body=json.dumps(metrics, indent=2).encode(), ContentType="application/json")
+
+    log("Exporting cross-encoder to ONNX...")
+    from optimum.exporters.onnx import main_export
+    onnx_dir = "/tmp/onnx-export"
+    os.makedirs(onnx_dir, exist_ok=True)
+    main_export(tuned_dir, output=onnx_dir, task="text-classification",
+                library_name="transformers")
+    head_obj = {"type": "reranker", "max_length": 256}
+    s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}/head.json",
+                  Body=json.dumps(head_obj).encode(), ContentType="application/json")
+    for fname in ("model.onnx", "tokenizer.json"):
+        fpath = os.path.join(onnx_dir, fname)
+        key = f"{prefix}/encoder.onnx" if fname == "model.onnx" else f"{prefix}/tokenizer.json"
+        s3.upload_file(fpath, S3_BUCKET, key)
+        log(f"  uploaded {key} ({os.path.getsize(fpath) / 1048576:.0f} MB)")
+
     log(f"Artifacts uploaded to s3://{S3_BUCKET}/{prefix}/")
     log("=== Training complete ===")
 

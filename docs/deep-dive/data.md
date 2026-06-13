@@ -197,6 +197,8 @@ data:
 
 The retrieval metric only works if each eval query's gold document exists in the index, so the trainer adds the eval positives to the corpus (with the training chunks as distractors). The data lever here is corpus coverage: the documents you want retrievable in production must be in your sources.
 
+`task: reranking` (cross-encoder) reuses this exact pair pipeline — same `(query, positive)` mining and `corpus.jsonl`. The only difference is at training time: the reranker trainer pairs each positive with sampled negatives to teach relevance, rather than relying on in-batch negatives like the embedding model.
+
 ## Independent evaluation data
 
 Training and evaluation data must be generated independently. If you split a single batch 90/10, you're testing memorization, not generalization. The eval samples are stylistically identical to the training samples because they came from the same generation run.

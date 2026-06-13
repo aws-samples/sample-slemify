@@ -18,10 +18,15 @@ Slemify produces two kinds of specialist model, selected by `project.task`:
   GPU, exported to GGUF, served on CPU via llama.cpp. For free-form output:
   reasoning, audit reports, structured generation.
 - **Encoder-head** (`task: classification` and `task: scoring`, with `extraction`
-  and `reranking` to follow) — a frozen encoder plus a lightweight head, trained
+  to follow) — a frozen encoder plus a lightweight head, trained
   and served entirely on CPU. Classification emits a label + confidence; scoring
   emits a single number in [0,1]. For routing, intent, guardrails, and risk/quality
   scores.
+- **Retrieval encoders** (`task: embedding`, `task: reranking`) — encoders
+  fine-tuned for search and served on CPU (ONNX). Embedding is a bi-encoder that
+  emits a vector for first-stage vector search; reranking is a cross-encoder that
+  scores (query, document) relevance jointly for the precision step after
+  retrieval. Both are domain-tuned over your own corpus.
 
 The deep dives below note where the two paths differ.
 

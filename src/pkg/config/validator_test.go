@@ -163,6 +163,33 @@ func TestValidateEmbeddingRejectsLabels(t *testing.T) {
 	}
 }
 
+func TestValidateRerankingValid(t *testing.T) {
+	// reranking is supported, needs sources (a corpus), no labels.
+	cfg := validConfig()
+	cfg.Project.Task = TaskReranking
+	cfg.Model.Base = "BAAI/bge-reranker-base"
+	cfg.Model.Quantize = ""
+	cfg.Project.Labels = nil
+	cfg.Data.Sources = []SourceConfig{{Path: "queries/", Type: "raw"}}
+	errs := Validate(cfg)
+	if len(errs) > 0 {
+		t.Errorf("expected valid reranking config, got: %v", errs)
+	}
+}
+
+func TestValidateRerankingRequiresSources(t *testing.T) {
+	cfg := validConfig()
+	cfg.Project.Task = TaskReranking
+	cfg.Model.Base = "BAAI/bge-reranker-base"
+	cfg.Model.Quantize = ""
+	cfg.Project.Labels = nil
+	cfg.Data.Sources = nil
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "data.sources") {
+		t.Errorf("expected sources-required error for reranking, got: %v", errs)
+	}
+}
+
 func TestValidateClassificationRequiresLabels(t *testing.T) {
 	cfg := validConfig()
 	cfg.Project.Task = TaskClassification

@@ -198,3 +198,71 @@ func PrintEmbeddingMetrics(m *EmbeddingMetrics) {
 		m.TrainSamples, m.EvalQueries, m.CorpusSize)
 	fmt.Printf("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 }
+
+// RankingMetrics holds recall@k, NDCG@k and MRR for a reranking run.
+type RankingMetrics struct {
+	Recall1     float64 `json:"recall@1"`
+	Recall5     float64 `json:"recall@5"`
+	Recall10    float64 `json:"recall@10"`
+	NDCG1       float64 `json:"ndcg@1"`
+	NDCG5       float64 `json:"ndcg@5"`
+	NDCG10      float64 `json:"ndcg@10"`
+	MRR         float64 `json:"mrr"`
+	EvalQueries int     `json:"eval_queries"`
+}
+
+// RerankingMetrics mirrors the metrics.json written by the reranking training
+// job (cross-encoder fine-tune): baseline (stock) vs tuned ranking quality.
+type RerankingMetrics struct {
+	Task         string         `json:"task"`
+	TrainSamples int            `json:"train_samples"`
+	EvalQueries  int            `json:"eval_queries"`
+	CorpusSize   int            `json:"corpus_size"`
+	Epochs       int            `json:"epochs"`
+	TrainSeconds float64        `json:"train_seconds"`
+	Baseline     RankingMetrics `json:"baseline"`
+	Tuned        RankingMetrics `json:"tuned"`
+}
+
+// LoadRerankingMetrics reads models/<project>/metrics.json from S3 for a
+// reranking (cross-encoder) model.
+func LoadRerankingMetrics(ctx context.Context, dl S3Downloader, bucket, project string) (*RerankingMetrics, error) {
+	key := fmt.Sprintf("models/%s/metrics.json", project)
+	data, err := dl.DownloadFromS3(ctx, bucket, key)
+	if err != nil {
+		return nil, fmt.Errorf("downloading metrics.json: %w", err)
+	}
+	var m RerankingMetrics
+	if err := json.Unmarshal([]byte(data), &m); err != nil {
+		return nil, fmt.Errorf("parsing metrics.json: %w", err)
+	}
+	return &m, nil
+}
+
+// PrintRerankingMetrics renders the reranking (cross-encoder) report, showing
+// the stock cross-encoder baseline next to the domain-tuned result.
+func PrintRerankingMetrics(m *RerankingMetrics) {
+	delta := func(tuned, base float64) string {
+		d := (tuned - base) * 100
+		sign := "+"
+		if d < 0 {
+			sign = ""
+		}
+		return fmt.Sprintf("%s%.1f pts", sign, d)
+	}
+	fmt.Printf("\n  ━━━ Reranking Report (cross-encoder) ━━━\n")
+	fmt.Printf("  Metric        Stock     Tuned     Δ\n")
+	fmt.Printf("  NDCG@5        %5.3f    %5.3f    %s\n",
+		m.Baseline.NDCG5, m.Tuned.NDCG5, delta(m.Tuned.NDCG5, m.Baseline.NDCG5))
+	fmt.Printf("  Recall@1      %5.1f%%   %5.1f%%   %s\n",
+		m.Baseline.Recall1*100, m.Tuned.Recall1*100, delta(m.Tuned.Recall1, m.Baseline.Recall1))
+	fmt.Printf("  Recall@5      %5.1f%%   %5.1f%%   %s\n",
+		m.Baseline.Recall5*100, m.Tuned.Recall5*100, delta(m.Tuned.Recall5, m.Baseline.Recall5))
+	fmt.Printf("  MRR           %5.3f    %5.3f    %s\n",
+		m.Baseline.MRR, m.Tuned.MRR, delta(m.Tuned.MRR, m.Baseline.MRR))
+	fmt.Printf("  Model:       cross-encoder, %d epoch(s), %.0fs CPU train\n",
+		m.Epochs, m.TrainSeconds)
+	fmt.Printf("  Data:        %d pos+neg / %d eval queries / %d-doc corpus\n",
+		m.TrainSamples, m.EvalQueries, m.CorpusSize)
+	fmt.Printf("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+}
