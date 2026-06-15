@@ -67,22 +67,6 @@ func Validate(cfg *ExpertConfig) []ValidationError {
 				Message: fmt.Sprintf("task %q requires a labels taxonomy", cfg.Project.Task),
 			})
 		}
-		// Reranking mines (query, document) pairs from a corpus, like embedding,
-		// so it needs at least one data source. It also has no label taxonomy.
-		if cfg.Project.IsReranking() {
-			if len(cfg.Project.Labels) > 0 {
-				errs = append(errs, ValidationError{
-					Field:   "project.labels",
-					Message: "labels do not apply to task=reranking (output is a relevance score)",
-				})
-			}
-			if len(cfg.Data.Sources) == 0 {
-				errs = append(errs, ValidationError{
-					Field:   "data.sources",
-					Message: "task=reranking requires at least one data source (the corpus to mine query/document pairs from)",
-				})
-			}
-		}
 		if cfg.Project.OutputFormat != "" {
 			errs = append(errs, ValidationError{
 				Field:   "project.output_format",
@@ -108,7 +92,7 @@ func Validate(cfg *ExpertConfig) []ValidationError {
 		if cfg.Model.Head != "" {
 			errs = append(errs, ValidationError{
 				Field:   "model.head",
-				Message: "head applies only to encoder-head tasks (classification, scoring, extraction, reranking)",
+				Message: "head applies only to encoder-head tasks (classification, scoring, extraction)",
 			})
 		}
 		if cfg.Model.Quantize != "" {
@@ -135,7 +119,7 @@ func Validate(cfg *ExpertConfig) []ValidationError {
 		if cfg.Model.Head != "" {
 			errs = append(errs, ValidationError{
 				Field:   "model.head",
-				Message: "head applies only to encoder-head tasks (classification, scoring, extraction, reranking)",
+				Message: "head applies only to encoder-head tasks (classification, scoring, extraction)",
 			})
 		}
 	}

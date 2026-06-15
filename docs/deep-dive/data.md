@@ -197,7 +197,7 @@ data:
 
 The retrieval metric only works if each eval query's gold document exists in the index, so the trainer adds the eval positives to the corpus (with the training chunks as distractors). The data lever here is corpus coverage: the documents you want retrievable in production must be in your sources.
 
-`task: reranking` (cross-encoder) reuses this exact pair pipeline — same `(query, positive)` mining and `corpus.jsonl` — but only to *evaluate* the stock cross-encoder on a hard candidate set. Reranking is served without fine-tuning (see the training and report deep dives for why), so the pairs are used for measurement, not gradient updates.
+(Reranking is **not** a Slemify task — see the training deep dive. A stock cross-encoder reranker is shown running on CPU in the k8s-autoscaling demo, but Slemify does not fine-tune one, so there's no reranking data path.)
 
 ## Independent evaluation data
 

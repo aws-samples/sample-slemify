@@ -42,20 +42,39 @@ tuned encoder, and exports *that* to ONNX. A domain corpus typically lifts
 recall@1 by 10+ points over a stock general-purpose encoder in a couple of
 minutes of CPU training.
 
-The **reranking** path is intentionally *serve-only*: it exports a strong stock
-cross-encoder to ONNX and serves it on CPU, without fine-tuning. A cross-encoder
-reads the query and document together (one joint forward pass per pair) and emits
-a single relevance logit — more precise than the bi-encoder's independent
-vectors, but too expensive to run over a whole corpus, so it re-orders a small
-candidate set from first-stage retrieval. We measured that fine-tuning it on
-synthetic single-positive data *hurt* quality: a strong general-purpose reranker
-is already well-calibrated for (query, document) relevance, and reliable
-fine-tuning needs curated hard negatives. Mined "hard negatives" over an
-overlapping technical corpus are frequently relevant themselves (false
-negatives), so training pushes down good documents and degrades the model
-(we saw NDCG@5 drop from 0.85 to 0.58 on a fair hard eval). The value Slemify
-delivers here is **running a cross-encoder reranker on CPU with no GPU**, not the
-tuning. Fine-tuning is a future enhancement gated on real relevance judgments.
+### Why reranking is not a Slemify task (a documented learning)
+
+A reranker is a *cross-encoder*: it reads the query and document together (one
+joint forward pass per pair) and emits a single relevance logit — more precise
+than a bi-encoder's independent vectors, but too expensive to run over a whole
+corpus, so it only re-orders a small candidate set from first-stage retrieval.
+
+We built and tested reranker fine-tuning, then **removed it**, because it didn't
+help — and Slemify's premise is to build specialist models *when training adds
+value*. The findings, kept here as a learning:
+
+- A strong general-purpose cross-encoder (e.g. `bge-reranker-base`) is *already*
+  well-calibrated for (query, document) relevance. On a fair hard eval (rank the
+  answer among its most confusable near-misses) the stock model scored NDCG@5
+  0.85.
+- Reliable cross-encoder fine-tuning needs **curated hard negatives** — documents
+  that look relevant but are verified not to be. We can't synthesize those: our
+  pipeline only knows one positive per query, and "negatives" mined from an
+  overlapping technical corpus are frequently relevant themselves (false
+  negatives). Training on those teaches the model to push down good documents.
+- Result: fine-tuning *degraded* the model — NDCG@5 0.85 → 0.58, recall@1
+  78.6% → 35.7%. Random negatives regressed it slightly; hard (lexical) negatives
+  regressed it badly, because they were the most likely to be false negatives.
+- Contrast with embedding: the bi-encoder *improved* (+11.9 pts recall@1) on the
+  same data, because its contrastive in-batch-negative loss tolerates label noise.
+  Cross-encoder relevance training does not.
+
+Getting this data properly would mean human relevance annotation, click logs from
+a live system, or an LLM-as-judge step that labels and *filters* mined negatives —
+a real data project, not a byproduct of a doc corpus, with an uncertain payoff for
+an already-strong base model. So Slemify doesn't fine-tune rerankers. Running a
+stock cross-encoder reranker on CPU (no GPU) is still useful, and the
+k8s-autoscaling demo shows exactly that as a standalone serving pattern.
 
 Everything below — QLoRA, model sizing, Spot recovery, quantization — applies to
 the **generation** path.

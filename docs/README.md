@@ -22,11 +22,15 @@ Slemify produces two kinds of specialist model, selected by `project.task`:
   and served entirely on CPU. Classification emits a label + confidence; scoring
   emits a single number in [0,1]. For routing, intent, guardrails, and risk/quality
   scores.
-- **Retrieval encoders** (`task: embedding`, `task: reranking`) — encoders
-  fine-tuned for search and served on CPU (ONNX). Embedding is a bi-encoder that
-  emits a vector for first-stage vector search; reranking is a cross-encoder that
-  scores (query, document) relevance jointly for the precision step after
-  retrieval. Both are domain-tuned over your own corpus.
+- **Embedding** (`task: embedding`) — a bi-encoder fine-tuned for search and
+  served on CPU (ONNX). It emits a vector for first-stage retrieval (RAG), and is
+  domain-tuned over your own corpus.
+
+Reranking (a cross-encoder that scores query/document pairs jointly) is a
+deliberate non-goal: a strong stock cross-encoder is already well-calibrated and
+fine-tuning it on synthetic data degrades it, so Slemify doesn't build one.
+Running a stock cross-encoder reranker on CPU is shown as a serving pattern in
+the k8s-autoscaling demo instead.
 
 The deep dives below note where the two paths differ.
 

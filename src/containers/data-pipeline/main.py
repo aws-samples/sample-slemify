@@ -166,10 +166,6 @@ def main():
     is_free_form = (task == "generation" and output_format == "free_form")
     is_scoring = (task == "scoring")
     is_embedding = (task == "embedding")
-    # Reranking trains a cross-encoder on (query, document) pairs mined the same
-    # way as embedding (positives from the corpus, negatives sampled at train
-    # time), so it shares the pair-generation pipeline.
-    is_pairs = (task in ("embedding", "reranking"))
     if is_free_form:
         gen_format = "free_form"
     elif is_scoring:
@@ -185,9 +181,8 @@ def main():
 
     # Embedding (contrastive) has a different data shape — (query, positive)
     # pairs mined from the document corpus, not {instruction, input, output}
-    # records — so it runs a dedicated pipeline and returns early. Reranking
-    # (cross-encoder) uses the same pair data.
-    if is_pairs:
+    # records — so it runs a dedicated pipeline and returns early.
+    if is_embedding:
         run_embedding_pipeline(config, data_cfg, project_name, domain,
                                raw_content, synthetic_cfg)
         return

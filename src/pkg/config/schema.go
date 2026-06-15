@@ -15,9 +15,15 @@ type ExpertConfig struct {
 
 // Task values. Each maps onto one of three implementation families:
 //   - generation:     causal LM, GPU fine-tune, CPU serve (llama.cpp/GGUF)
-//   - classification, scoring, extraction, reranking: frozen encoder + trained
-//     head, CPU train, CPU serve (encoder-head family)
+//   - classification, scoring, extraction: frozen encoder + trained head,
+//     CPU train, CPU serve (encoder-head family)
 //   - embedding:       contrastive encoder, CPU serve (embedding family)
+//
+// reranking is a valid schema value but is intentionally NOT a Slemify task:
+// fine-tuning a strong cross-encoder on synthetic data degrades it (it needs
+// curated relevance judgments we can't synthesize), and serving a stock
+// cross-encoder is just a CPU-serving pattern — shown in the k8s-autoscaling
+// demo — not a model Slemify builds. See the README FAQ.
 const (
 	TaskGeneration     = "generation"
 	TaskClassification = "classification"
@@ -35,7 +41,6 @@ var supportedTasks = map[string]bool{
 	TaskClassification: true,
 	TaskScoring:        true,
 	TaskEmbedding:      true,
-	TaskReranking:      true,
 }
 
 // IsSupportedTask returns true if the task's pipeline is implemented.
@@ -67,10 +72,10 @@ func (p ProjectConfig) IsGeneration() bool {
 }
 
 // IsEncoderHead returns true for the frozen-encoder + trained-head family
-// (classification, scoring, extraction, reranking).
+// (classification, scoring, extraction).
 func (p ProjectConfig) IsEncoderHead() bool {
 	switch p.Task {
-	case TaskClassification, TaskScoring, TaskExtraction, TaskReranking:
+	case TaskClassification, TaskScoring, TaskExtraction:
 		return true
 	}
 	return false
@@ -84,22 +89,6 @@ func (p ProjectConfig) IsEmbedding() bool {
 // IsScoring returns true for the regression/scoring task (numeric output).
 func (p ProjectConfig) IsScoring() bool {
 	return p.Task == TaskScoring
-}
-
-// IsReranking returns true for the cross-encoder reranking task.
-func (p ProjectConfig) IsReranking() bool {
-	return p.Task == TaskReranking
-}
-
-// UsesPairs returns true for tasks that train on (query, document) pairs or
-// (query, positive, negative) triples rather than labeled single inputs:
-// embedding (contrastive) and reranking (cross-encoder).
-func (p ProjectConfig) UsesPairs() bool {
-	switch p.Task {
-	case TaskEmbedding, TaskReranking:
-		return true
-	}
-	return false
 }
 
 // UsesLabels returns true for tasks whose output is drawn from a label

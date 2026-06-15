@@ -10,7 +10,6 @@ k8s-autoscaling/
 ├── triage/           # Triage model config (encoder classifier, intent routing)
 ├── risk-scorer/      # Risk scorer config (encoder regression, 0.0-1.0 risk score)
 ├── retriever/        # Retriever config (embedding, domain-tuned RAG vectors)
-├── reranker/         # Reranker config (cross-encoder, query/doc relevance)
 ├── data/
 │   ├── queries/      # 76 training queries (real-world K8s configs)
 │   └── eval-queries/ # 14 held-out evaluation queries
@@ -29,10 +28,9 @@ k8s-autoscaling/
 | Triage | encoder (bge-base, 768d) | `classification` — intent routing + confidence | ~25ms |
 | Risk Scorer | encoder (bge-base, 768d) | `scoring` — operational risk 0.0-1.0 | ~25ms |
 | Retriever | encoder (bge-base, 768d) | `embedding` — domain-tuned RAG vectors | ~25ms |
-| Reranker | cross-encoder (bge-reranker-base) | `reranking` — (query, doc) relevance, served on CPU (no fine-tune) | ~50ms/pair |
 | Auditor | 8B (q4_k_m) | `generation` — structured config analysis | ~14s streaming |
 
-All run on Graviton CPUs with no GPU required for serving. The auditor is fine-tuned on GPU (QLoRA); the encoder-family models train on CPU — triage and risk scorer fit a head in seconds, the retriever contrastively fine-tunes in a few minutes. The reranker is serve-only (a strong stock cross-encoder run on CPU; fine-tuning is intentionally not applied — see the repo FAQ).
+All run on Graviton CPUs with no GPU required for serving. The auditor is fine-tuned on GPU (QLoRA); the encoder-family models train on CPU — triage and risk scorer fit a head in seconds, the retriever contrastively fine-tunes in a few minutes. (The demo also runs a stock cross-encoder *reranker* on CPU — that's a serving pattern, not a Slemify-trained model; see the repo FAQ on why reranking isn't a task.)
 
 ## Quick Start
 
@@ -42,12 +40,10 @@ slemify train --config auditor/expert.yaml
 slemify train --config triage/expert.yaml
 slemify train --config risk-scorer/expert.yaml
 slemify train --config retriever/expert.yaml
-slemify train --config reranker/expert.yaml
 slemify deploy --config auditor/expert.yaml
 slemify deploy --config triage/expert.yaml
 slemify deploy --config risk-scorer/expert.yaml
 slemify deploy --config retriever/expert.yaml
-slemify deploy --config reranker/expert.yaml
 
 # Run the demo
 cd demo && ./scripts/deploy.sh

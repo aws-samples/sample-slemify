@@ -105,8 +105,6 @@ def load():
         head_type = _head.get("type")
         if head_type == "embedding":
             _embed("warmup")
-        elif head_type == "reranker":
-            _rerank_logits("warmup", ["warmup document"])
         elif head_type == "regression":
             _score("warmup")
         else:
@@ -118,8 +116,6 @@ def load():
     head_type = _head.get("type")
     if head_type == "embedding":
         print("Embedding model ready", flush=True)
-    elif head_type == "reranker":
-        print("Reranker model ready (cross-encoder)", flush=True)
     elif head_type == "regression":
         print("Scoring head ready (regression)", flush=True)
     else:
@@ -185,30 +181,6 @@ def _is_embedding() -> bool:
     return bool(_head) and _head.get("type") == "embedding"
 
 
-def _is_reranker() -> bool:
-    return bool(_head) and _head.get("type") == "reranker"
-
-
-def _rerank_logits(query: str, docs: list[str]) -> list[float]:
-    """Score (query, doc) pairs jointly with the cross-encoder ONNX graph.
-
-    The model is a sequence-classification graph with a single logit per pair;
-    higher = more relevant. The tokenizer encodes the pair as two segments
-    (reusing the already-loaded global tokenizer).
-    """
-    scores = []
-    for d in docs:
-        enc = _tokenizer.encode(query, d[:MAX_INPUT_CHARS])
-        input_ids = np.array([enc.ids], dtype=np.int64)
-        attention_mask = np.array([enc.attention_mask], dtype=np.int64)
-        feed = {"input_ids": input_ids, "attention_mask": attention_mask}
-        if "token_type_ids" in _input_names:
-            feed["token_type_ids"] = np.array([enc.type_ids], dtype=np.int64)
-        logits = _session.run(None, feed)[0]  # [1, num_labels]
-        scores.append(float(np.asarray(logits).reshape(-1)[0]))
-    return scores
-
-
 def _confidence_word(p: float) -> str:
     if p >= CONF_HIGH:
         return "high"
@@ -220,10 +192,6 @@ def _confidence_word(p: float) -> str:
 @app.post("/v1/chat/completions")
 def chat_completions(req: ChatRequest):
     text = req.messages[-1].content if req.messages else ""
-    if _is_reranker():
-        return JSONResponse(
-            {"error": "reranker models use the /rerank endpoint, not chat-completions"},
-            status_code=400)
     if _is_embedding():
         vec = _embed(text).tolist()
         # Return the vector as JSON message content for clients going through the
@@ -293,35 +261,6 @@ def embed(req: EmbedRequest):
             status_code=400)
     texts = [req.inputs] if isinstance(req.inputs, str) else req.inputs
     return [_embed(t).tolist() for t in texts]
-
-
-class RerankRequest(BaseModel):
-    query: str
-    documents: list[str]
-    top_k: int | None = None
-
-
-@app.post("/rerank")
-def rerank(req: RerankRequest):
-    """Native reranking endpoint (cross-encoder).
-
-    Scores each (query, document) pair jointly and returns them sorted by
-    relevance, best first — a drop-in for a stock cross-encoder reranker, now
-    domain-tuned. Mirrors the demo reranker contract.
-    """
-    if not _is_reranker():
-        return JSONResponse(
-            {"error": "this model is not a reranker"}, status_code=400)
-    docs = req.documents[:200]
-    if not docs:
-        return {"results": []}
-    scores = _rerank_logits(req.query, docs)
-    ranked = sorted(
-        ({"index": i, "score": s} for i, s in enumerate(scores)),
-        key=lambda r: r["score"], reverse=True)
-    if req.top_k is not None:
-        ranked = ranked[:req.top_k]
-    return {"results": ranked}
 
 
 if __name__ == "__main__":

@@ -71,15 +71,10 @@ func ClassifierJobManifest(cfg *config.ExpertConfig, ns string, pc *pipeline.Pip
 	automountSA := pc.ServiceAccount != ""
 
 	// Encoder-head tasks (classification, scoring) only fit a small head on
-	// frozen embeddings — 6Gi is plenty. Reranking now serves the stock
-	// cross-encoder without fine-tuning, but the cross-encoder is larger and its
-	// ONNX export holds the model in memory twice, so give it 8Gi. Embedding
-	// (contrastive) backprops through the encoder via the HF Trainer (model +
-	// optimizer state + gradients), which needs the most.
+	// frozen embeddings — 6Gi is plenty. Embedding (contrastive) backprops
+	// through the encoder via the HF Trainer (model + optimizer state +
+	// gradients), which needs materially more memory.
 	trainMem := "6Gi"
-	if cfg.Project.IsReranking() {
-		trainMem = "8Gi"
-	}
 	if cfg.Project.IsEmbedding() {
 		trainMem = "12Gi"
 	}

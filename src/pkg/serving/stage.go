@@ -85,12 +85,6 @@ func Stage(client *k8s.Client, cfg *config.ExpertConfig, sized config.SizedConfi
 				} else {
 					report.PrintEmbeddingMetrics(m)
 				}
-			} else if cfg.Project.IsReranking() {
-				if m, err := report.LoadRerankingMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
-					fmt.Printf("  ⚠ Could not load reranking metrics: %v\n", err)
-				} else {
-					report.PrintRerankingMetrics(m)
-				}
 			} else if cfg.Project.IsScoring() {
 				if m, err := report.LoadScoringMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
 					fmt.Printf("  ⚠ Could not load scoring metrics: %v\n", err)

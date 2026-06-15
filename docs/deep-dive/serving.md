@@ -28,11 +28,10 @@ How a model is served depends on its `project.task`:
   a TEI-compatible `POST /embed` (single string or batch) — a drop-in for a stock
   embedding service, now domain-tuned. The vector is also available over
   chat-completions as JSON for clients on that contract.
-- **Reranking** (`task: reranking`) → **a cross-encoder ONNX pod**. The pod
-  tokenizes each (query, document) pair *jointly* and runs the sequence-
-  classification graph to produce a relevance logit, exposing `POST /rerank`
-  (`{query, documents[], top_k?}` → results sorted best-first). This is the
-  precision step after embedding retrieval; it does not use chat-completions.
+
+(Reranking is not a Slemify serving target — see the training deep dive. The
+k8s-autoscaling demo shows a stock cross-encoder reranker served on CPU as a
+standalone pattern.)
 
 The encoder-head serving pod deliberately exposes the **same OpenAI-compatible
 `/v1/chat/completions` contract** as the generative path. For classification it

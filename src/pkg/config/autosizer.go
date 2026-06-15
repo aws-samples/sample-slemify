@@ -33,7 +33,7 @@ func AutoSizeForTask(model ModelConfig, data DataConfig, training TrainingConfig
 // isEncoderHeadTask mirrors ProjectConfig.IsEncoderHead for the sizing helper.
 func isEncoderHeadTask(task string) bool {
 	switch task {
-	case TaskClassification, TaskScoring, TaskExtraction, TaskReranking:
+	case TaskClassification, TaskScoring, TaskExtraction:
 		return true
 	}
 	return false
