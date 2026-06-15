@@ -90,6 +90,37 @@ directly improves answer quality. This is the same encoder you would train with
 `slemify` for `task: embedding`, so the demo doubles as a worked example of when
 fine-tuning a retriever pays off (a narrow, domain-specific corpus).
 
+## Why Keep the Reranker
+
+After vector search returns candidates, a stock cross-encoder
+(`bge-reranker-base`, CPU) re-scores them and the orchestrator keeps only the
+best ones for the SLM. A cross-encoder reads the query and a document *together*,
+so it judges relevance more sharply than the retriever, which embeds them
+separately — but it costs ~0.6s per query, so it has to earn that.
+
+We tested it the same way: 100 Bedrock-generated queries over the corpus,
+identical 6-candidate pool, reranker OFF (vector order) vs ON (re-scored). Two
+random seeds:
+
+| Metric | Reranker OFF | Reranker ON |
+|--------|-------------:|------------:|
+| recall@2 | 0.33–0.36 | **0.43–0.48** |
+| recall@5 | 0.48–0.51 | 0.49–0.52 |
+| MRR | 0.33–0.36 | **0.39–0.44** |
+
+The reranker improves **recall@2 by ~10–12 points (~30% relative) and MRR by
+~20%**, and it reorders the top-2 set in ~90% of queries. The win lands exactly
+where the demo uses it: the high-confidence path keeps only the **top 2** docs,
+and that is where the reranker promotes the genuinely-relevant chunk the
+retriever ranked 3rd–6th. At top-5 the benefit nearly vanishes (you are keeping
+almost the whole pool, so order barely matters). Net: the ~0.6s buys a markedly
+better top-2 context, so we keep it.
+
+Note the contrast with Slemify itself, which does **not** offer reranking as a
+trainable task: *fine-tuning* a cross-encoder on synthetic data degraded it,
+but a *stock* cross-encoder used only for serving clearly helps. Don't train it,
+do serve it — both backed by measurement.
+
 ## Demo Prompts (Tested)
 
 ### 1. High confidence (Auditor SLM responds)
