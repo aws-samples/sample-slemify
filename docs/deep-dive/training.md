@@ -76,6 +76,35 @@ an already-strong base model. So Slemify doesn't fine-tune rerankers. Running a
 stock cross-encoder reranker on CPU (no GPU) is still useful, and the
 k8s-autoscaling demo shows exactly that as a standalone serving pattern.
 
+**Is this just a wrong-domain result?** A fair question, since k8s is unusually
+parser- and gazetteer-friendly. We re-examined it and the answer is no — the
+reranking blocker is more fundamental than the domain. It helps to separate two
+ways a fine-tune can fail to beat a strong baseline:
+
+- **Domain gap (fixable).** The base model is weak on *your* data. Pick a domain
+  where the general model struggles and tuning pays off. The bi-encoder retriever
+  is this case: domain tuning sharpened its vector space (+11.9 pts recall@1).
+- **Data shape (not fixable by domain choice).** The training signal the method
+  needs isn't something you can produce from your inputs. Reranking is this case:
+  it needs *graded relevance judgments* or *verified* hard negatives, which come
+  from click logs or human raters — not from a document corpus. That gap follows
+  reranking into every domain. Even for legal, patent, biomedical, or code search
+  (where a general cross-encoder genuinely *is* weak and tuning *would* help), the
+  enabler is a relevance-judgment dataset, which is exactly what Slemify's
+  "synthesize training data from your docs" premise does not produce.
+
+So reranking isn't excluded because k8s is a bad showcase; it's excluded because
+the data it needs is structurally outside what Slemify synthesizes. (Extraction,
+by contrast, fails *only* in the k8s domain — its data, text with labeled spans,
+is synthesizable — so it gets a fair trial in a better-suited domain.)
+
+**Future work, if revisited.** One method we did *not* test could fit Slemify's
+premise: distilling a strong LLM's graded relevance scores (an LLM-as-judge over
+many query–document pairs) into a small CPU cross-encoder, rather than mining
+hard negatives. That would be its own gated experiment with its own honest
+before/after — not a claim that it works, just the one avenue that stays inside
+"synthesize the signal you need."
+
 Everything below — QLoRA, model sizing, Spot recovery, quantization — applies to
 the **generation** path.
 
