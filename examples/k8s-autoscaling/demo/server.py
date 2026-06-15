@@ -11,6 +11,7 @@ Usage:
 import asyncio
 import json
 import os
+import time
 
 import boto3
 import httpx
@@ -34,9 +35,17 @@ EMBEDDING_URL = os.environ.get("EMBEDDING_URL", "http://localhost:8083")
 # keeps only the most relevant chunks, so the auditor prompt stays small.
 RERANKER_URL = os.environ.get("RERANKER_URL", "http://localhost:8084")
 INDEX_NAME = os.environ.get("INDEX_NAME", "k8s-autoscaling-knowledge")
-# Candidates pulled from vector search before re-ranking. The reranker scores
-# all of these and the orchestrator keeps only the top few for the SLM/LLM.
-RETRIEVE_CANDIDATES = 10
+# Candidates pulled from vector search before re-ranking. The cross-encoder
+# reranker scores every candidate on CPU, so this count is the main lever on
+# rerank latency (~linear in candidates). The tuned retriever already ranks
+# well, so 6 candidates keep nearly all the recall of 10 while cutting rerank
+# time by ~40%. The orchestrator keeps only the top few of these for the SLM.
+RETRIEVE_CANDIDATES = 6
+# Query budget (chars) sent to the cross-encoder. The reranker only needs the
+# question's intent to score doc relevance, and it re-encodes the query against
+# every candidate. Long config pastes blow up rerank latency, so we cap the
+# query here (the full text still goes to the auditor SLM untouched).
+RERANK_QUERY_CHARS = 512
 
 TRIAGE_INSTRUCTION = (
     "Classify this Kubernetes autoscaling support query into a routing "
@@ -81,7 +90,7 @@ def rerank_docs(query: str, docs: list[str], top_k: int) -> list[str]:
         with httpx.Client(timeout=10) as client:
             resp = client.post(
                 f"{RERANKER_URL}/rerank",
-                json={"query": query[:8000], "documents": docs, "top_k": top_k},
+                json={"query": query[:RERANK_QUERY_CHARS], "documents": docs, "top_k": top_k},
             )
             resp.raise_for_status()
             results = resp.json()["results"]
@@ -225,10 +234,8 @@ def classify(text: str) -> dict:
     return {"confidence": confidence, "category": category}
 
 
-def retrieve(query: str, k: int = 3) -> list[str]:
-    """Retrieve relevant docs from OpenSearch via k-NN vector search."""
-    embedding = embed_query(query)
-
+def vector_search(embedding: list[float], k: int) -> list[str]:
+    """k-NN search over the indexed corpus for a precomputed query embedding."""
     results = opensearch.search(
         index=INDEX_NAME,
         body={
@@ -239,7 +246,7 @@ def retrieve(query: str, k: int = 3) -> list[str]:
     )
     return [
         f"[{hit['_source'].get('source', '')} / {hit['_source'].get('section', '')}]\n{hit['_source']['text'][:500]}"
-        for i, hit in enumerate(results["hits"]["hits"])
+        for hit in results["hits"]["hits"]
     ]
 
 
@@ -303,39 +310,80 @@ async def stream_llm(text: str, context: str = ""):
 @app.post("/query")
 async def query_endpoint(q: Query):
     async def event_stream():
-        # Step 1: Triage
-        result = classify(q.text)
-        yield sse("triage", category=result["category"], confidence=result["confidence"])
+        loop = asyncio.get_event_loop()
+        t_start = time.perf_counter()
 
-        # Step 2: Route noise
+        def elapsed_ms(t0: float) -> int:
+            return round((time.perf_counter() - t0) * 1000)
+
+        # --- Step 1: Triage SLM ---
+        yield sse("step_start", name="Triage SLM (4B, CPU)", note="classifying intent")
+        t = time.perf_counter()
+        result = await loop.run_in_executor(None, classify, q.text)
+        yield sse(
+            "step_done", name="Triage SLM (4B, CPU)", ms=elapsed_ms(t),
+            detail=f"{result['category'].replace('_', ' ')} · {result['confidence']} confidence",
+        )
+
+        # Route noise (no retrieval, no generation)
         if result["category"] == "noise":
             yield sse("response", text="This does not look like a K8s autoscaling question.")
+            yield sse("total", ms=elapsed_ms(t_start))
             yield "data: [DONE]\n\n"
             return
 
-        # Step 3: Low confidence -> LLM fallback with RAG
-        if result["confidence"] in ("low", "unknown"):
-            candidates = retrieve(q.text, k=RETRIEVE_CANDIDATES)
-            docs = rerank_docs(q.text, candidates, top_k=5)
-            if docs:
-                yield sse("status", text=f"Retrieved {len(docs)} relevant docs from knowledge base")
-            yield sse("status", text="Low confidence, escalating to LLM API...")
+        low_conf = result["confidence"] in ("low", "unknown")
+        keep_k = 5 if low_conf else 2
+
+        # --- Step 2: Embed query (Slemify-tuned retriever) ---
+        yield sse("step_start", name="Retriever (tuned encoder, CPU)", note="embedding query → 768d")
+        t = time.perf_counter()
+        embedding = await loop.run_in_executor(None, embed_query, q.text)
+        yield sse("step_done", name="Retriever (tuned encoder, CPU)", ms=elapsed_ms(t),
+                  detail="domain-tuned ONNX encoder")
+
+        # --- Step 3: Vector search (OpenSearch k-NN) ---
+        yield sse("step_start", name="OpenSearch (vector DB)", note=f"k-NN search, top {RETRIEVE_CANDIDATES}")
+        t = time.perf_counter()
+        candidates = await loop.run_in_executor(None, vector_search, embedding, RETRIEVE_CANDIDATES)
+        yield sse("step_done", name="OpenSearch (vector DB)", ms=elapsed_ms(t),
+                  detail=f"{len(candidates)} candidate chunks")
+
+        # --- Step 4: Rerank (cross-encoder) ---
+        yield sse("step_start", name="Reranker (cross-encoder, CPU)",
+                  note=f"scoring {len(candidates)} pairs → top {keep_k}")
+        t = time.perf_counter()
+        docs = await loop.run_in_executor(None, rerank_docs, q.text, candidates, keep_k)
+        yield sse("step_done", name="Reranker (cross-encoder, CPU)", ms=elapsed_ms(t),
+                  detail=f"kept top {len(docs)}")
+
+        context = "\n\n---\n\n".join(docs)
+
+        # --- Step 5: Generation (Auditor SLM, or LLM fallback on low confidence) ---
+        if low_conf:
+            gen_name = "LLM API (Bedrock fallback)"
+            stream_fn = stream_llm
             yield sse("model", name="Claude Sonnet 4.5 (Bedrock)")
-            async for token in stream_llm(q.text, "\n\n---\n\n".join(docs)):
-                yield sse("token", text=token)
-            yield "data: [DONE]\n\n"
-            return
+        else:
+            gen_name = "Auditor SLM (8B, CPU)"
+            stream_fn = stream_slm
+            yield sse("model", name="Auditor SLM (8B, CPU)")
 
-        # Step 4: High confidence -> RAG + Auditor SLM
-        yield sse("status", text="Searching knowledge base...")
-        candidates = retrieve(q.text, k=RETRIEVE_CANDIDATES)
-        docs = rerank_docs(q.text, candidates, top_k=2)
-        if docs:
-            yield sse("status", text=f"Retrieved {len(docs)} relevant docs from knowledge base")
-        yield sse("model", name="Auditor SLM (8B, CPU)")
-        yield sse("status", text="Analyzing configuration...")
-        async for token in stream_slm(q.text, "\n\n---\n\n".join(docs)):
+        yield sse("step_start", name=gen_name, note="generating answer")
+        t = time.perf_counter()
+        first = True
+        async for token in stream_fn(q.text, context):
+            if first:
+                # Report time-to-first-token: the latency the user actually
+                # waits before the answer starts streaming.
+                yield sse("step_done", name=gen_name, ms=elapsed_ms(t),
+                          detail="time to first token")
+                first = False
             yield sse("token", text=token)
+        if first:
+            yield sse("step_done", name=gen_name, ms=elapsed_ms(t), detail="no output")
+
+        yield sse("total", ms=elapsed_ms(t_start))
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -367,6 +415,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .msg.system{align-self:flex-start;background:var(--surface);border:1px solid var(--border)}
 .msg.status{align-self:flex-start;color:var(--muted);font-size:12px;padding:4px 0;display:flex;align-items:center;gap:6px}
 .msg.status::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--muted);animation:pulse 1.5s infinite}
+.msg.step{align-self:stretch;max-width:100%;display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);padding:8px 12px;border-radius:8px;font-size:13px}
+.msg.step .step-name{font-weight:600}
+.msg.step .step-note{color:var(--muted);font-size:12px;flex:1}
+.msg.step .dur{margin-left:auto;font-variant-numeric:tabular-nums;font-weight:600;color:var(--accent)}
+.msg.step.done .dur{color:var(--slm-color)}
+.msg.step .spinner{width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;display:inline-block;flex-shrink:0}
+.msg.step .check{color:var(--slm-color);font-weight:700;flex-shrink:0}
+.msg.total{align-self:stretch;max-width:100%;text-align:right;color:var(--strong);font-weight:600;font-size:13px;padding:4px 12px;border-top:1px solid var(--border)}
 .msg.model-badge{align-self:flex-start;font-size:11px;padding:4px 10px;border-radius:20px;font-weight:500;border:1px solid}
 .msg.model-badge.slm{color:var(--slm-color);border-color:var(--slm-border);background:var(--slm-bg)}
 .msg.model-badge.llm{color:var(--llm-color);border-color:var(--llm-border);background:var(--llm-bg)}
@@ -387,6 +443,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .input-area button:hover{background:var(--accent-hover)}
 .input-area button:disabled{opacity:0.5;cursor:not-allowed}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+@keyframes spin{to{transform:rotate(360deg)}}
 </style></head><body>
 <div class="header">
   <h1>K8s Autoscaling Expert</h1>
@@ -423,6 +480,33 @@ function renderMd(text) {
   try { return marked.parse(text); } catch(e) { return text; }
 }
 
+let steps = {};
+function fmt(ms) { return ms >= 1000 ? (ms/1000).toFixed(2) + 's' : ms + ' ms'; }
+
+function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function addStep(name, note) {
+  const div = document.createElement('div');
+  div.className = 'msg step running';
+  div.innerHTML = '<span class="spinner"></span>' +
+    '<span class="step-name">' + escapeHtml(name) + '</span>' +
+    '<span class="step-note">' + escapeHtml(note || '') + '</span>' +
+    '<span class="dur"></span>';
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  steps[name] = div;
+}
+
+function finishStep(name, ms, detail) {
+  const div = steps[name];
+  if (!div) return;
+  div.className = 'msg step done';
+  const spinner = div.querySelector('.spinner');
+  if (spinner) { const c = document.createElement('span'); c.className = 'check'; c.textContent = '\u2713'; spinner.replaceWith(c); }
+  if (detail) div.querySelector('.step-note').textContent = detail;
+  div.querySelector('.dur').textContent = fmt(ms);
+}
+
 function clearChat() { chat.innerHTML = ''; }
 
 async function send() {
@@ -430,6 +514,7 @@ async function send() {
   if (!text) return;
   input.value = '';
   btn.disabled = true;
+  steps = {};
   addMsg(text.replace(/</g,'&lt;').replace(/\\n/g,'<br>'), 'user');
 
   const resp = await fetch('/query', {
@@ -457,13 +542,15 @@ async function send() {
       }
       try {
         const msg = JSON.parse(data);
-        if (msg.type === 'triage') {
-          addMsg('<strong>' + msg.category.replace(/_/g,' ') + '</strong> &middot; ' + msg.confidence + ' confidence', 'status');
+        if (msg.type === 'step_start') {
+          addStep(msg.name, msg.note);
+        } else if (msg.type === 'step_done') {
+          finishStep(msg.name, msg.ms, msg.detail);
+        } else if (msg.type === 'total') {
+          addMsg('Total pipeline time: <strong>' + fmt(msg.ms) + '</strong>', 'total');
         } else if (msg.type === 'model') {
           const isSlm = msg.name.toLowerCase().includes('slm');
           addMsg(msg.name, 'model-badge ' + (isSlm ? 'slm' : 'llm'));
-        } else if (msg.type === 'status') {
-          addMsg(msg.text, 'status');
         } else if (msg.type === 'response') {
           addMsg(renderMd(msg.text), 'system');
         } else if (msg.type === 'token') {
