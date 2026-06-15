@@ -42,17 +42,20 @@ tuned encoder, and exports *that* to ONNX. A domain corpus typically lifts
 recall@1 by 10+ points over a stock general-purpose encoder in a couple of
 minutes of CPU training.
 
-The **reranking** path fine-tunes a *cross-encoder* — it reads the query and
-document together (one joint forward pass per pair) and emits a single relevance
-logit, which is more precise than the bi-encoder's independent vectors but too
-expensive to run over a whole corpus, so it's used only to re-order a small
-candidate set from first-stage retrieval. Training builds positives from the
-mined pairs plus sampled negatives, fine-tunes with sentence-transformers
-`CrossEncoder.fit`, and reports NDCG@5/recall/MRR stock-vs-tuned. One caveat
-worth stating plainly: strong general-purpose rerankers are already very good at
-in-domain QA relevance, so fine-tuning helps only with **hard** negatives — easy
-random negatives can nudge a good model backward. The side-by-side report
-surfaces that immediately.
+The **reranking** path is intentionally *serve-only*: it exports a strong stock
+cross-encoder to ONNX and serves it on CPU, without fine-tuning. A cross-encoder
+reads the query and document together (one joint forward pass per pair) and emits
+a single relevance logit — more precise than the bi-encoder's independent
+vectors, but too expensive to run over a whole corpus, so it re-orders a small
+candidate set from first-stage retrieval. We measured that fine-tuning it on
+synthetic single-positive data *hurt* quality: a strong general-purpose reranker
+is already well-calibrated for (query, document) relevance, and reliable
+fine-tuning needs curated hard negatives. Mined "hard negatives" over an
+overlapping technical corpus are frequently relevant themselves (false
+negatives), so training pushes down good documents and degrades the model
+(we saw NDCG@5 drop from 0.85 to 0.58 on a fair hard eval). The value Slemify
+delivers here is **running a cross-encoder reranker on CPU with no GPU**, not the
+tuning. Fine-tuning is a future enhancement gated on real relevance judgments.
 
 Everything below — QLoRA, model sizing, Spot recovery, quantization — applies to
 the **generation** path.

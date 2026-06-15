@@ -45,6 +45,7 @@ type ScoringMetrics struct {
 	RMSE         float64 `json:"rmse"`
 	R2           float64 `json:"r2"`
 	Correlation  float64 `json:"correlation"`
+	BaselineMAE  float64 `json:"baseline_mae"`
 	Total        int     `json:"total"`
 	EmbedMSPerQ  float64 `json:"embed_ms_per_query"`
 }
@@ -121,6 +122,10 @@ func LoadScoringMetrics(ctx context.Context, dl S3Downloader, bucket, project st
 func PrintScoringMetrics(m *ScoringMetrics) {
 	fmt.Printf("\n  ━━━ Scoring Report (encoder-head regression) ━━━\n")
 	fmt.Printf("  MAE:         %.4f (mean absolute error, lower is better)\n", m.MAE)
+	if m.BaselineMAE > 0 {
+		improve := (m.BaselineMAE - m.MAE) / m.BaselineMAE * 100
+		fmt.Printf("  Baseline:    %.4f (predict-the-mean) — model is %.0f%% better\n", m.BaselineMAE, improve)
+	}
 	fmt.Printf("  RMSE:        %.4f\n", m.RMSE)
 	fmt.Printf("  R²:          %.3f (1.0 = perfect, 0 = predicts the mean)\n", m.R2)
 	fmt.Printf("  Correlation: %.3f (predicted vs true score)\n", m.Correlation)
@@ -211,17 +216,17 @@ type RankingMetrics struct {
 	EvalQueries int     `json:"eval_queries"`
 }
 
-// RerankingMetrics mirrors the metrics.json written by the reranking training
-// job (cross-encoder fine-tune): baseline (stock) vs tuned ranking quality.
+// RerankingMetrics mirrors the metrics.json written by the reranking stage.
+// Slemify serves a stock cross-encoder on CPU (fine-tuning is not applied for
+// reranking — it needs curated hard negatives), so this reports the served
+// model's ranking quality on a hard candidate set rather than a tuned delta.
 type RerankingMetrics struct {
-	Task         string         `json:"task"`
-	TrainSamples int            `json:"train_samples"`
-	EvalQueries  int            `json:"eval_queries"`
-	CorpusSize   int            `json:"corpus_size"`
-	Epochs       int            `json:"epochs"`
-	TrainSeconds float64        `json:"train_seconds"`
-	Baseline     RankingMetrics `json:"baseline"`
-	Tuned        RankingMetrics `json:"tuned"`
+	Task        string         `json:"task"`
+	FineTuned   bool           `json:"fine_tuned"`
+	EvalQueries int            `json:"eval_queries"`
+	CorpusSize  int            `json:"corpus_size"`
+	Served      RankingMetrics `json:"served"`
+	Note        string         `json:"note"`
 }
 
 // LoadRerankingMetrics reads models/<project>/metrics.json from S3 for a
@@ -239,30 +244,16 @@ func LoadRerankingMetrics(ctx context.Context, dl S3Downloader, bucket, project 
 	return &m, nil
 }
 
-// PrintRerankingMetrics renders the reranking (cross-encoder) report, showing
-// the stock cross-encoder baseline next to the domain-tuned result.
+// PrintRerankingMetrics renders the reranking (cross-encoder) report — the
+// ranking quality of the stock cross-encoder served on CPU.
 func PrintRerankingMetrics(m *RerankingMetrics) {
-	delta := func(tuned, base float64) string {
-		d := (tuned - base) * 100
-		sign := "+"
-		if d < 0 {
-			sign = ""
-		}
-		return fmt.Sprintf("%s%.1f pts", sign, d)
-	}
-	fmt.Printf("\n  ━━━ Reranking Report (cross-encoder) ━━━\n")
-	fmt.Printf("  Metric        Stock     Tuned     Δ\n")
-	fmt.Printf("  NDCG@5        %5.3f    %5.3f    %s\n",
-		m.Baseline.NDCG5, m.Tuned.NDCG5, delta(m.Tuned.NDCG5, m.Baseline.NDCG5))
-	fmt.Printf("  Recall@1      %5.1f%%   %5.1f%%   %s\n",
-		m.Baseline.Recall1*100, m.Tuned.Recall1*100, delta(m.Tuned.Recall1, m.Baseline.Recall1))
-	fmt.Printf("  Recall@5      %5.1f%%   %5.1f%%   %s\n",
-		m.Baseline.Recall5*100, m.Tuned.Recall5*100, delta(m.Tuned.Recall5, m.Baseline.Recall5))
-	fmt.Printf("  MRR           %5.3f    %5.3f    %s\n",
-		m.Baseline.MRR, m.Tuned.MRR, delta(m.Tuned.MRR, m.Baseline.MRR))
-	fmt.Printf("  Model:       cross-encoder, %d epoch(s), %.0fs CPU train\n",
-		m.Epochs, m.TrainSeconds)
-	fmt.Printf("  Data:        %d pos+neg / %d eval queries / %d-doc corpus\n",
-		m.TrainSamples, m.EvalQueries, m.CorpusSize)
+	fmt.Printf("\n  ━━━ Reranking Report (cross-encoder, CPU serve-only) ━━━\n")
+	fmt.Printf("  NDCG@5:      %.3f (rank a query's answer among hard near-misses)\n", m.Served.NDCG5)
+	fmt.Printf("  Recall@1:    %.1f%%\n", m.Served.Recall1*100)
+	fmt.Printf("  Recall@5:    %.1f%%\n", m.Served.Recall5*100)
+	fmt.Printf("  MRR:         %.3f\n", m.Served.MRR)
+	fmt.Printf("  Eval:        %d queries / %d-doc corpus\n", m.EvalQueries, m.CorpusSize)
+	fmt.Printf("  Note:        stock cross-encoder served on CPU; fine-tuning not\n")
+	fmt.Printf("               applied (needs curated hard negatives — see docs)\n")
 	fmt.Printf("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 }

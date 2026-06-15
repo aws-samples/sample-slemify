@@ -249,11 +249,16 @@ def train_scoring(model, train_rows, eval_rows):
             corr = float(np.corrcoef(pred, yev)[0, 1])
         else:
             corr = 0.0
+        # Honest baseline: predicting the training mean for every input. The
+        # trained head only adds value if its MAE is meaningfully below this.
+        baseline_pred = np.full_like(yev, float(ytr.mean()))
+        baseline_mae = float(mean_absolute_error(yev, baseline_pred))
         per_query_embed_ms = embed_ms / max(len(Xev_txt), 1)
         metrics.update({"mae": mae, "rmse": rmse, "r2": r2, "correlation": corr,
+                        "baseline_mae": baseline_mae,
                         "total": len(yev), "embed_ms_per_query": round(per_query_embed_ms, 1)})
-        log(f"\n  MAE: {mae:.4f}  RMSE: {rmse:.4f}  R²: {r2:.3f}  Corr: {corr:.3f} "
-            f"(n={len(yev)})")
+        log(f"\n  MAE: {mae:.4f} (baseline predict-mean MAE: {baseline_mae:.4f})  "
+            f"RMSE: {rmse:.4f}  R²: {r2:.3f}  Corr: {corr:.3f} (n={len(yev)})")
 
     # Regression head: single weight vector + scalar intercept.
     head_obj = {"type": "regression", "head": HEAD, "embedding_dim": dim,
@@ -400,20 +405,49 @@ def train_embedding(model, train_rows, eval_rows):
     log("=== Training complete ===")
 
 
-def _build_ranking_eval(eval_rows, corpus_texts, candidates_per_query=20, seed=13):
-    """For each eval query build a candidate list = its positive + sampled
-    distractors. Returns a list of (query, [docs], gold_index)."""
+class _TfidfMiner:
+    """Mines hard negatives/distractors by TF-IDF similarity over the corpus.
+
+    Hard negatives are documents that share vocabulary with the query (so they
+    look plausible) but are not the answer — far more useful for training and
+    evaluating a reranker than random documents, which are trivially separable.
+    No extra model needed; uses the sklearn dependency already present.
+    """
+
+    def __init__(self, corpus_texts):
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        self.corpus = corpus_texts
+        self.vec = TfidfVectorizer(stop_words="english", max_features=20000)
+        self.mat = self.vec.fit_transform(corpus_texts)  # [N, V]
+
+    def hardest(self, query, exclude, n):
+        """Return the n most query-similar corpus docs, excluding `exclude`."""
+        qv = self.vec.transform([query])
+        sims = (qv @ self.mat.T).toarray()[0]
+        order = np.argsort(-sims)
+        out = []
+        for idx in order:
+            doc = self.corpus[idx]
+            if doc != exclude:
+                out.append(doc)
+            if len(out) >= n:
+                break
+        return out
+
+
+def _build_ranking_eval(miner, eval_rows, candidates_per_query=20):
+    """For each eval query build a HARD candidate list = its positive + the most
+    lexically-similar non-gold docs (confusable near-misses). This mirrors the
+    real two-stage pipeline (rerank the retriever's top candidates) and leaves
+    headroom to distinguish a good reranker from a weak one."""
     import random as _r
-    rng = _r.Random(seed)
+    rng = _r.Random(13)
     items = []
     for r in eval_rows:
         q, pos = r.get("query", ""), r.get("positive", "")
         if not q or not pos:
             continue
-        distractors = [d for d in corpus_texts if d != pos]
-        if len(distractors) > candidates_per_query - 1:
-            distractors = rng.sample(distractors, candidates_per_query - 1)
-        docs = distractors + [pos]
+        docs = miner.hardest(q, exclude=pos, n=candidates_per_query - 1) + [pos]
         rng.shuffle(docs)
         items.append((q, docs, docs.index(pos)))
     return items
@@ -450,18 +484,23 @@ def _rerank_metrics(predict_fn, eval_items, ks=(1, 5, 10)):
 
 
 def train_reranking(train_rows, eval_rows):
-    """Fine-tune a cross-encoder to score (query, document) relevance."""
-    from sentence_transformers import CrossEncoder, InputExample
-    from torch.utils.data import DataLoader
+    """Serve a strong cross-encoder reranker on CPU (no fine-tuning).
 
-    # Positives from the mined pairs.
+    Unlike the bi-encoder embedding path, cross-encoder relevance fine-tuning
+    needs trustworthy hard negatives. With single-positive synthetic data over an
+    overlapping document corpus, mined "negatives" are frequently relevant
+    (false negatives), which corrupts an already well-calibrated reranker rather
+    than improving it (measured: large NDCG/MRR regression). So Slemify serves
+    the stock cross-encoder on CPU via ONNX and reports its ranking quality
+    honestly, instead of pretending a fine-tune helps. Fine-tuning here is a
+    future enhancement gated on curated relevance judgments.
+    """
+    from sentence_transformers import CrossEncoder
+
     positives = [(r.get("query", ""), r.get("positive", ""))
                  for r in train_rows if r.get("query") and r.get("positive")]
-    if not positives:
-        log("ERROR: no (query, positive) training pairs")
-        sys.exit(1)
 
-    # Retrieval corpus (also the pool to sample negatives from).
+    # Retrieval corpus (the candidate pool for the hard eval).
     try:
         corpus_rows = load_jsonl_s3(f"{PROJECT}/processed/corpus.jsonl")
         corpus_texts = [c.get("text", "") for c in corpus_rows if c.get("text")]
@@ -469,63 +508,31 @@ def train_reranking(train_rows, eval_rows):
         corpus_texts = []
     if not corpus_texts:
         corpus_texts = sorted({p for _, p in positives})
-    # Ensure eval positives are retrievable as candidates.
     eval_positives = [r.get("positive", "") for r in eval_rows if r.get("positive")]
     corpus_set = set(corpus_texts)
     corpus_texts = corpus_texts + [t for t in eval_positives if t and t not in corpus_set]
-    log(f"Train positives: {len(positives)}, corpus: {len(corpus_texts)} docs")
+    log(f"Corpus: {len(corpus_texts)} docs (serve-only, no fine-tune)")
 
-    # Build training examples: each positive (label 1) plus sampled hard-ish
-    # negatives (label 0) drawn from other corpus documents.
-    import random as _r
-    rng = _r.Random(13)
-    neg_per_pos = 3
-    examples = []
-    for q, pos in positives:
-        examples.append(InputExample(texts=[q, pos], label=1.0))
-        pool = [d for d in corpus_texts if d != pos]
-        for neg in rng.sample(pool, min(neg_per_pos, len(pool))):
-            examples.append(InputExample(texts=[q, neg], label=0.0))
-    rng.shuffle(examples)
-    log(f"Training examples (pos+neg): {len(examples)}")
-
-    # CrossEncoder with a single regression-style relevance output.
     model = CrossEncoder(MODEL_NAME, num_labels=1, max_length=256, device="cpu")
 
-    eval_items = _build_ranking_eval(eval_rows, corpus_texts)
-    baseline = _rerank_metrics(
+    # Hard eval: rank each query's positive against its most confusable
+    # near-misses, the realistic two-stage rerank job.
+    miner = _TfidfMiner(corpus_texts)
+    eval_items = _build_ranking_eval(miner, eval_rows)
+    served = _rerank_metrics(
         lambda q, docs: model.predict([(q, d) for d in docs]).tolist(), eval_items)
-    if baseline:
-        log(f"Baseline (stock cross-encoder): ndcg@5={baseline.get('ndcg@5', 0):.3f} "
-            f"mrr={baseline.get('mrr', 0):.3f}")
+    if served:
+        log(f"Served cross-encoder (stock, CPU): ndcg@5={served.get('ndcg@5', 0):.3f} "
+            f"recall@1={served.get('recall@1', 0):.3f} mrr={served.get('mrr', 0):.3f}")
 
-    loader = DataLoader(examples, shuffle=True, batch_size=16, drop_last=True)
-    warmup = max(1, int(len(loader) * EPOCHS * 0.1))
-    log(f"Fine-tuning: {EPOCHS} epoch(s), {len(loader)} batches/epoch, warmup={warmup}")
-    # CrossEncoder.fit writes a relative output dir; run from writable /tmp.
-    os.makedirs("/tmp/ce-train", exist_ok=True)
-    os.chdir("/tmp/ce-train")
-    t0 = time.time()
-    model.fit(train_dataloader=loader, epochs=EPOCHS, warmup_steps=warmup,
-              show_progress_bar=False)
-    train_s = time.time() - t0
-    log(f"Fine-tune complete in {train_s:.0f}s")
+    metrics = {"task": "reranking", "fine_tuned": False,
+               "eval_queries": served.get("eval_queries", 0),
+               "corpus_size": len(corpus_texts), "served": served,
+               "note": "stock cross-encoder served on CPU; fine-tuning not applied "
+                       "(needs curated hard negatives)"}
 
-    tuned = _rerank_metrics(
-        lambda q, docs: model.predict([(q, d) for d in docs]).tolist(), eval_items)
-    if tuned:
-        log(f"Tuned cross-encoder: ndcg@5={tuned.get('ndcg@5', 0):.3f} "
-            f"mrr={tuned.get('mrr', 0):.3f}")
-
-    metrics = {"task": "reranking", "train_samples": len(examples),
-               "eval_queries": tuned.get("eval_queries", 0),
-               "corpus_size": len(corpus_texts), "epochs": EPOCHS,
-               "train_seconds": round(train_s, 1),
-               "baseline": baseline, "tuned": tuned}
-
-    # Save the fine-tuned cross-encoder and export to ONNX. A cross-encoder is a
-    # sequence-classification model (1 logit), so export with that task.
-    tuned_dir = "/tmp/tuned-reranker"
+    # Export the stock cross-encoder to ONNX for CPU serving (no fit).
+    tuned_dir = "/tmp/reranker-model"
     model.save(tuned_dir)
 
     prefix = f"models/{PROJECT}"

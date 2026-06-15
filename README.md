@@ -14,7 +14,7 @@ Slemify picks the right model family from `project.task`:
 - `task: classification` — a frozen encoder + a lightweight head, trained and served entirely on CPU in seconds. For routing, intent, and labeling.
 - `task: scoring` — the same encoder-head family with a regression head, trained and served on CPU. Returns a single number in [0,1]. For risk/quality/confidence guardrails. (`extraction` and `reranking` also extend this family.)
 - `task: embedding` — a domain-tuned text embedding model, contrastively fine-tuned and served on CPU (ONNX). Returns a vector. For retrieval (RAG) over your own corpus.
-- `task: reranking` — a cross-encoder that scores (query, document) relevance jointly, fine-tuned and served on CPU (ONNX). Returns ranked documents. For the precision-ranking step after retrieval.
+- `task: reranking` — a cross-encoder that scores (query, document) relevance jointly, served on CPU (ONNX). Returns ranked documents. For the precision step after retrieval. Serves a strong stock cross-encoder as-is — fine-tuning is intentionally not applied (see note below).
 
 ## When to Use an SLM
 
@@ -167,7 +167,7 @@ Inference cost depends on how you deploy. The reference deployment (llama.cpp on
 - [K8s Autoscaling Auditor](examples/k8s-autoscaling/). Tiered SLM system: a triage classifier routes queries, an 8B auditor produces structured reasoning about Karpenter/KEDA/HPA misconfigurations
 - [K8s Autoscaling Risk Scorer](examples/k8s-autoscaling/risk-scorer/). A `task: scoring` encoder-head model that rates a config change's operational risk 0.0–1.0 on CPU — a cheap guardrail that auto-approves low-risk changes and escalates high-risk ones to the auditor
 - [K8s Autoscaling Retriever](examples/k8s-autoscaling/retriever/). A `task: embedding` model contrastively fine-tuned on in-domain (question, document) pairs — a domain-tuned RAG retriever that beats a stock encoder on recall, trained and served on CPU
-- [K8s Autoscaling Reranker](examples/k8s-autoscaling/reranker/). A `task: reranking` cross-encoder that scores (query, document) relevance jointly — the precision step after retrieval, trained and served on CPU via a `/rerank` endpoint
+- [K8s Autoscaling Reranker](examples/k8s-autoscaling/reranker/). A `task: reranking` cross-encoder that scores (query, document) relevance jointly — the precision step after retrieval, served on CPU via a `/rerank` endpoint. Serve-only: a strong stock cross-encoder, no fine-tuning (see the fine-tuning FAQ)
 
 ## Deep Dives
 
@@ -212,6 +212,14 @@ A: If the task is repetitive, structured, and runs more than ~1,000 times/day. o
 
 **Q: Can a 3B model really match a frontier LLM?**
 A: For general tasks, no. For YOUR specific structured task with YOUR categories, a fine-tuned 3B model matches or beats general-purpose LLMs. [Salesforce's xLAM-2-8B](https://huggingface.co/Salesforce/Llama-xLAM-2-8b-fc-r) beat GPT-4o and Claude 3.5 at tool calling on the [Berkeley Function-Calling Leaderboard](https://gorilla.cs.berkeley.edu/leaderboard.html). Specialization beats size.
+
+**Q: Does fine-tuning always improve quality? When doesn't it help?**
+A: No, and Slemify is deliberate about this. Fine-tuning helps most when the model has to learn something it doesn't already know:
+- **Classification / scoring** — the head (a router taxonomy, a risk rubric) doesn't exist in any pretrained model, so it *must* be trained. These tasks always benefit; the question is just whether you have enough data.
+- **Embedding** — domain-tuning a retriever measurably helps when your corpus uses vocabulary or relationships a general encoder hasn't specialized in (in our k8s example, recall@1 improved ~12 points over stock).
+- **Reranking** — a strong general-purpose cross-encoder is *already* excellent at judging (query, document) relevance, and fine-tuning it reliably needs curated hard negatives (human-labeled "looks relevant but isn't"). Synthesizing those over an overlapping technical corpus produces false negatives that *degrade* a good model. So for reranking, Slemify serves the strong stock cross-encoder on CPU rather than fine-tuning it. Running a cross-encoder on CPU with no GPU is the win there, not the tuning.
+
+The reports always show the metric against an honest baseline (stock-vs-tuned for embedding, a trivial baseline for scoring) so you can see whether training actually helped on *your* data — not just trust that it did.
 
 **Q: What about RAG?**
 A: SLMs and RAG solve different problems, and Slemify now covers both sides. RAG retrieves relevant context for knowledge questions; the retrieval step itself is an embedding model, which you can domain-tune with `task: embedding`. The classification/scoring tasks handle routing and guardrails where you don't need retrieval, you need a fast decision. They work well together: an encoder classifier routes the query, a domain-tuned embedding model retrieves the knowledge, and a generative SLM writes the answer.

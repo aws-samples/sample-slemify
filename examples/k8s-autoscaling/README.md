@@ -29,10 +29,10 @@ k8s-autoscaling/
 | Triage | encoder (bge-base, 768d) | `classification` — intent routing + confidence | ~25ms |
 | Risk Scorer | encoder (bge-base, 768d) | `scoring` — operational risk 0.0-1.0 | ~25ms |
 | Retriever | encoder (bge-base, 768d) | `embedding` — domain-tuned RAG vectors | ~25ms |
-| Reranker | cross-encoder (bge-reranker-base) | `reranking` — (query, doc) relevance | ~50ms/pair |
+| Reranker | cross-encoder (bge-reranker-base) | `reranking` — (query, doc) relevance, served on CPU (no fine-tune) | ~50ms/pair |
 | Auditor | 8B (q4_k_m) | `generation` — structured config analysis | ~14s streaming |
 
-All run on Graviton CPUs with no GPU required for serving. The auditor is fine-tuned on GPU (QLoRA); the encoder-family models (triage, risk scorer, retriever, reranker) train on CPU — the triage and scorer in seconds, the retriever and reranker in a few minutes (contrastive / cross-encoder fine-tune).
+All run on Graviton CPUs with no GPU required for serving. The auditor is fine-tuned on GPU (QLoRA); the encoder-family models train on CPU — triage and risk scorer fit a head in seconds, the retriever contrastively fine-tunes in a few minutes. The reranker is serve-only (a strong stock cross-encoder run on CPU; fine-tuning is intentionally not applied — see the repo FAQ).
 
 ## Quick Start
 
