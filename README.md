@@ -45,6 +45,19 @@ The inference endpoint exposes an OpenAI-compatible API (`/v1/chat/completions`)
 | 100% LLM API | ~$3,000/mo | 1-3s |
 | SLM + LLM (90/10) | ~$500/mo | 200ms avg |
 
+### Feed the router a slice, not the whole blob
+
+A router only needs the *decision-relevant* signal, not the entire input. That's why its small context window (the default encoder caps at ~512 tokens, roughly 350-400 words) is rarely a problem in practice, and often an advantage: you scale these models by sending them **less, more often** — not more.
+
+In a typical pipeline the small model makes a cheap decision on a small slice, and only the expensive model does the heavy lifting:
+- **Route the query** — classify the user's question or intent (Slemify's triage). A question is short by nature.
+- **Guard the input** — a safety / PII / out-of-scope check before the LLM ever runs.
+- **Filter retrieved chunks** — in RAG, score each retrieved chunk for relevance *one at a time* before putting it in the prompt. Each chunk is small, so you never need a big window; you scale by making many small calls, not one giant one.
+
+If the routing signal is buried in a long document, don't grow the window — shrink the input first: route on the latest message, the subject line, the first paragraph, or a one-line summary. Trimming and redacting input before routing is standard practice.
+
+Honest boundary: if a decision truly needs to read a whole long document at once (say, judging the overall risk of a 30-page contract), a small classifier on the raw text won't do it — summarize or extract first, chunk-and-aggregate, or point `model.base` at a longer-context encoder. The small model is a scalpel, not a bucket. See [serving.md](docs/deep-dive/serving.md) for the context-window details.
+
 ## How It Works
 
 ```
@@ -218,6 +231,9 @@ A: No, and Slemify is deliberate about this. Fine-tuning helps most when the mod
 - **Reranking** — *not a Slemify task*, on purpose. A strong general-purpose cross-encoder is already excellent at judging (query, document) relevance, and fine-tuning it reliably needs curated hard negatives (human-labeled "looks relevant but isn't"). We tested it: synthesizing those over an overlapping technical corpus produces false negatives that *degrade* a good model (NDCG@5 0.85 → 0.58 on a fair eval). Since fine-tuning doesn't help, Slemify doesn't do it — running a stock cross-encoder reranker on CPU with no GPU is a serving pattern, shown in the [k8s-autoscaling demo](examples/k8s-autoscaling/demo/), not a model Slemify builds.
 
 The reports always show the metric against an honest baseline (stock-vs-tuned for embedding, a trivial baseline for scoring) so you can see whether training actually helped on *your* data — not just trust that it did.
+
+**Q: How much context can the router/classifier handle?**
+A: The default encoder (`BAAI/bge-base-en-v1.5`) caps at ~512 tokens (roughly 350-400 words) and silently truncates beyond that — but that's usually fine, because a router only needs the decision-relevant slice, not the whole input. Feed it the question, the latest turn, or one retrieved chunk at a time, and scale by sending it *less, more often*. If the signal is genuinely buried in long text, trim or summarize to the relevant part first, or point `model.base` at a longer-context encoder. See ["Feed the router a slice"](#feed-the-router-a-slice-not-the-whole-blob) above and the [serving deep dive](docs/deep-dive/serving.md) for the right-tool / wrong-tool guide.
 
 **Q: What about RAG?**
 A: SLMs and RAG solve different problems, and Slemify now covers both sides. RAG retrieves relevant context for knowledge questions; the retrieval step itself is an embedding model, which you can domain-tune with `task: embedding`. The classification/scoring tasks handle routing and guardrails where you don't need retrieval, you need a fast decision. They work well together: an encoder classifier routes the query, a domain-tuned embedding model retrieves the knowledge, and a generative SLM writes the answer.
