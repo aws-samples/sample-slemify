@@ -21,7 +21,6 @@ REGION="${AWS_REGION:-eu-west-1}"
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 REGISTRY="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
 IMAGE="${REGISTRY}/slemify/k8s-autoscaling-orchestrator:latest"
-EMBEDDING_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-embedding:latest"
 RERANKER_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-reranker:latest"
 NAMESPACE="slemify"
 
@@ -41,6 +40,15 @@ if ! kubectl get deployment -n "${NAMESPACE}" -l slemify.io/stage=serving -o nam
   exit 1
 fi
 echo "  SLM models: deployed"
+
+# The demo's RAG retrieval uses the Slemify-trained embedding model
+# (task: embedding). It must be deployed first.
+if ! kubectl get deployment k8s-autoscaling-retriever-inference -n "${NAMESPACE}" >/dev/null 2>&1; then
+  echo "  ERROR: retriever not found (k8s-autoscaling-retriever-inference)."
+  echo "  Deploy it first: slemify deploy --config ../retriever/expert.yaml"
+  exit 1
+fi
+echo "  Retriever (embedding) model: deployed"
 
 # Check kubectl access
 if ! kubectl get ns "${NAMESPACE}" >/dev/null 2>&1; then
@@ -71,25 +79,23 @@ bash "${SCRIPT_DIR}/build-images.sh"
 echo "  Images pushed"
 echo ""
 
-# --- Step 4: Deploy manifests (embedding + reranker + orchestrator) ---
+# --- Step 4: Deploy manifests (reranker + orchestrator) ---
 echo "--- Step 4: Deploying manifests ---"
 
 sed -e "s|REPLACE_WITH_ECR_IMAGE|${IMAGE}|g" \
-    -e "s|REPLACE_WITH_EMBEDDING_IMAGE|${EMBEDDING_IMAGE}|g" \
     -e "s|REPLACE_WITH_RERANKER_IMAGE|${RERANKER_IMAGE}|g" \
     "${DEMO_DIR}/k8s-manifest.yaml" | \
   kubectl apply -f -
 
-echo "  Waiting for embedding and reranker services to be ready..."
-kubectl rollout status deployment/k8s-autoscaling-embedding -n "${NAMESPACE}" --timeout=300s
+echo "  Waiting for reranker service to be ready..."
 kubectl rollout status deployment/k8s-autoscaling-reranker -n "${NAMESPACE}" --timeout=300s
-echo "  Embedding + reranker services: ready"
+echo "  Reranker service: ready"
 echo ""
 
 # --- Step 5: Index knowledge base ---
 echo "--- Step 5: Indexing knowledge base ---"
 
-# Knowledge base index, built with the in-cluster bge-base embeddings (768d).
+# Knowledge base index, built with the Slemify-trained retriever (768d).
 INDEX_NAME="k8s-autoscaling-knowledge"
 
 # Check if index already has data
@@ -107,7 +113,7 @@ else
   echo "  Starting port-forwards for indexing..."
   kubectl port-forward -n "${NAMESPACE}" svc/opensearch-cluster-master 9200:9200 &
   PF_OS_PID=$!
-  kubectl port-forward -n "${NAMESPACE}" svc/k8s-autoscaling-embedding 8083:80 &
+  kubectl port-forward -n "${NAMESPACE}" svc/k8s-autoscaling-retriever-inference 8083:8080 &
   PF_EMB_PID=$!
   sleep 3
 

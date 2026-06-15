@@ -25,9 +25,10 @@ TRIAGE_URL = os.environ.get("TRIAGE_URL", "http://localhost:8081")
 AUDITOR_URL = os.environ.get("AUDITOR_URL", "http://localhost:8082")
 OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:9200")
 LLM_MODEL = os.environ.get("LLM_MODEL", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0")
-# In-cluster embedding model served by Text Embeddings Inference (TEI).
-# bge-base-en-v1.5 produces 768-dimensional vectors. Must match the dimension
-# used at index time in index-knowledge.py.
+# In-cluster embedding served by the Slemify-trained retriever (task:
+# embedding) over a TEI-compatible /embed endpoint. The domain-tuned encoder
+# produces 768-dimensional vectors and must match the dimension used at index
+# time in index-knowledge.py.
 EMBEDDING_URL = os.environ.get("EMBEDDING_URL", "http://localhost:8083")
 # In-cluster cross-encoder re-ranker. Scores the OpenSearch candidate set and
 # keeps only the most relevant chunks, so the auditor prompt stays small.
@@ -60,7 +61,7 @@ bedrock = boto3.client("bedrock-runtime")
 
 
 def embed_query(text: str) -> list[float]:
-    """Embed text via the in-cluster TEI embedding pod (bge-base-en-v1.5)."""
+    """Embed text via the Slemify-trained retriever (TEI /embed, 768d)."""
     with httpx.Client(timeout=10) as client:
         resp = client.post(f"{EMBEDDING_URL}/embed", json={"inputs": text[:8000]})
         resp.raise_for_status()

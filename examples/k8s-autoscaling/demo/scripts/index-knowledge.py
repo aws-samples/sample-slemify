@@ -1,12 +1,13 @@
 """Index Karpenter and KEDA documentation into OpenSearch for RAG.
 
 Clones official doc repos, chunks markdown files, generates embeddings
-via the in-cluster TEI embedding pod (bge-base-en-v1.5), and indexes into
-OpenSearch k-NN.
+via the Slemify-trained, domain-tuned retriever (task: embedding), and
+indexes into OpenSearch k-NN. The retriever exposes a TEI-compatible /embed
+endpoint and produces 768-dimensional vectors.
 
 Usage:
   kubectl port-forward -n slemify svc/opensearch-cluster-master 9200:9200
-  kubectl port-forward -n slemify svc/k8s-autoscaling-embedding 8083:80
+  kubectl port-forward -n slemify svc/k8s-autoscaling-retriever-inference 8083:8080
   python3 index-knowledge.py                    # Full reindex
   python3 index-knowledge.py --append --source=aws-blog  # Add blogs only
 
@@ -27,8 +28,11 @@ from opensearchpy import OpenSearch
 
 OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:9200")
 INDEX_NAME = os.environ.get("INDEX_NAME", "k8s-autoscaling-knowledge")
-# In-cluster embedding model (TEI serving bge-base-en-v1.5, 768 dimensions).
-# Must match the dimension in the index mapping and in server.py at query time.
+# Embedding endpoint. The demo's RAG retrieval uses the Slemify-trained,
+# domain-tuned encoder (task: embedding) served at the retriever inference
+# service, which is both more accurate and faster than a stock encoder on this
+# corpus. Same TEI-compatible /embed contract; 768 dimensions. Must match the
+# dimension in the index mapping and the query-time embedding in server.py.
 EMBEDDING_URL = os.environ.get("EMBEDDING_URL", "http://localhost:8083")
 EMBEDDING_DIM = 768
 CHUNK_SIZE = 2000  # chars (~500 tokens)
@@ -190,7 +194,7 @@ def fetch_blogs() -> list[dict]:
 # --- Embedding and indexing ---
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Generate embeddings via the in-cluster TEI pod (bge-base-en-v1.5)."""
+    """Generate embeddings via the Slemify-trained retriever (TEI /embed)."""
     # TEI accepts a batch of inputs and returns one embedding per input.
     truncated = [t[:8000] for t in texts]
     with httpx.Client(timeout=60) as client:

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Build the demo orchestrator and embedding images as multi-arch
+# Build the demo orchestrator and reranker images as multi-arch
 # (linux/amd64 + linux/arm64) and publish manifest lists to ECR.
 #
 # Builds run natively on two remote hosts (no QEMU emulation), matching the
@@ -21,7 +21,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEMO_DIR="$(dirname "$SCRIPT_DIR")"
 
 ORCH_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-orchestrator:latest"
-EMB_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-embedding:latest"
 RERANK_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-reranker:latest"
 
 if [ -z "${ARM64_BUILD_HOST}" ]; then
@@ -30,7 +29,7 @@ if [ -z "${ARM64_BUILD_HOST}" ]; then
 fi
 
 echo "=== Ensuring ECR repositories ==="
-for repo in slemify/k8s-autoscaling-orchestrator slemify/k8s-autoscaling-embedding slemify/k8s-autoscaling-reranker; do
+for repo in slemify/k8s-autoscaling-orchestrator slemify/k8s-autoscaling-reranker; do
   aws ecr describe-repositories --repository-names "${repo}" --region "${REGION}" >/dev/null 2>&1 || \
     aws ecr create-repository --repository-name "${repo}" --region "${REGION}" \
       --image-scanning-configuration scanOnPush=true >/dev/null
@@ -63,7 +62,6 @@ sync_and_build() {
     "${DEMO_DIR}/" "${host}:~/demo-build/"
   ssh "${host}" "aws ecr get-login-password --region ${REGION} | ${dkr} docker login --username AWS --password-stdin ${REGISTRY}"
   ssh "${host}" "cd ~/demo-build && ${dkr} docker build -t ${ORCH_IMAGE}-${arch} . && ${dkr} docker push ${ORCH_IMAGE}-${arch}"
-  ssh "${host}" "cd ~/demo-build/embedding && ${dkr} docker build -t ${EMB_IMAGE}-${arch} . && ${dkr} docker push ${EMB_IMAGE}-${arch}"
   ssh "${host}" "cd ~/demo-build/reranker && ${dkr} docker build -t ${RERANK_IMAGE}-${arch} . && ${dkr} docker push ${RERANK_IMAGE}-${arch}"
 }
 
@@ -76,10 +74,8 @@ sync_and_build "${X86_BUILD_HOST}" amd64
 echo "=== Creating multi-arch manifests ==="
 ARM_DKR="$(docker_prefix "${ARM64_BUILD_HOST}")"
 ssh "${ARM64_BUILD_HOST}" "${ARM_DKR} docker buildx imagetools create -t ${ORCH_IMAGE} ${ORCH_IMAGE}-amd64 ${ORCH_IMAGE}-arm64"
-ssh "${ARM64_BUILD_HOST}" "${ARM_DKR} docker buildx imagetools create -t ${EMB_IMAGE} ${EMB_IMAGE}-amd64 ${EMB_IMAGE}-arm64"
 ssh "${ARM64_BUILD_HOST}" "${ARM_DKR} docker buildx imagetools create -t ${RERANK_IMAGE} ${RERANK_IMAGE}-amd64 ${RERANK_IMAGE}-arm64"
 
 echo "=== Multi-arch images published ==="
 echo "  ${ORCH_IMAGE} (amd64 + arm64)"
-echo "  ${EMB_IMAGE} (amd64 + arm64)"
 echo "  ${RERANK_IMAGE} (amd64 + arm64)"
