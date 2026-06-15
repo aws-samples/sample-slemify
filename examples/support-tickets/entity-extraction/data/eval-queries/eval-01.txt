@@ -1,0 +1,1 @@
+user-profile-service is returning 504 Gateway Timeout in production for about 5% of calls since the 2.7.1 rollout. the downstream avatar-cache looks healthy. anyone else seeing elevated latency?

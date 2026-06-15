@@ -1,0 +1,1 @@
+Customer reports 503 Service Unavailable on the order-api intermittently in production (eu-west-1). We're on 3.2.0. Looks correlated with autoscaling events — the inventory-service it calls scales down and a few requests get refused before new pods are ready.

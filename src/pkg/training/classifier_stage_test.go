@@ -64,3 +64,32 @@ func TestClassifierJobIsCPUOnly(t *testing.T) {
 		t.Error("classifier container must set a memory limit")
 	}
 }
+
+func TestExtractionJobPassesTaskEnv(t *testing.T) {
+	// Extraction rides the same CPU classifier-trainer job; the Python trainer
+	// branches on the TASK env to fit a feature-based token tagger.
+	cfg := classifierExpertConfig()
+	cfg.Project.Task = config.TaskExtraction
+	cfg.Project.Labels = map[string][]string{"entities": {"SERVICE", "ERROR"}}
+
+	job := ClassifierJobManifest(cfg, "slemify", pipeline.NewPipelineContext())
+	c := job.Spec.Template.Spec.Containers[0]
+
+	var taskVal string
+	for _, e := range c.Env {
+		if e.Name == "TASK" {
+			taskVal = e.Value
+		}
+	}
+	if taskVal != config.TaskExtraction {
+		t.Errorf("extraction job must set TASK=extraction, got %q", taskVal)
+	}
+
+	// Still CPU-only (no GPU) like the rest of the encoder-head family.
+	if _, ok := c.Resources.Limits["nvidia.com/gpu"]; ok {
+		t.Error("extraction training job must not request a GPU")
+	}
+	if c.Resources.Limits.Memory().IsZero() {
+		t.Error("extraction container must set a memory limit")
+	}
+}

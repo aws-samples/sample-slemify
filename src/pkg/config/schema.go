@@ -7,7 +7,7 @@ package config
 type ExpertConfig struct {
 	APIVersion string           `json:"apiVersion" yaml:"apiVersion" validate:"required,eq=slemify/v1"`
 	Project    ProjectConfig    `json:"project" yaml:"project" validate:"required"`
-	Model      ModelConfig      `json:"model" yaml:"model" validate:"required"`
+	Model      ModelConfig      `json:"model" yaml:"model"`
 	Data       DataConfig       `json:"data" yaml:"data" validate:"required"`
 	Training   TrainingConfig   `json:"training" yaml:"training"`
 	Evaluation EvaluationConfig `json:"evaluation,omitempty" yaml:"evaluation,omitempty"`
@@ -40,6 +40,7 @@ var supportedTasks = map[string]bool{
 	TaskGeneration:     true,
 	TaskClassification: true,
 	TaskScoring:        true,
+	TaskExtraction:     true,
 	TaskEmbedding:      true,
 }
 
@@ -91,6 +92,13 @@ func (p ProjectConfig) IsScoring() bool {
 	return p.Task == TaskScoring
 }
 
+// IsExtraction returns true for the token-level entity extraction task
+// (output is a list of typed spans). v1 serves a feature-based token tagger on
+// CPU rather than the frozen encoder, so it skips the ONNX encoder artifact.
+func (p ProjectConfig) IsExtraction() bool {
+	return p.Task == TaskExtraction
+}
+
 // UsesLabels returns true for tasks whose output is drawn from a label
 // taxonomy (classification, extraction). Scoring outputs a number, embedding
 // outputs a vector, and generation is free-form — none of those need labels.
@@ -111,7 +119,11 @@ func (p ProjectConfig) IsFreeForm() bool {
 }
 
 type ModelConfig struct {
-	Base     string `json:"base" yaml:"base" validate:"required"`
+	// Base is the model identifier: a causal LM for generation, an encoder for
+	// classification/scoring/embedding. Not required for extraction, whose v1
+	// tagger is feature-based and uses no encoder. Per-task requiredness is
+	// enforced in the validator.
+	Base     string `json:"base" yaml:"base" validate:"omitempty"`
 	Quantize string `json:"quantize,omitempty" yaml:"quantize,omitempty" validate:"omitempty,oneof=q4_k_m q8_0 f16 none"` // default: q4_k_m (generation only)
 	// Head selects the classifier head for encoder-head tasks. Ignored for
 	// generation/embedding.

@@ -117,6 +117,34 @@ Output one JSON object per line. No array brackets, no markdown, no explanation:
 {{"instruction": "...", "input": "...", "output": "0.87"}}"""
 
 
+EXTRACTION_GENERATION_PROMPT = """You are generating synthetic training data for a Small Language Model that extracts typed entity spans from text.
+
+DOMAIN CONTEXT:
+{domain}
+
+TOOL DESCRIPTION:
+{tool_description}
+
+SOURCE EXAMPLES (real data — use as style/content reference):
+{source_samples}
+
+ENTITY TYPES (extract ONLY these; use the exact uppercase names):
+{entity_types}
+
+TASK:
+Generate exactly {batch_size} training examples.
+Each example is a JSON object on its own line (JSONL format) with three fields:
+- "instruction": A short, consistent task instruction describing the extraction task.
+- "input": A realistic input reflecting the domain's real-world messiness. Keep each input under 200 words.
+- "output": The entities found in the input, formatted as "TYPE :: surface" pairs separated by " || ". Each surface MUST be an EXACT substring of the input (copy it verbatim, same casing). Use only the entity types listed above. If the input has no entities, use an empty string.
+
+Use realistic, DIVERSE entity surfaces — vary names, casing, and phrasing so the model learns to generalize rather than memorize. Include some inputs with several entities and some with few.
+
+Output one JSON object per line. No array brackets, no markdown, no explanation:
+{{"instruction": "...", "input": "...", "output": "TYPE :: surface || TYPE :: surface"}}
+{{"instruction": "...", "input": "...", "output": "TYPE :: surface"}}"""
+
+
 EMBEDDING_QUERY_PROMPT = """You are generating training data for a domain-tuned text embedding model used in retrieval (RAG).
 
 DOMAIN CONTEXT:
@@ -166,10 +194,13 @@ def main():
     is_free_form = (task == "generation" and output_format == "free_form")
     is_scoring = (task == "scoring")
     is_embedding = (task == "embedding")
+    is_extraction = (task == "extraction")
     if is_free_form:
         gen_format = "free_form"
     elif is_scoring:
         gen_format = "scoring"
+    elif is_extraction:
+        gen_format = "extraction"
     else:
         gen_format = "pipe_delimited"
     synthetic_cfg = data_cfg.get("synthetic", {})
@@ -221,6 +252,13 @@ def main():
         dropped = len(records) - len(valid)
         if dropped:
             logger.warning("Dropped %d records with non-numeric or out-of-range score", dropped)
+    elif is_extraction:
+        # For extraction, keep records with at least one well-formed entity whose
+        # surface is an exact substring of the input.
+        valid = _validate_extraction(records, _extract_entity_types(labels_config))
+        dropped = len(records) - len(valid)
+        if dropped:
+            logger.warning("Dropped %d records with no valid entity spans", dropped)
     else:
         # For label output, require a non-empty label. Single-dimension
         # classification emits a bare label (no pipe); multi-dimension emits
@@ -235,11 +273,13 @@ def main():
         logger.error("No valid records after validation")
         sys.exit(1)
 
-    # Check label distribution (only meaningful for label output)
-    if not is_free_form and not is_scoring:
+    # Check label distribution (only meaningful for single-label output)
+    if not is_free_form and not is_scoring and not is_extraction:
         _check_label_balance(records, labels_config)
     elif is_scoring:
         _check_score_distribution(records)
+    elif is_extraction:
+        _check_entity_coverage(records)
 
     # Phase 3: Generate eval data and write to S3
     bucket = data_cfg["bucket"]
@@ -271,6 +311,8 @@ def main():
         # Both free-form and label output are valid when non-empty.
         if is_scoring:
             eval_valid = _validate_scoring(eval_records)
+        elif is_extraction:
+            eval_valid = _validate_extraction(eval_records, _extract_entity_types(labels_config))
         else:
             eval_valid = [r for r in eval_records if r.get("output", "").strip()]
         eval_dropped = len(eval_records) - len(eval_valid)
@@ -544,6 +586,14 @@ def generate_synthetic(records, model, endpoint, target_pairs, domain, tools=Non
                     batch_size=batch_size,
                     scoring_guidelines=_extract_scoring_guidelines(domain),
                 )
+            elif output_format == "extraction":
+                prompt = EXTRACTION_GENERATION_PROMPT.format(
+                    domain=domain,
+                    tool_description=tool_description or "(not specified)",
+                    source_samples=batch_samples or "(no source data)",
+                    batch_size=batch_size,
+                    entity_types=_extract_entity_types_prompt(labels),
+                )
             else:
                 prompt = GENERATION_PROMPT.format(
                     domain=domain,
@@ -788,6 +838,78 @@ def _extract_output_guidelines(domain_text, labels_config=None):
         "(2) Why it's wrong, (3) Correct approach, (4) Risk assessment. "
         "Keep the response factual and actionable."
     )
+
+
+def _extract_entity_types(labels_config):
+    """Flatten project.labels into the list of entity type names for extraction."""
+    types = []
+    if isinstance(labels_config, dict):
+        for values in labels_config.values():
+            if isinstance(values, list):
+                types.extend(str(v).strip() for v in values if str(v).strip())
+    # de-dupe, preserve order
+    seen, out = set(), []
+    for t in types:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _extract_entity_types_prompt(labels_config):
+    """Render the entity-type list for the extraction generation prompt."""
+    types = _extract_entity_types(labels_config)
+    if not types:
+        return "(no entity types defined — set project.labels)"
+    return "\n".join(f"- {t}" for t in types)
+
+
+def _parse_entity_output(output):
+    """Parse 'TYPE :: surface || TYPE :: surface' into [(type, surface)]."""
+    ents = []
+    for chunk in output.split("||"):
+        chunk = chunk.strip()
+        if "::" not in chunk:
+            continue
+        t, _, surface = chunk.partition("::")
+        t, surface = t.strip(), surface.strip()
+        if t and surface:
+            ents.append((t, surface))
+    return ents
+
+
+def _validate_extraction(records, allowed_types):
+    """Keep records with >=1 well-formed entity: type in the taxonomy and
+    surface an exact substring of the input. Rewrites output to canonical form."""
+    allowed = set(allowed_types) if allowed_types else None
+    valid = []
+    for r in records:
+        text = r.get("input", "")
+        kept = []
+        for t, surface in _parse_entity_output(r.get("output", "")):
+            if allowed is not None and t not in allowed:
+                continue
+            if surface and surface in text:
+                kept.append((t, surface))
+        if text and kept:
+            r = dict(r)
+            r["output"] = " || ".join(f"{t} :: {s}" for t, s in kept)
+            valid.append(r)
+    return valid
+
+
+def _check_entity_coverage(records):
+    """Log how many spans were generated per entity type."""
+    from collections import Counter
+    dist = Counter()
+    for r in records:
+        for t, _ in _parse_entity_output(r.get("output", "")):
+            dist[t] += 1
+    logger.info("Entity span counts (%d records):", len(records))
+    for t, c in dist.most_common():
+        logger.info("  %s: %d", t, c)
+    if not dist:
+        logger.warning("No entity spans found — check the entity taxonomy and sources.")
 
 
 # === Bedrock / OpenAI Backends ===

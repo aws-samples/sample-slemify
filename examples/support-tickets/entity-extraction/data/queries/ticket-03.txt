@@ -1,0 +1,1 @@
+URGENT: auth-gateway returning connection timeout for ~30% of requests in us-east-1. started around 14:20 UTC. notification-service depends on it and is now also degraded. no recent deploys that I know of.

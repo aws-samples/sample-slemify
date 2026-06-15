@@ -19,6 +19,7 @@ import time
 
 import boto3
 import numpy as np
+import extract_common as ec
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import (accuracy_score, mean_absolute_error,
                              mean_squared_error, precision_recall_fscore_support,
@@ -104,6 +105,12 @@ def main():
     train_rows = load_jsonl_s3(f"{PROJECT}/processed/train.jsonl")
     eval_rows = load_jsonl_s3(f"{PROJECT}/processed/eval.jsonl")
     log(f"Loaded train={len(train_rows)} eval={len(eval_rows)}")
+
+    # Extraction is a feature-based token tagger — no encoder, no
+    # sentence-transformers, no torch. Dispatch before loading the encoder.
+    if TASK == "extraction":
+        train_extraction(train_rows, eval_rows)
+        return
 
     from sentence_transformers import SentenceTransformer
     model = SentenceTransformer(MODEL_NAME, device="cpu")
@@ -398,6 +405,137 @@ def train_embedding(model, train_rows, eval_rows):
     log(f"Artifacts uploaded to s3://{S3_BUCKET}/{prefix}/")
     log("=== Training complete ===")
 
+
+
+def _parse_entities(output):
+    """Parse the delimited entity list the data pipeline stores in `output`.
+
+    Format: 'TYPE :: surface || TYPE :: surface'. Returns [{type, text}].
+    """
+    ents = []
+    for chunk in output.split("||"):
+        chunk = chunk.strip()
+        if "::" not in chunk:
+            continue
+        t, _, surface = chunk.partition("::")
+        t, surface = t.strip(), surface.strip()
+        if t and surface:
+            ents.append({"type": t, "text": surface})
+    return ents
+
+
+def _extraction_rows(rows):
+    """Convert {instruction,input,output} records into {text, entities},
+    keeping only entities whose surface is an exact substring of the text."""
+    out = []
+    for r in rows:
+        text = r.get("input", "")
+        ents = [e for e in _parse_entities(r.get("output", "")) if e["text"] in text]
+        if text and ents:
+            out.append({"text": text, "entities": ents})
+    return out
+
+
+def _score_extraction(examples, extractor):
+    """Entity-level micro precision/recall/F1, per type and overall."""
+    from collections import defaultdict
+    tp, fp, fn, types = defaultdict(int), defaultdict(int), defaultdict(int), set()
+    for ex in examples:
+        gold = {(e["type"], e["text"].lower().strip()) for e in ex["entities"]}
+        pred = {(e["type"], e["text"].lower().strip()) for e in extractor(ex["text"])}
+        types |= {t for t, _ in gold}
+        for p in pred:
+            (tp if p in gold else fp)[p[0]] += 1
+        for g in gold:
+            if g not in pred:
+                fn[g[0]] += 1
+
+    def prf(a, b, c):
+        p = a / (a + b) if a + b else 0.0
+        r = a / (a + c) if a + c else 0.0
+        return p, r, (2 * p * r / (p + r) if p + r else 0.0)
+
+    return {t: prf(tp[t], fp[t], fn[t]) for t in types}, \
+        prf(sum(tp.values()), sum(fp.values()), sum(fn.values()))
+
+
+def train_extraction(train_rows, eval_rows):
+    """Fit a feature-based token tagger (DictVectorizer + LogisticRegression
+    over BIO tags). No encoder, no ONNX — serving reproduces the linear model
+    in numpy. Honest baseline: memorize training entity surfaces."""
+    from sklearn.feature_extraction import DictVectorizer
+
+    train = _extraction_rows(train_rows)
+    ev = _extraction_rows(eval_rows)
+    if not train:
+        log("ERROR: no extraction training records (need input + entity spans)")
+        sys.exit(1)
+    entity_types = sorted({e["type"] for r in train for e in r["entities"]})
+    log(f"Entity types ({len(entity_types)}): {entity_types}")
+    log(f"Extraction rows: train={len(train)} eval={len(ev)}")
+
+    Xf, y = [], []
+    for r in train:
+        toks = ec.tokenize(r["text"])
+        spans = ec.gold_char_spans(r["text"], r["entities"])
+        tags = ec.bio_tags(toks, spans)
+        for i in range(len(toks)):
+            Xf.append(ec.token_features(toks, i))
+            y.append(tags[i])
+
+    dv = DictVectorizer(sparse=True)
+    X = dv.fit_transform(Xf)
+    log(f"Fitting token tagger: {X.shape[0]} tokens, {X.shape[1]} features")
+    clf = LogisticRegression(max_iter=2000, C=4.0, class_weight="balanced")
+    clf.fit(X, y)
+
+    head_obj = {
+        "type": "extraction", "head": "feature-logreg",
+        "entity_types": entity_types,
+        "vocab": {k: int(v) for k, v in dv.vocabulary_.items()},
+        "coef": clf.coef_.tolist(),
+        "intercept": clf.intercept_.tolist(),
+        "classes": [str(c) for c in clf.classes_],
+    }
+
+    metrics = {"task": "extraction", "head": "feature-logreg",
+               "train_samples": len(train), "eval_samples": len(ev)}
+
+    if ev:
+        per, (P, R, F1) = _score_extraction(ev, lambda t: ec.extract(t, head_obj))
+        # Honest baseline: memorize entity surfaces seen in training and string
+        # match them. The tagger only earns its place by generalizing past this.
+        surf = {}
+        for r in train:
+            for e in r["entities"]:
+                surf.setdefault(e["text"].lower().strip(), e["type"])
+
+        def _baseline(text):
+            low = text.lower()
+            return [{"type": t, "text": s} for s, t in surf.items() if s and s in low]
+
+        _, (_, _, base_f1) = _score_extraction(ev, _baseline)
+        metrics.update({
+            "precision": round(P, 4), "recall": round(R, 4), "f1": round(F1, 4),
+            "baseline_f1": round(base_f1, 4),
+            "per_entity": {t: {"precision": round(p, 4), "recall": round(r, 4), "f1": round(f, 4)}
+                           for t, (p, r, f) in per.items()},
+        })
+        log(f"\n  Entity F1: {F1:.3f} (baseline memorize-surfaces: {base_f1:.3f})  "
+            f"P={P:.3f} R={R:.3f} (n={len(ev)})")
+
+    prefix = f"models/{PROJECT}"
+    log("Uploading head/labels/metrics to S3...")
+    s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}/head.json",
+                  Body=json.dumps(head_obj).encode(), ContentType="application/json")
+    s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}/labels.json",
+                  Body=json.dumps({"entities": entity_types}).encode(),
+                  ContentType="application/json")
+    s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}/metrics.json",
+                  Body=json.dumps(metrics, indent=2).encode(), ContentType="application/json")
+    # Extraction ships no encoder.onnx/tokenizer.json — the tagger is self-contained.
+    log(f"Artifacts uploaded to s3://{S3_BUCKET}/{prefix}/ (feature tagger, no encoder)")
+    log("=== Training complete ===")
 
 
 if __name__ == "__main__":

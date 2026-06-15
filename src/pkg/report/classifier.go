@@ -204,3 +204,74 @@ func PrintEmbeddingMetrics(m *EmbeddingMetrics) {
 	fmt.Printf("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 }
 
+
+// EntityMetric holds per-entity-type precision/recall/F1 for extraction.
+type EntityMetric struct {
+	Precision float64 `json:"precision"`
+	Recall    float64 `json:"recall"`
+	F1        float64 `json:"f1"`
+}
+
+// ExtractionMetrics mirrors the metrics.json written by the classifier training
+// job for task=extraction (token tagger). Holds entity-level span P/R/F1 for
+// the trained tagger and an honest "memorize training surfaces" gazetteer
+// baseline, so the generalization gain is visible.
+type ExtractionMetrics struct {
+	Task         string                  `json:"task"`
+	Head         string                  `json:"head"`
+	TrainSamples int                     `json:"train_samples"`
+	EvalSamples  int                     `json:"eval_samples"`
+	Precision    float64                 `json:"precision"`
+	Recall       float64                 `json:"recall"`
+	F1           float64                 `json:"f1"`
+	BaselineF1   float64                 `json:"baseline_f1"`
+	PerEntity    map[string]EntityMetric `json:"per_entity"`
+}
+
+// LoadExtractionMetrics reads models/<project>/metrics.json from S3 for an
+// extraction (token tagger) model.
+func LoadExtractionMetrics(ctx context.Context, dl S3Downloader, bucket, project string) (*ExtractionMetrics, error) {
+	key := fmt.Sprintf("models/%s/metrics.json", project)
+	data, err := dl.DownloadFromS3(ctx, bucket, key)
+	if err != nil {
+		return nil, fmt.Errorf("downloading metrics.json: %w", err)
+	}
+	var m ExtractionMetrics
+	if err := json.Unmarshal([]byte(data), &m); err != nil {
+		return nil, fmt.Errorf("parsing metrics.json: %w", err)
+	}
+	return &m, nil
+}
+
+// PrintExtractionMetrics renders the extraction (token tagger) report, showing
+// the gazetteer baseline next to the trained tagger so the gain is visible.
+func PrintExtractionMetrics(m *ExtractionMetrics) {
+	fmt.Printf("\n  ━━━ Extraction Report (token tagger) ━━━\n")
+	fmt.Printf("  Entity F1:   %.3f (micro, span-level)\n", m.F1)
+	if m.BaselineF1 > 0 {
+		improve := (m.F1 - m.BaselineF1) / m.BaselineF1 * 100
+		fmt.Printf("  Baseline:    %.3f (memorize training surfaces) — model is %.0f%% better\n",
+			m.BaselineF1, improve)
+	}
+	fmt.Printf("  Precision:   %.3f   Recall: %.3f\n", m.Precision, m.Recall)
+	fmt.Printf("  Head:        %s tagger\n", m.Head)
+	fmt.Printf("  Data:        %d train / %d eval\n", m.TrainSamples, m.EvalSamples)
+
+	// Show entity types weakest-first to highlight where to add data.
+	type ee struct {
+		name string
+		m    EntityMetric
+	}
+	var ents []ee
+	for name, em := range m.PerEntity {
+		ents = append(ents, ee{name, em})
+	}
+	sort.Slice(ents, func(i, j int) bool { return ents[i].m.F1 < ents[j].m.F1 })
+	if len(ents) > 0 {
+		fmt.Printf("  Per-entity (weakest first):\n")
+		for _, e := range ents {
+			fmt.Printf("    %-12s P=%.2f R=%.2f F1=%.2f\n", e.name, e.m.Precision, e.m.Recall, e.m.F1)
+		}
+	}
+	fmt.Printf("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+}

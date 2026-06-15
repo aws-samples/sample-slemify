@@ -1,0 +1,1 @@
+checkout-service started throwing 502 Bad Gateway right after we rolled out v2.4.0 to production this morning. Rollback to 2.3.1 fixed it. Anyone seen this with the new release?

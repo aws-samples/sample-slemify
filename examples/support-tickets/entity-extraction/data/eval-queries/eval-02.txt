@@ -1,0 +1,1 @@
+our data-sync daemon on the qa environment is logging "connection refused" to the metrics-collector every few seconds. metrics-collector restarted cleanly on 1.5.0. data-sync is on 0.22.4. not sure which side is at fault.

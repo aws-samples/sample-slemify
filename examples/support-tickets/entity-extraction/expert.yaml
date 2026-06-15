@@ -1,0 +1,52 @@
+apiVersion: slemify/v1
+
+project:
+  name: support-ticket-extractor
+  task: extraction
+  domain: >
+    Extract structured entities from free-form software support and incident
+    tickets so they can be routed, deduplicated, and correlated automatically.
+    Tickets are messy: Slack-style messages, pasted logs, terse one-liners.
+    Pull out four entity types:
+      - SERVICE: the affected service, component, or system. Open-vocabulary —
+        hyphenated identifiers (checkout-service, auth-gateway) and prose
+        references (the payments backend, our notification system) both count.
+      - ERROR: an error type, status code, or failure signature (OOMKilled,
+        502 Bad Gateway, connection timeout, NullPointerException).
+      - VERSION: a version string (v2.3.1, 1.4.0, release 22.04).
+      - ENV: a deployment environment or region (production, staging, us-east-1).
+    SERVICE and ERROR are the hard, open-vocabulary cases where a trained tagger
+    beats hand-written regex; VERSION and ENV are mostly pattern-matchable.
+  labels:
+    entities:
+      - SERVICE
+      - ERROR
+      - VERSION
+      - ENV
+
+# task=extraction (v1) trains a feature-based token tagger on CPU and serves it
+# with no encoder, so model.base is not used and is intentionally omitted.
+# model.head is also unused (the tagger is logistic regression over token
+# features). See README.md, "How it works".
+model: {}
+
+data:
+  bucket: slemify-data
+  path: support-tickets/data/
+  # A handful of real (unlabeled) tickets seed the synthetic generator's style;
+  # Bedrock writes many more tickets WITH labeled entity spans for training.
+  sources:
+    - path: queries/
+      type: raw
+  synthetic:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 1000
+  evaluation:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 150
+    sources:
+      - path: eval-queries/
+        type: raw
+
+training:
+  spot: true

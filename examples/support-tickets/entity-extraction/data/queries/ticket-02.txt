@@ -1,0 +1,1 @@
+the payments backend keeps getting OOMKilled in staging since yesterday. memory limit is 512Mi. logs just show "java.lang.OutOfMemoryError: Java heap space" on startup. running release 1.12.3.

@@ -99,13 +99,29 @@ func TestValidateUnknownTask(t *testing.T) {
 	}
 }
 
-func TestValidateNotYetSupportedTask(t *testing.T) {
-	// extraction is a valid schema value but not implemented yet.
+func TestValidateExtractionValid(t *testing.T) {
+	// extraction is supported (encoder-head family) and predicts typed spans
+	// from a label taxonomy (the entity types), so labels are required.
 	cfg := validConfig()
 	cfg.Project.Task = TaskExtraction
+	cfg.Model.Base = "" // extraction (feature tagger) needs no encoder
+	cfg.Model.Quantize = "" // quantize not allowed for encoder-head
+	cfg.Project.Labels = map[string][]string{"entities": {"SERVICE", "ERROR"}}
 	errs := Validate(cfg)
-	if !hasFieldError(errs, "project.task") {
-		t.Errorf("expected 'not yet supported' error for extraction, got: %v", errs)
+	if len(errs) > 0 {
+		t.Errorf("expected valid extraction config, got: %v", errs)
+	}
+}
+
+func TestValidateExtractionRequiresLabels(t *testing.T) {
+	cfg := validConfig()
+	cfg.Project.Task = TaskExtraction
+	cfg.Model.Base = "BAAI/bge-base-en-v1.5"
+	cfg.Model.Quantize = ""
+	// no labels set
+	errs := Validate(cfg)
+	if !hasFieldError(errs, "project.labels") {
+		t.Errorf("expected labels-required error for extraction, got: %v", errs)
 	}
 }
 

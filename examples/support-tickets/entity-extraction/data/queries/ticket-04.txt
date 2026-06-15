@@ -1,0 +1,1 @@
+hey quick one — our search-indexer worker is stuck in CrashLoopBackOff on the dev cluster. it was fine on 0.9.2 but broke after we bumped to 0.10.0. error is "panic: nil pointer dereference" in the consumer loop.

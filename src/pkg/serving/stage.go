@@ -91,6 +91,12 @@ func Stage(client *k8s.Client, cfg *config.ExpertConfig, sized config.SizedConfi
 				} else {
 					report.PrintScoringMetrics(m)
 				}
+			} else if cfg.Project.IsExtraction() {
+				if m, err := report.LoadExtractionMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
+					fmt.Printf("  ⚠ Could not load extraction metrics: %v\n", err)
+				} else {
+					report.PrintExtractionMetrics(m)
+				}
 			} else if m, err := report.LoadClassificationMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
 				fmt.Printf("  ⚠ Could not load classification metrics: %v\n", err)
 			} else {

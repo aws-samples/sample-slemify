@@ -42,6 +42,35 @@ tuned encoder, and exports *that* to ONNX. A domain corpus typically lifts
 recall@1 by 10+ points over a stock general-purpose encoder in a couple of
 minutes of CPU training.
 
+### Extraction: a feature-based token tagger (no encoder)
+
+The **extraction** task is the one encoder-family member that, in v1, uses no
+encoder at all. Token-level span extraction needs a *per-token* prediction, which
+the pooled-embedding + sklearn-head recipe (one vector per input) cannot produce.
+Rather than reach for a heavier token-classification fine-tune, Slemify ships a
+classic, CPU-instant tagger: logistic regression over per-token features (the
+token, its word shape, affixes, casing, and a ±2-word context window) predicting
+BIO tags, decoded into typed spans. It trains in seconds, and serving reproduces
+the linear model in numpy — no encoder, no ONNX, no torch.
+
+We added extraction only after measuring that it *earns* training in the right
+domain. On open-vocabulary prose (software support tickets) the tagger lifts
+entity-level span F1 from 0.63 (a strong regex + gazetteer baseline) to 0.89 — the
+gain concentrated entirely on the open-vocab entities (service and error names)
+that a regex can't enumerate. The training report also prints a
+*memorize-training-surfaces* baseline (string-match the entity surfaces seen in
+training); the tagger beats that too, which is the real test — it confirms the
+model generalizes to surfaces it never saw rather than memorizing a lookup table.
+
+The flip side is documented honestly: on *structured* text (Kubernetes YAML
+configs) a plain parser extracts `apiVersion`/`kind` perfectly, so a trained model
+adds nothing. That is why the extraction example lives in a support-ticket domain,
+not the k8s one. The same domain-vs-data-shape distinction below (for reranking)
+applies: extraction fails only in the wrong *domain*, and its training data
+(text with labeled spans) is synthesizable — so it gets a fair trial in a domain
+where it helps. A heavier neural token-classification fine-tune is possible future
+work if a domain needs a higher ceiling.
+
 ### Why reranking is not a Slemify task (a documented learning)
 
 A reranker is a *cross-encoder*: it reads the query and document together (one

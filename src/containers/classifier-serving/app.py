@@ -22,6 +22,7 @@ import os
 
 import numpy as np
 import onnxruntime as ort
+import extract_common as ec
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -61,10 +62,14 @@ def _download_artifacts():
     s3 = boto3.client("s3")
     prefix = f"models/{PROJECT}"
     # Embedding models have no trained head (the encoder itself is the model);
-    # classification/scoring ship a head.json.
-    files = ["encoder.onnx", "tokenizer.json"]
-    if TASK != "embedding":
-        files.append("head.json")
+    # classification/scoring ship a head.json. Extraction ships ONLY head.json
+    # (a self-contained feature tagger) — no encoder.onnx / tokenizer.json.
+    if TASK == "extraction":
+        files = ["head.json"]
+    elif TASK == "embedding":
+        files = ["encoder.onnx", "tokenizer.json"]
+    else:
+        files = ["encoder.onnx", "tokenizer.json", "head.json"]
     for fname in files:
         dst = os.path.join(ARTIFACT_DIR, fname)
         s3.download_file(S3_BUCKET, f"{prefix}/{fname}", dst)
@@ -78,6 +83,19 @@ def load():
         raise RuntimeError("S3_BUCKET and PROJECT are required")
 
     _download_artifacts()
+
+    # Extraction is a self-contained feature tagger (no encoder/tokenizer).
+    if TASK == "extraction":
+        with open(os.path.join(ARTIFACT_DIR, "head.json")) as f:
+            _head = json.load(f)
+        try:
+            _extract("warmup")
+            print("Inference path warmed up", flush=True)
+        except Exception as e:
+            print(f"Warmup failed (non-fatal): {e}", flush=True)
+        print(f"Extraction tagger ready: {len(_head.get('entity_types', []))} entity types",
+              flush=True)
+        return
 
     _tokenizer = Tokenizer.from_file(os.path.join(ARTIFACT_DIR, "tokenizer.json"))
     _tokenizer.enable_truncation(max_length=512)
@@ -124,7 +142,10 @@ def load():
 
 @app.get("/health")
 def health():
-    if _session is None or _head is None:
+    if _head is None:
+        return JSONResponse({"status": "loading"}, status_code=503)
+    # Extraction needs no ONNX session; every other head does.
+    if not _is_extraction() and _session is None:
         return JSONResponse({"status": "loading"}, status_code=503)
     return {"status": "ok"}
 
@@ -181,6 +202,15 @@ def _is_embedding() -> bool:
     return bool(_head) and _head.get("type") == "embedding"
 
 
+def _is_extraction() -> bool:
+    return bool(_head) and _head.get("type") == "extraction"
+
+
+def _extract(text: str) -> list[dict]:
+    """Run the feature-based token tagger; returns [{"type","text"}, ...]."""
+    return ec.extract(text[:MAX_INPUT_CHARS], _head)
+
+
 def _confidence_word(p: float) -> str:
     if p >= CONF_HIGH:
         return "high"
@@ -216,6 +246,18 @@ def chat_completions(req: ChatRequest):
                  "finish_reason": "stop"}
             ],
             "slemify": {"score": round(score, 4)},
+        }
+    if _is_extraction():
+        spans = _extract(text)
+        # JSON-encode the spans as message content for the chat contract; the
+        # structured list is under the slemify field.
+        return {
+            "choices": [
+                {"index": 0,
+                 "message": {"role": "assistant", "content": json.dumps(spans)},
+                 "finish_reason": "stop"}
+            ],
+            "slemify": {"spans": spans},
         }
     label, prob = _classify(text)
     content = f"{label}|{_confidence_word(prob)}"
@@ -261,6 +303,20 @@ def embed(req: EmbedRequest):
             status_code=400)
     texts = [req.inputs] if isinstance(req.inputs, str) else req.inputs
     return [_embed(t).tolist() for t in texts]
+
+
+class ExtractRequest(BaseModel):
+    input: str
+
+
+@app.post("/extract")
+def extract_endpoint(req: ExtractRequest):
+    """Native extraction endpoint. Returns {"spans": [{"type","text"}, ...]}."""
+    if not _is_extraction():
+        return JSONResponse(
+            {"error": "this model is not an extraction tagger"},
+            status_code=400)
+    return {"spans": _extract(req.input)}
 
 
 if __name__ == "__main__":
