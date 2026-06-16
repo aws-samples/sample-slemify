@@ -50,6 +50,10 @@ EMBEDDING_URL = os.environ.get("EMBEDDING_URL", "http://localhost:8083")
 # In-cluster cross-encoder re-ranker. Scores the OpenSearch candidate set and
 # keeps only the most relevant chunks, so the auditor prompt stays small.
 RERANKER_URL = os.environ.get("RERANKER_URL", "http://localhost:8084")
+# In-cluster trained CPU tool-router (task: classification). Decides which
+# read-only tool the agent should use; replaces the heuristic planner stub. The
+# heuristic remains a fallback if this service is unreachable.
+TOOL_ROUTER_URL = os.environ.get("TOOL_ROUTER_URL", "http://localhost:8086")
 INDEX_NAME = os.environ.get("INDEX_NAME", "k8s-autoscaling-knowledge")
 # Candidates pulled from vector search before re-ranking. The cross-encoder
 # reranker scores every candidate on CPU, so this count is the main lever on
@@ -405,6 +409,63 @@ def _select_tools(query: str) -> list:
     return tools
 
 
+_TOOL_ACTIONS = {
+    "inspect_resource": ["describe_resource", "list_events"],
+    "validate_config": ["validate_config"],
+    "no_tool": [],
+}
+
+
+def classify_tool_action(text: str) -> tuple:
+    """Call the trained CPU tool-router (classification) for the action label."""
+    body = {"model": "model", "messages": [{"role": "user", "content": text}]}
+    with httpx.Client(timeout=10) as client:
+        resp = client.post(f"{TOOL_ROUTER_URL}/v1/chat/completions", json=body)
+        resp.raise_for_status()
+        d = resp.json()
+    sl = d.get("slemify", {})
+    label = sl.get("label")
+    prob = float(sl.get("probability", 0.0))
+    if label not in _TOOL_ACTIONS:
+        # Fall back to parsing the chat-completions content ("label|confidence").
+        label = d["choices"][0]["message"]["content"].split("|")[0].strip()
+    return label, prob
+
+
+def route_tools(query: str) -> dict:
+    """Pick read-only tools via the trained tool-router, heuristic as fallback.
+
+    Returns {"tools": [...], "detail": "..."} where detail is a short,
+    audience-readable summary of the decision for the planner step.
+    """
+    try:
+        label, prob = classify_tool_action(query)
+        if label not in _TOOL_ACTIONS:
+            raise ValueError(f"unknown label: {label}")
+        tools = list(_TOOL_ACTIONS[label])
+        # inspect_resource needs a concrete, in-cluster target. If the query has
+        # no extractable resource name (or tools are disabled), answer from docs
+        # rather than firing a tool that can only fail.
+        if label == "inspect_resource":
+            if not _k8s_available:
+                tools, suffix = [], " — cluster tools disabled"
+            elif not (_resource_ref(query) and _extract_name(query)):
+                tools, suffix = [], " — no resource target, using docs"
+            else:
+                suffix = " → " + ", ".join(tools)
+        elif tools:
+            suffix = " → " + ", ".join(tools)
+        else:
+            suffix = " — answering from docs"
+        return {"tools": tools, "detail": f"{label} · {prob:.2f}{suffix}"}
+    except Exception as e:
+        # The model is unreachable — fall back to the heuristic so the demo runs.
+        print(f"  Tool-router unavailable, using heuristic: {e}")
+        tools = _select_tools(query)
+        detail = ("heuristic → " + ", ".join(tools)) if tools else "heuristic — no tools needed"
+        return {"tools": tools, "detail": detail}
+
+
 def _extract_args(query: str, tool: str) -> dict:
     if tool == "validate_config":
         return {"yaml": query}
@@ -517,9 +578,10 @@ async def warmup():
         results = await asyncio.gather(
             client.post(f"{TRIAGE_URL}/v1/chat/completions", json=warmup_body),
             client.post(f"{AUDITOR_URL}/v1/chat/completions", json=warmup_body),
+            client.post(f"{TOOL_ROUTER_URL}/v1/chat/completions", json=warmup_body),
             return_exceptions=True,
         )
-    for name, r in zip(("triage", "auditor"), results):
+    for name, r in zip(("triage", "auditor", "tool-router"), results):
         status = f"ok ({r.status_code})" if not isinstance(r, Exception) else f"failed ({r})"
         print(f"  Warmup {name}: {status}")
 
@@ -724,12 +786,11 @@ async def n_plan(state: AgentState) -> dict:
         return {}
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
-    writer({"type": "step_start", "name": "Planner (CPU)", "note": "deciding tool use"})
+    writer({"type": "step_start", "name": "Tool router (CPU)", "note": "classifying tool action"})
     t = time.perf_counter()
-    tools = await loop.run_in_executor(None, _select_tools, state["query"])
-    detail = ("tools: " + ", ".join(tools)) if tools else "no tools needed — answering from docs"
-    writer({"type": "step_done", "name": "Planner (CPU)", "ms": _ms(t), "detail": detail})
-    return {"planned": True, "pending_tools": tools}
+    result = await loop.run_in_executor(None, route_tools, state["query"])
+    writer({"type": "step_done", "name": "Tool router (CPU)", "ms": _ms(t), "detail": result["detail"]})
+    return {"planned": True, "pending_tools": result["tools"]}
 
 
 async def n_extract_args(state: AgentState) -> dict:

@@ -115,6 +115,8 @@ spec:
               value: "http://k8s-autoscaling-retriever-inference.slemify:8080"
             - name: RERANKER_URL
               value: "http://k8s-autoscaling-reranker.slemify:80"
+            - name: TOOL_ROUTER_URL
+              value: "http://k8s-autoscaling-tool-router-inference.slemify:8080"
             - name: INDEX_NAME
               value: "k8s-autoscaling-knowledge"
             - name: LLM_MODEL
