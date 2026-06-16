@@ -128,8 +128,13 @@ func deploySingleExpert(ctx context.Context, cmd *cobra.Command, cfg *config.Exp
 	}
 
 	fmt.Printf("Deploying %s (%s)\n", cfg.Project.Name, cfg.Project.Domain)
+	modelLabel := cfg.Model.Base
+	if modelLabel == "" {
+		// Extraction (feature tagger) has no base encoder.
+		modelLabel = "feature token tagger"
+	}
 	fmt.Printf("Model: %s → %s (training) → %s (inference)\n",
-		cfg.Model.Base, sized.TrainingInstance, sized.InferenceInstance)
+		modelLabel, sized.TrainingInstance, sized.InferenceInstance)
 	fmt.Printf("Namespace: %s\n\n", namespace)
 
 	var startStage pipeline.Stage
@@ -162,7 +167,19 @@ func deploySingleExpert(ctx context.Context, cmd *cobra.Command, cfg *config.Exp
 
 	fmt.Printf("\n✅ %s deployed successfully\n", cfg.Project.Name)
 	fmt.Printf("   Inference:     %s-inference.%s.svc.cluster.local:8080\n", cfg.Project.Name, namespace)
-	fmt.Printf("   Model:         %s → %s (%s GGUF)\n", cfg.Model.Base, sized.InferenceInstance, cfg.Model.QuantizeLabel())
+	// The model line is task-aware: only generation produces a quantized GGUF.
+	// Encoder-head/embedding serve ONNX on CPU; extraction is a feature tagger
+	// with no encoder at all.
+	switch {
+	case cfg.Project.IsExtraction():
+		fmt.Printf("   Model:         feature token tagger → %s (CPU, no encoder)\n", sized.InferenceInstance)
+	case cfg.Project.IsEmbedding():
+		fmt.Printf("   Model:         %s → %s (tuned encoder, ONNX, CPU)\n", cfg.Model.Base, sized.InferenceInstance)
+	case cfg.Project.IsEncoderHead():
+		fmt.Printf("   Model:         %s → %s (encoder + %s head, ONNX, CPU)\n", cfg.Model.Base, sized.InferenceInstance, cfg.Model.HeadType())
+	default:
+		fmt.Printf("   Model:         %s → %s (%s GGUF)\n", cfg.Model.Base, sized.InferenceInstance, cfg.Model.QuantizeLabel())
+	}
 	// Spot pricing estimate for inference
 	spotPricing := map[string]float64{
 		"c8g.medium": 25, "c8g.xlarge": 50, "c8g.2xlarge": 80,
@@ -268,9 +285,14 @@ func registerDryRunStages(runner *pipeline.Runner, cfg *config.ExpertConfig, siz
 		// Encoder family (classification/scoring/embedding): CPU training + ONNX,
 		// no GPU, no GGUF quantization.
 		runner.RegisterStage(pipeline.StageTraining, func(ctx context.Context) ([]string, error) {
-			fmt.Printf("  Encoder: %s (managed TEI, CPU)\n", cfg.Model.Base)
-			fmt.Printf("  Head: %s\n", cfg.Model.HeadType())
-			fmt.Printf("  Engine: encoder-head (CPU, no GPU)\n")
+			if cfg.Project.IsExtraction() {
+				fmt.Printf("  Tagger: feature-based token classifier (CPU, no encoder)\n")
+				fmt.Printf("  Engine: encoder-head family (CPU, no GPU)\n")
+			} else {
+				fmt.Printf("  Encoder: %s (managed TEI, CPU)\n", cfg.Model.Base)
+				fmt.Printf("  Head: %s\n", cfg.Model.HeadType())
+				fmt.Printf("  Engine: encoder-head (CPU, no GPU)\n")
+			}
 			return []string{
 				fmt.Sprintf("s3://%s/models/%s/head.json", cfg.Data.Bucket, cfg.Project.Name),
 			}, nil
