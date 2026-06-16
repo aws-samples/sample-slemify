@@ -8,6 +8,58 @@ metadata:
     app: k8s-autoscaling-orchestrator
     slemify.io/component: demo
 ---
+# Read-only RBAC for the agent's tools. The orchestrator describes cluster
+# resources and lists their events to ground its answers in live state. It is
+# granted ONLY get/list/watch — no create/update/patch/delete — so the agent
+# can never mutate the cluster. Resources span cluster-scoped CRDs (NodePool,
+# EC2NodeClass, Node) and namespaced kinds the demo reasons about, so this is a
+# ClusterRole; scope it to a Role + RoleBinding if you only need one namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8s-autoscaling-orchestrator-readonly
+  labels:
+    app: k8s-autoscaling-orchestrator
+    slemify.io/component: demo
+rules:
+  - apiGroups: ["karpenter.sh"]
+    resources: ["nodepools"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["karpenter.k8s.aws"]
+    resources: ["ec2nodeclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "events", "nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k8s-autoscaling-orchestrator-readonly
+  labels:
+    app: k8s-autoscaling-orchestrator
+    slemify.io/component: demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: k8s-autoscaling-orchestrator-readonly
+subjects:
+  - kind: ServiceAccount
+    name: k8s-autoscaling-orchestrator
+    namespace: slemify
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:

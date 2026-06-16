@@ -1,26 +1,36 @@
-"""Multi-agent orchestrator with RAG and LLM fallback (LangGraph).
+"""Multi-agent orchestrator with RAG, read-only tools, and LLM fallback (LangGraph).
 
-The control flow is a LangGraph state graph: triage -> (reject | retrieve ->
-rerank -> generate), with the Auditor SLM by default and a Bedrock LLM fallback
-on low triage confidence. Each node streams its progress (per-stage timing and
-tokens) to the chat UI via LangGraph's custom stream writer, so the SSE contract
-the UI consumes is unchanged.
+The control flow is a LangGraph state graph. After triage, a planner decides
+whether the agent needs to gather live evidence with read-only tools
+(describe a cluster resource, list its events, validate a pasted config) before
+answering. It then retrieves docs, re-ranks them, and answers with the Auditor
+SLM by default (or a Bedrock LLM fallback on low triage confidence). Each node
+streams its progress (per-stage timing and tokens) to the chat UI via
+LangGraph's custom stream writer, so the SSE contract the UI consumes is stable.
+
+All tools are READ-ONLY: the agent talks to the Kubernetes API via the Python
+client with structured, validated arguments (never shelled-out kubectl with
+user text), and the orchestrator's RBAC grants only get/list/watch.
 
 Usage:
-  pip install fastapi uvicorn httpx opensearch-py boto3 langgraph
+  pip install fastapi uvicorn httpx opensearch-py boto3 langgraph kubernetes pyyaml
   python3 server.py
 """
 
 import asyncio
 import json
 import os
+import re
 import time
 from typing import TypedDict
 
 import boto3
 import httpx
+import yaml
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
+from kubernetes import client as k8s_client, config as k8s_config
+from kubernetes.dynamic import DynamicClient
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from opensearchpy import OpenSearch
@@ -52,6 +62,53 @@ RETRIEVE_CANDIDATES = 6
 # every candidate. Long config pastes blow up rerank latency, so we cap the
 # query here (the full text still goes to the auditor SLM untouched).
 RERANK_QUERY_CHARS = 512
+
+# --- Read-only tool config ---
+#
+# The agent may call read-only Kubernetes tools to gather live evidence before
+# answering. Set TOOLS_ENABLED=false (or run without cluster credentials) to
+# degrade gracefully to RAG-only — the demo still works without tools.
+TOOLS_ENABLED = os.environ.get("TOOLS_ENABLED", "true").lower() not in ("0", "false", "no")
+# Hard cap on tool calls per query so the plan -> tool -> plan loop can never run
+# away (LangGraph's recursion limit is a second backstop).
+MAX_TOOL_CALLS = 3
+
+# Kubernetes resource keywords -> API metadata, in priority order (most specific
+# first so "nodepool" is matched before "node", "poddisruptionbudget" before
+# "pod"). Only read-only kinds the demo reasons about are listed.
+RESOURCE_KEYWORDS = [
+    ("ec2nodeclass", {"api_version": "karpenter.k8s.aws/v1", "kind": "EC2NodeClass", "namespaced": False}),
+    ("nodepool", {"api_version": "karpenter.sh/v1", "kind": "NodePool", "namespaced": False}),
+    ("horizontalpodautoscaler", {"api_version": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "namespaced": True}),
+    ("scaledobject", {"api_version": "keda.sh/v1alpha1", "kind": "ScaledObject", "namespaced": True}),
+    ("poddisruptionbudget", {"api_version": "policy/v1", "kind": "PodDisruptionBudget", "namespaced": True}),
+    ("deployment", {"api_version": "apps/v1", "kind": "Deployment", "namespaced": True}),
+    ("hpa", {"api_version": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "namespaced": True}),
+    ("pdb", {"api_version": "policy/v1", "kind": "PodDisruptionBudget", "namespaced": True}),
+    ("node", {"api_version": "v1", "kind": "Node", "namespaced": False}),
+    ("pod", {"api_version": "v1", "kind": "Pod", "namespaced": True}),
+]
+
+# Deprecated apiVersions the client-side validator flags, with the current one.
+DEPRECATED_API_VERSIONS = {
+    "autoscaling/v2beta1": "autoscaling/v2",
+    "autoscaling/v2beta2": "autoscaling/v2",
+    "karpenter.sh/v1alpha5": "karpenter.sh/v1",
+    "karpenter.sh/v1beta1": "karpenter.sh/v1",
+    "karpenter.k8s.aws/v1beta1": "karpenter.k8s.aws/v1",
+    "policy/v1beta1": "policy/v1",
+    "extensions/v1beta1": "apps/v1 (or networking.k8s.io/v1 for Ingress)",
+}
+
+# Signals that the user is describing a runtime problem worth pulling events for.
+_EVENT_SIGNALS = (
+    "launch", "pending", "stuck", "fail", "event", "scal", "provision",
+    "error", "crash", "evict", "terminat", "disrupt", "not work", "not com",
+)
+
+# RFC 1123 DNS subdomain: tool args from the (untrusted) extractor must match
+# before any are used against the API server.
+_K8S_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$")
 
 TRIAGE_INSTRUCTION = (
     "Classify this Kubernetes autoscaling support query into a routing "
@@ -118,6 +175,243 @@ def _parse_opensearch_url() -> OpenSearch:
 
 opensearch = _parse_opensearch_url()
 
+# --- Read-only Kubernetes tools ---
+#
+# Every tool talks to the API via the typed/dynamic Python client with
+# structured arguments — never a shelled-out kubectl with interpolated user
+# text — so there is no shell-injection surface. The extractor's output is
+# untrusted, so names/namespaces are validated against the k8s name regex
+# before any call. The orchestrator's RBAC grants only get/list/watch.
+
+_k8s_available = False
+
+
+def _init_k8s():
+    """Load cluster credentials once (in-cluster first, then local kubeconfig)."""
+    global _k8s_available
+    if not TOOLS_ENABLED:
+        print("  K8s tools: disabled (TOOLS_ENABLED=false)")
+        return
+    try:
+        try:
+            k8s_config.load_incluster_config()
+        except k8s_config.ConfigException:
+            k8s_config.load_kube_config()
+        _k8s_available = True
+        print("  K8s tools: ready (read-only)")
+    except Exception as e:
+        print(f"  K8s tools: unavailable, degrading to RAG-only ({e})")
+
+
+def _valid_k8s_name(name: str) -> bool:
+    return bool(name) and bool(_K8S_NAME_RE.match(name))
+
+
+def _trim_k8s_object(obj: dict) -> str:
+    """Keep the fields that explain a resource's behavior; drop server noise."""
+    meta = obj.get("metadata", {}) or {}
+    trimmed = {
+        "kind": obj.get("kind"),
+        "metadata": {"name": meta.get("name"), "namespace": meta.get("namespace")},
+        "spec": obj.get("spec"),
+    }
+    status = obj.get("status") or {}
+    if isinstance(status, dict):
+        keep = {k: status[k] for k in ("conditions", "phase", "reason", "message", "resources") if k in status}
+        if keep:
+            trimmed["status"] = keep
+    text = yaml.safe_dump(trimmed, default_flow_style=False, sort_keys=False)
+    return text[:2000]
+
+
+def describe_resource(args: dict) -> str:
+    """GET a single cluster resource and return a trimmed view (read-only)."""
+    if not _k8s_available:
+        return "Cluster tools are disabled; answering from documentation only."
+    name = args.get("name")
+    if not _valid_k8s_name(name or ""):
+        return "No valid resource name found in the query."
+    ns = args.get("namespace")
+    if ns and not _valid_k8s_name(ns):
+        return "Invalid namespace."
+    try:
+        dyn = DynamicClient(k8s_client.ApiClient())
+        res = dyn.resources.get(api_version=args["api_version"], kind=args["kind"])
+        if args.get("namespaced"):
+            obj = res.get(name=name, namespace=ns or "default")
+        else:
+            obj = res.get(name=name)
+        return _trim_k8s_object(obj.to_dict())
+    except Exception as e:
+        return f"Could not fetch {args.get('kind')}/{name}: {e}"
+
+
+def list_events(args: dict) -> str:
+    """List recent events, optionally for one object (read-only)."""
+    if not _k8s_available:
+        return "Cluster tools are disabled; answering from documentation only."
+    name = args.get("name")
+    if name and not _valid_k8s_name(name):
+        return "Invalid object name."
+    ns = args.get("namespace") or "default"
+    if not _valid_k8s_name(ns):
+        return "Invalid namespace."
+    try:
+        v1 = k8s_client.CoreV1Api()
+        field_selector = f"involvedObject.name={name}" if name else None
+        events = v1.list_namespaced_event(namespace=ns, field_selector=field_selector, limit=25)
+        items = events.items or []
+        if not items:
+            target = name or f"namespace {ns}"
+            return f"No recent events for {target}."
+        lines = [
+            f"{e.last_timestamp or e.event_time} {e.type}/{e.reason}: {(e.message or '').strip()}"
+            for e in items[-10:]
+        ]
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Could not list events: {e}"
+
+
+def validate_config(args: dict) -> str:
+    """Client-side structural + deprecation lint of pasted YAML (no API call).
+
+    Server-side dry-run would require write verbs in RBAC, so the demo keeps
+    this purely local: it parses the manifest and flags missing required fields
+    and deprecated apiVersions — a deterministic signal the auditor can ground on.
+    """
+    text = args.get("yaml", "")
+    try:
+        docs = list(yaml.safe_load_all(text))
+    except yaml.YAMLError as e:
+        return f"Invalid YAML: {e}"
+    findings = []
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        api_version = doc.get("apiVersion")
+        kind = doc.get("kind")
+        name = (doc.get("metadata") or {}).get("name")
+        label = kind or "resource"
+        if not api_version:
+            findings.append(f"{label}: missing apiVersion")
+        if not kind:
+            findings.append("missing kind")
+        if not name:
+            findings.append(f"{label}: missing metadata.name")
+        if api_version in DEPRECATED_API_VERSIONS:
+            findings.append(
+                f"{label}: apiVersion '{api_version}' is deprecated; use '{DEPRECATED_API_VERSIONS[api_version]}'"
+            )
+    if not findings:
+        return "No structural or deprecation issues found (client-side checks)."
+    return "; ".join(findings)
+
+
+_TOOLS = {
+    "describe_resource": describe_resource,
+    "list_events": list_events,
+    "validate_config": validate_config,
+}
+
+
+def _run_tool(tool: str, args: dict) -> str:
+    fn = _TOOLS.get(tool)
+    if not fn:
+        return f"Unknown tool: {tool}"
+    return fn(args)
+
+
+# --- Heuristic planner + argument extractor (Phase B stubs) ---
+#
+# These are deliberately simple rules that stand in for the CPU classification
+# (tool routing) and extraction models trained in a later phase. They decide
+# which read-only tools to call and pull their arguments from the query.
+
+def _looks_like_yaml(text: str) -> bool:
+    return bool(re.search(r"^\s*apiVersion:\s*\S", text, re.MULTILINE)) and \
+        bool(re.search(r"^\s*kind:\s*\S", text, re.MULTILINE))
+
+
+def _resource_ref(text: str) -> dict | None:
+    low = text.lower()
+    for keyword, meta in RESOURCE_KEYWORDS:
+        if keyword in low:
+            return meta
+    return None
+
+
+def _extract_name(text: str) -> str | None:
+    # Prefer an explicitly delimited identifier (backticks or quotes), then a
+    # "named/called X" form. Only return it if it's a valid k8s name.
+    for pattern in (r"`([^`]+)`", r"\"([^\"]+)\"", r"'([^']+)'",
+                    r"\bnamed\s+([a-z0-9][-a-z0-9.]*)", r"\bcalled\s+([a-z0-9][-a-z0-9.]*)"):
+        m = re.search(pattern, text)
+        if m and _valid_k8s_name(m.group(1)):
+            return m.group(1)
+    return None
+
+
+def _extract_namespace(text: str) -> str | None:
+    for pattern in (r"-n\s+([a-z0-9][-a-z0-9.]*)", r"--namespace\s+([a-z0-9][-a-z0-9.]*)",
+                    r"namespace\s+([a-z0-9][-a-z0-9.]*)", r"\bin\s+the\s+([a-z0-9][-a-z0-9.]*)\s+namespace"):
+        m = re.search(pattern, text)
+        if m and _valid_k8s_name(m.group(1)):
+            return m.group(1)
+    return None
+
+
+def _select_tools(query: str) -> list:
+    """Heuristic tool router: pick read-only tools to gather evidence."""
+    tools = []
+    if _looks_like_yaml(query):
+        # A pasted manifest: lint it deterministically (no API, no RBAC needed).
+        tools.append("validate_config")
+        return tools
+    if _k8s_available:
+        ref = _resource_ref(query)
+        name = _extract_name(query)
+        if ref and name:
+            tools.append("describe_resource")
+            low = query.lower()
+            if any(sig in low for sig in _EVENT_SIGNALS):
+                tools.append("list_events")
+    return tools
+
+
+def _extract_args(query: str, tool: str) -> dict:
+    if tool == "validate_config":
+        return {"yaml": query}
+    ref = _resource_ref(query) or {}
+    return {
+        "api_version": ref.get("api_version"),
+        "kind": ref.get("kind"),
+        "namespaced": ref.get("namespaced", True),
+        "name": _extract_name(query),
+        "namespace": _extract_namespace(query),
+    }
+
+
+def _args_summary(tool: str, args: dict) -> str:
+    if tool == "validate_config":
+        return "pasted manifest"
+    if tool == "list_events":
+        return f"{args.get('name') or '(namespace)'} in {args.get('namespace') or 'default'}"
+    return f"{args.get('kind')}/{args.get('name')}"
+
+
+def _tool_detail(output: str) -> str:
+    first = (output or "").strip().split("\n")[0]
+    return first[:80]
+
+
+def _format_tool_results(results: list) -> str:
+    parts = []
+    for r in results:
+        header = f"[tool: {r['tool']} · {_args_summary(r['tool'], r['args'])}]"
+        parts.append(f"{header}\n{r['output']}")
+    return "\n\n".join(parts)
+
 # --- App ---
 
 app = FastAPI()
@@ -149,6 +443,7 @@ async def health():
 async def warmup():
     """Warm SLMs and Bedrock to avoid cold-start latency on first query."""
     global _ready
+    _init_k8s()
     warmup_body = {
         "model": "model",
         "messages": [{"role": "user", "content": (
@@ -206,7 +501,6 @@ def classify(text: str) -> dict:
 
     # Extract category|confidence from the response, handling extra text.
     # The model may output "category|confidence" followed by explanation.
-    import re
     valid_categories = {
         "karpenter_config", "keda_config", "hpa_config",
         "pdb_disruption", "spot_interruption", "multi_resource", "noise",
@@ -324,6 +618,10 @@ class AgentState(TypedDict, total=False):
     query: str
     category: str
     confidence: str
+    planned: bool
+    pending_tools: list
+    resource: dict
+    tool_results: list
     embedding: list
     candidates: list
     docs: list
@@ -348,6 +646,52 @@ async def n_reject(state: AgentState) -> dict:
     get_stream_writer()({"type": "response",
                          "text": "This does not look like a K8s autoscaling question."})
     return {}
+
+
+async def n_plan(state: AgentState) -> dict:
+    """Decide which read-only tools (if any) to call before answering.
+
+    First pass selects the tool list and emits a planner step; later passes
+    (re-entered after each tool) are silent decisions and enforce the call cap.
+    """
+    if state.get("planned"):
+        if len(state.get("tool_results", [])) >= MAX_TOOL_CALLS:
+            return {"pending_tools": []}
+        return {}
+    writer = get_stream_writer()
+    loop = asyncio.get_event_loop()
+    writer({"type": "step_start", "name": "Planner (CPU)", "note": "deciding tool use"})
+    t = time.perf_counter()
+    tools = await loop.run_in_executor(None, _select_tools, state["query"])
+    detail = ("tools: " + ", ".join(tools)) if tools else "no tools needed — answering from docs"
+    writer({"type": "step_done", "name": "Planner (CPU)", "ms": _ms(t), "detail": detail})
+    return {"planned": True, "pending_tools": tools}
+
+
+async def n_extract_args(state: AgentState) -> dict:
+    writer = get_stream_writer()
+    loop = asyncio.get_event_loop()
+    tool = state["pending_tools"][0]
+    writer({"type": "step_start", "name": "Arg extractor (CPU)", "note": f"args for {tool}"})
+    t = time.perf_counter()
+    args = await loop.run_in_executor(None, _extract_args, state["query"], tool)
+    writer({"type": "step_done", "name": "Arg extractor (CPU)", "ms": _ms(t),
+            "detail": _args_summary(tool, args)})
+    return {"resource": args}
+
+
+async def n_run_tool(state: AgentState) -> dict:
+    writer = get_stream_writer()
+    loop = asyncio.get_event_loop()
+    pending = state["pending_tools"]
+    tool, rest = pending[0], pending[1:]
+    args = state.get("resource", {})
+    writer({"type": "step_start", "name": f"Tool · {tool}", "note": _args_summary(tool, args)})
+    t = time.perf_counter()
+    output = await loop.run_in_executor(None, _run_tool, tool, args)
+    writer({"type": "step_done", "name": f"Tool · {tool}", "ms": _ms(t), "detail": _tool_detail(output)})
+    results = state.get("tool_results", []) + [{"tool": tool, "args": args, "output": output}]
+    return {"pending_tools": rest, "tool_results": results}
 
 
 async def n_embed(state: AgentState) -> dict:
@@ -389,7 +733,14 @@ async def n_rerank(state: AgentState) -> dict:
 async def n_generate(state: AgentState) -> dict:
     writer = get_stream_writer()
     low_conf = state["confidence"] in ("low", "unknown")
-    context = "\n\n---\n\n".join(state.get("docs", []))
+    sections = []
+    tool_results = state.get("tool_results", [])
+    if tool_results:
+        sections.append("LIVE CLUSTER EVIDENCE (read-only tools):\n" + _format_tool_results(tool_results))
+    docs = state.get("docs", [])
+    if docs:
+        sections.append("\n\n---\n\n".join(docs))
+    context = "\n\n===\n\n".join(sections)
     if low_conf:
         gen_name, stream_fn = "LLM API (Bedrock fallback)", stream_llm
         writer({"type": "model", "name": "Claude Sonnet 4.5 (Bedrock)"})
@@ -411,20 +762,31 @@ async def n_generate(state: AgentState) -> dict:
 
 
 def _route_after_triage(state: AgentState) -> str:
-    return "reject" if state["category"] == "noise" else "embed"
+    return "reject" if state["category"] == "noise" else "plan"
+
+
+def _route_after_plan(state: AgentState) -> str:
+    """Loop into the tool path while tools remain; otherwise retrieve."""
+    return "extract_args" if state.get("pending_tools") else "embed"
 
 
 def _build_agent():
     g = StateGraph(AgentState)
     g.add_node("triage", n_triage)
     g.add_node("reject", n_reject)
+    g.add_node("plan", n_plan)
+    g.add_node("extract_args", n_extract_args)
+    g.add_node("run_tool", n_run_tool)
     g.add_node("embed", n_embed)
     g.add_node("search", n_search)
     g.add_node("rerank", n_rerank)
     g.add_node("generate", n_generate)
     g.add_edge(START, "triage")
-    g.add_conditional_edges("triage", _route_after_triage, {"reject": "reject", "embed": "embed"})
+    g.add_conditional_edges("triage", _route_after_triage, {"reject": "reject", "plan": "plan"})
     g.add_edge("reject", END)
+    g.add_conditional_edges("plan", _route_after_plan, {"extract_args": "extract_args", "embed": "embed"})
+    g.add_edge("extract_args", "run_tool")
+    g.add_edge("run_tool", "plan")
     g.add_edge("embed", "search")
     g.add_edge("search", "rerank")
     g.add_edge("rerank", "generate")

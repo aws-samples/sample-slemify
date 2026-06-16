@@ -8,7 +8,9 @@ RUN pip install --no-cache-dir \
     httpx==0.28.1 \
     opensearch-py==2.8.0 \
     boto3==1.38.12 \
-    langgraph==1.2.5
+    langgraph==1.2.5 \
+    kubernetes==31.0.0 \
+    pyyaml==6.0.2
 
 COPY server.py .
 
