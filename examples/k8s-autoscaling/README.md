@@ -50,3 +50,26 @@ cd demo && ./scripts/deploy.sh
 ```
 
 See [demo/README.md](demo/README.md) for the full multi-agent demo with RAG and LLM fallback.
+
+## Routing on a slice, not the whole input
+
+The triage classifier has a small context window (the encoder caps at ~512
+tokens, ~350-400 words). That is rarely a problem here, and often an advantage:
+you scale a router by sending it **less, more often** — not more. A router only
+needs the *decision-relevant* signal, not the entire input.
+
+This demo uses small models exactly that way — each makes a cheap decision on a
+small slice, and only the expensive model does the heavy lifting:
+- **Route the query** — triage classifies the user's question/intent. A question is short by nature.
+- **Guard the input** — a safety / PII / out-of-scope check before any LLM runs.
+- **Filter retrieved chunks** — the reranker scores each retrieved chunk *one at a time*; each chunk is small, so you never need a big window — you scale by making many small calls, not one giant one.
+
+If the routing signal is buried in a long document, don't grow the window —
+shrink the input first: route on the latest message, the subject line, the first
+paragraph, or a one-line summary.
+
+Honest boundary: if a decision truly needs to read a whole long document at once
+(say, judging the overall risk of a 30-page contract), a small classifier on the
+raw text won't do it — summarize or extract first, chunk-and-aggregate, or point
+`model.base` at a longer-context encoder. The small model is a scalpel, not a
+bucket. See [serving.md](../../docs/deep-dive/serving.md) for the context-window details.
