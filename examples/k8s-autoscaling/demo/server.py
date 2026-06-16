@@ -50,14 +50,6 @@ EMBEDDING_URL = os.environ.get("EMBEDDING_URL", "http://localhost:8083")
 # In-cluster cross-encoder re-ranker. Scores the OpenSearch candidate set and
 # keeps only the most relevant chunks, so the auditor prompt stays small.
 RERANKER_URL = os.environ.get("RERANKER_URL", "http://localhost:8084")
-# In-cluster trained CPU tool-router (task: classification). Decides which
-# read-only tool the agent should use; replaces the heuristic planner stub. The
-# heuristic remains a fallback if this service is unreachable.
-TOOL_ROUTER_URL = os.environ.get("TOOL_ROUTER_URL", "http://localhost:8086")
-# In-cluster trained CPU arg-extractor (task: extraction). Pulls the resource
-# identifiers (kind/name/namespace) the read-only tools need from the query;
-# replaces the heuristic extractor stub. Heuristic remains a fallback.
-ARG_EXTRACTOR_URL = os.environ.get("ARG_EXTRACTOR_URL", "http://localhost:8087")
 INDEX_NAME = os.environ.get("INDEX_NAME", "k8s-autoscaling-knowledge")
 # Candidates pulled from vector search before re-ranking. The cross-encoder
 # reranker scores every candidate on CPU, so this count is the main lever on
@@ -413,63 +405,6 @@ def _select_tools(query: str) -> list:
     return tools
 
 
-_TOOL_ACTIONS = {
-    "inspect_resource": ["describe_resource", "list_events"],
-    "validate_config": ["validate_config"],
-    "no_tool": [],
-}
-
-
-def classify_tool_action(text: str) -> tuple:
-    """Call the trained CPU tool-router (classification) for the action label."""
-    body = {"model": "model", "messages": [{"role": "user", "content": text}]}
-    with httpx.Client(timeout=10) as client:
-        resp = client.post(f"{TOOL_ROUTER_URL}/v1/chat/completions", json=body)
-        resp.raise_for_status()
-        d = resp.json()
-    sl = d.get("slemify", {})
-    label = sl.get("label")
-    prob = float(sl.get("probability", 0.0))
-    if label not in _TOOL_ACTIONS:
-        # Fall back to parsing the chat-completions content ("label|confidence").
-        label = d["choices"][0]["message"]["content"].split("|")[0].strip()
-    return label, prob
-
-
-def route_tools(query: str) -> dict:
-    """Pick read-only tools via the trained tool-router, heuristic as fallback.
-
-    Returns {"tools": [...], "detail": "..."} where detail is a short,
-    audience-readable summary of the decision for the planner step.
-    """
-    try:
-        label, prob = classify_tool_action(query)
-        if label not in _TOOL_ACTIONS:
-            raise ValueError(f"unknown label: {label}")
-        tools = list(_TOOL_ACTIONS[label])
-        # inspect_resource needs a concrete, in-cluster target. If the query has
-        # no extractable resource name (or tools are disabled), answer from docs
-        # rather than firing a tool that can only fail.
-        if label == "inspect_resource":
-            if not _k8s_available:
-                tools, suffix = [], " — cluster tools disabled"
-            elif not _resource_ref(query):
-                tools, suffix = [], " — no resource kind mentioned, using docs"
-            else:
-                suffix = " → " + ", ".join(tools)
-        elif tools:
-            suffix = " → " + ", ".join(tools)
-        else:
-            suffix = " — answering from docs"
-        return {"tools": tools, "detail": f"{label} · {prob:.2f}{suffix}"}
-    except Exception as e:
-        # The model is unreachable — fall back to the heuristic so the demo runs.
-        print(f"  Tool-router unavailable, using heuristic: {e}")
-        tools = _select_tools(query)
-        detail = ("heuristic → " + ", ".join(tools)) if tools else "heuristic — no tools needed"
-        return {"tools": tools, "detail": detail}
-
-
 def _extract_args(query: str, tool: str) -> dict:
     if tool == "validate_config":
         return {"yaml": query}
@@ -481,43 +416,6 @@ def _extract_args(query: str, tool: str) -> dict:
         "name": _extract_name(query),
         "namespace": _extract_namespace(query),
     }
-
-
-def extract_k8s_args(query: str) -> dict:
-    """Extract resource identifiers via the trained CPU tagger; heuristic fallback.
-
-    Returns the structured args the read-only tools consume. The tagger gives
-    surface spans (RESOURCE_KIND/RESOURCE_NAME/NAMESPACE); the kind text is
-    mapped to its API metadata via RESOURCE_KEYWORDS, and name/namespace are
-    validated against the k8s name regex before use.
-    """
-    try:
-        with httpx.Client(timeout=10) as client:
-            resp = client.post(f"{ARG_EXTRACTOR_URL}/extract", json={"input": query})
-            resp.raise_for_status()
-            spans = resp.json().get("spans", [])
-        kind_text = name = namespace = None
-        for s in spans:
-            stype, text = s.get("type"), (s.get("text") or "").strip()
-            if stype == "RESOURCE_KIND" and not kind_text:
-                kind_text = text
-            elif stype == "RESOURCE_NAME" and not name:
-                name = text
-            elif stype == "NAMESPACE" and not namespace:
-                namespace = text
-        # Map the extracted kind surface form to API metadata; fall back to a
-        # keyword scan of the whole query if the span doesn't resolve.
-        ref = _resource_ref(kind_text or "") or _resource_ref(query) or {}
-        return {
-            "api_version": ref.get("api_version"),
-            "kind": ref.get("kind"),
-            "namespaced": ref.get("namespaced", True),
-            "name": name if (name and _valid_k8s_name(name)) else None,
-            "namespace": namespace if (namespace and _valid_k8s_name(namespace)) else None,
-        }
-    except Exception as e:
-        print(f"  Arg-extractor unavailable, using heuristic: {e}")
-        return _extract_args(query, "describe_resource")
 
 
 def _args_summary(tool: str, args: dict) -> str:
@@ -619,10 +517,9 @@ async def warmup():
         results = await asyncio.gather(
             client.post(f"{TRIAGE_URL}/v1/chat/completions", json=warmup_body),
             client.post(f"{AUDITOR_URL}/v1/chat/completions", json=warmup_body),
-            client.post(f"{TOOL_ROUTER_URL}/v1/chat/completions", json=warmup_body),
             return_exceptions=True,
         )
-    for name, r in zip(("triage", "auditor", "tool-router"), results):
+    for name, r in zip(("triage", "auditor"), results):
         status = f"ok ({r.status_code})" if not isinstance(r, Exception) else f"failed ({r})"
         print(f"  Warmup {name}: {status}")
 
@@ -639,13 +536,6 @@ async def warmup():
         print("  Warmup reranker: ok")
     except Exception as e:
         print(f"  Warmup reranker: failed ({e})")
-
-    try:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, extract_k8s_args, "warmup NodePool default")
-        print("  Warmup arg-extractor: ok")
-    except Exception as e:
-        print(f"  Warmup arg-extractor: failed ({e})")
 
     print("  All services warmed up")
     _ready = True
@@ -834,27 +724,21 @@ async def n_plan(state: AgentState) -> dict:
         return {}
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
-    writer({"type": "step_start", "name": "Tool router (CPU)", "note": "classifying tool action"})
+    writer({"type": "step_start", "name": "Planner (CPU)", "note": "deciding tool use"})
     t = time.perf_counter()
-    result = await loop.run_in_executor(None, route_tools, state["query"])
-    writer({"type": "step_done", "name": "Tool router (CPU)", "ms": _ms(t), "detail": result["detail"]})
-    return {"planned": True, "pending_tools": result["tools"]}
+    tools = await loop.run_in_executor(None, _select_tools, state["query"])
+    detail = ("tools: " + ", ".join(tools)) if tools else "no tools needed — answering from docs"
+    writer({"type": "step_done", "name": "Planner (CPU)", "ms": _ms(t), "detail": detail})
+    return {"planned": True, "pending_tools": tools}
 
 
 async def n_extract_args(state: AgentState) -> dict:
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
     tool = state["pending_tools"][0]
-    if tool == "validate_config":
-        return {"resource": {"yaml": state["query"]}}
-    # describe_resource and list_events share the same extracted resource — only
-    # call the tagger once per query, then reuse it across the tool loop.
-    cached = state.get("resource")
-    if cached and cached.get("kind"):
-        return {}
-    writer({"type": "step_start", "name": "Arg extractor (CPU)", "note": "extracting resource identifiers"})
+    writer({"type": "step_start", "name": "Arg extractor (CPU)", "note": f"args for {tool}"})
     t = time.perf_counter()
-    args = await loop.run_in_executor(None, extract_k8s_args, state["query"])
+    args = await loop.run_in_executor(None, _extract_args, state["query"], tool)
     writer({"type": "step_done", "name": "Arg extractor (CPU)", "ms": _ms(t),
             "detail": _args_summary(tool, args)})
     return {"resource": args}
