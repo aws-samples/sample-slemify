@@ -334,10 +334,137 @@ def validate_config(args: dict) -> str:
     return "; ".join(findings)
 
 
+# Words that signal an operational / live-cluster question (a runtime symptom or
+# a cost/provisioning concern). Used only to ROUTE to a live investigation; the
+# investigation itself is state-driven, not keyed to these words.
+_OPERATIONAL_SIGNALS = _EVENT_SIGNALS + (
+    "cost", "expensive", "bill", "spot", "saving", "price", "cheaper",
+    "on-demand", "ondemand",
+)
+
+
+def _validate_draft_fix(draft: str) -> list:
+    """Lint any YAML the draft proposes, against current-API knowledge.
+
+    Reuses validate_config (which knows the deprecated apiVersions from the
+    docs), so the agent can catch a fix that uses stale or invalid configuration
+    before showing or applying it — grounding the *fix*, not just the diagnosis,
+    in current standards.
+    """
+    issues = []
+    for block in re.findall(r"```(?:ya?ml)?\s*\n(.*?)```", draft or "", re.DOTALL):
+        if "apiVersion" in block and "kind" in block:
+            result = validate_config({"yaml": block})
+            if result and not result.startswith("No structural"):
+                issues.append(result)
+    return issues
+
+
+def _pod_scheduling_summary(pod) -> str:
+    """The scheduling-relevant fields of a pod, focused for the auditor."""
+    spec = pod.spec
+    sel = dict(spec.node_selector) if spec.node_selector else None
+    has_affinity = bool(spec.affinity and spec.affinity.node_affinity)
+    tols = [t.key for t in (spec.tolerations or []) if getattr(t, "key", None)]
+    return (f"    nodeSelector: {sel or 'none'}; "
+            f"nodeAffinity: {'set' if has_affinity else 'none'}; "
+            f"tolerations: {tols or 'none'}")
+
+
+def _latest_warning_event(v1, namespace: str, name: str) -> str | None:
+    try:
+        evs = v1.list_namespaced_event(
+            namespace=namespace, field_selector=f"involvedObject.name={name}", limit=25).items or []
+        warns = [e for e in evs if e.type == "Warning"]
+        if not warns:
+            return None
+        e = warns[-1]
+        return f"{e.reason}: {(e.message or '').strip()[:280]}"
+    except Exception:
+        return None
+
+
+def _nodepool_summaries() -> str:
+    """Focused per-NodePool view of the cost/provisioning-relevant requirements."""
+    try:
+        dyn = DynamicClient(k8s_client.ApiClient())
+        res = dyn.resources.get(api_version="karpenter.sh/v1", kind="NodePool")
+        items = res.get().items
+    except Exception as e:
+        return f"(could not list NodePools: {e})"
+    out = []
+    for np in items:
+        d = np.to_dict()
+        name = (d.get("metadata") or {}).get("name")
+        reqs = (((d.get("spec") or {}).get("template") or {}).get("spec") or {}).get("requirements") or []
+        fields = {}
+        for r in reqs:
+            if isinstance(r, dict):
+                fields[r.get("key")] = r.get("values")
+        disruption = ((d.get("spec") or {}).get("disruption") or {}).get("consolidationPolicy")
+        out.append(
+            f"- {name}: capacity-type={fields.get('karpenter.sh/capacity-type') or 'any'}, "
+            f"instance-family={fields.get('karpenter.k8s.aws/instance-family') or '-'}, "
+            f"instance-category={fields.get('karpenter.k8s.aws/instance-category') or '-'}, "
+            f"arch={fields.get('kubernetes.io/arch') or 'any'}, consolidation={disruption or '-'}"
+        )
+    return "\n".join(out) if out else "(no NodePools found)"
+
+
+def investigate_cluster(args: dict) -> str:
+    """Read-only first-look triage: survey unhealthy pods (+ their events) and
+    NodePool provisioning config, returning a focused evidence bundle.
+
+    This is general SRE triage (the `kubectl get pods` / `describe` / `get events`
+    a human runs first), not problem-specific logic. The auditor reasons over the
+    gathered evidence to find the root cause.
+    """
+    if not _k8s_available:
+        return "Cluster tools are disabled; answering from documentation only."
+    namespace = args.get("namespace")
+    if namespace and not _valid_k8s_name(namespace):
+        return "Invalid namespace."
+    query = (args.get("query") or "").lower()
+
+    # State-driven triage (general, not keyed to query wording): if any pods are
+    # unhealthy, diagnose those; otherwise the issue is more likely the NodePool
+    # provisioning config, so report that.
+    v1 = k8s_client.CoreV1Api()
+
+    # --- Pod-health axis: which pods are unhealthy and why ---
+    try:
+        pods = (v1.list_namespaced_pod(namespace).items if namespace
+                else v1.list_pod_for_all_namespaces().items)
+    except Exception as e:
+        return f"(could not list pods: {e})\n\nNODEPOOLS:\n" + _nodepool_summaries()
+    problems = []
+    for p in pods:
+        phase = p.status.phase
+        cs = p.status.container_statuses or []
+        ready = bool(cs) and all(c.ready for c in cs)
+        if phase == "Pending" or (phase == "Running" and not ready):
+            problems.append(p)
+    if problems:
+        scope = f"namespace {namespace}" if namespace else "the cluster"
+        lines = [f"{len(problems)} pod(s) not healthy in {scope}:"]
+        for p in problems[:5]:
+            pn, pns = p.metadata.name, p.metadata.namespace
+            lines.append(f"  {pns}/{pn} [{p.status.phase}]")
+            lines.append(_pod_scheduling_summary(p))
+            event = _latest_warning_event(v1, pns, pn)
+            if event:
+                lines.append(f"    event: {event}")
+        return "PROBLEM PODS:\n" + "\n".join(lines)
+
+    # No unhealthy pods found — the issue is more likely provisioning config.
+    return "NODEPOOLS:\n" + _nodepool_summaries()
+
+
 _TOOLS = {
     "describe_resource": describe_resource,
     "list_events": list_events,
     "validate_config": validate_config,
+    "investigate_cluster": investigate_cluster,
 }
 
 
@@ -379,8 +506,8 @@ def _extract_name(text: str) -> str | None:
 
 
 def _extract_namespace(text: str) -> str | None:
-    for pattern in (r"-n\s+([a-z0-9][-a-z0-9.]*)", r"--namespace\s+([a-z0-9][-a-z0-9.]*)",
-                    r"namespace\s+([a-z0-9][-a-z0-9.]*)", r"\bin\s+the\s+([a-z0-9][-a-z0-9.]*)\s+namespace"):
+    for pattern in (r"-n\s+`?([a-z0-9][-a-z0-9.]*)", r"--namespace\s+`?([a-z0-9][-a-z0-9.]*)",
+                    r"namespace\s+[`'\"]?([a-z0-9][-a-z0-9.]*)", r"\bin\s+the\s+[`'\"]?([a-z0-9][-a-z0-9.]*)[`'\"]?\s+namespace"):
         m = re.search(pattern, text)
         if m and _valid_k8s_name(m.group(1)):
             return m.group(1)
@@ -388,26 +515,33 @@ def _extract_namespace(text: str) -> str | None:
 
 
 def _select_tools(query: str) -> list:
-    """Heuristic tool router: pick read-only tools to gather evidence."""
-    tools = []
+    """Heuristic tool router: pick read-only tools to gather evidence.
+
+    A pasted manifest is linted; an operational/cost question triggers a live
+    cluster investigation; a specific named resource is described directly.
+    """
     if _looks_like_yaml(query):
         # A pasted manifest: lint it deterministically (no API, no RBAC needed).
-        tools.append("validate_config")
-        return tools
-    if _k8s_available:
-        ref = _resource_ref(query)
-        name = _extract_name(query)
-        if ref and name:
-            tools.append("describe_resource")
-            low = query.lower()
-            if any(sig in low for sig in _EVENT_SIGNALS):
-                tools.append("list_events")
-    return tools
+        return ["validate_config"]
+    if not _k8s_available:
+        return []
+    low = query.lower()
+    if any(sig in low for sig in _OPERATIONAL_SIGNALS):
+        # An operational symptom or cost/provisioning concern: investigate live state.
+        return ["investigate_cluster"]
+    ref = _resource_ref(query)
+    name = _extract_name(query)
+    if ref and name:
+        # A specific resource named without a symptom: inspect it directly.
+        return ["describe_resource"]
+    return []
 
 
 def _extract_args(query: str, tool: str) -> dict:
     if tool == "validate_config":
         return {"yaml": query}
+    if tool == "investigate_cluster":
+        return {"namespace": _extract_namespace(query), "query": query}
     ref = _resource_ref(query) or {}
     return {
         "api_version": ref.get("api_version"),
@@ -421,6 +555,8 @@ def _extract_args(query: str, tool: str) -> dict:
 def _args_summary(tool: str, args: dict) -> str:
     if tool == "validate_config":
         return "pasted manifest"
+    if tool == "investigate_cluster":
+        return f"namespace {args.get('namespace') or 'all'}"
     if tool == "list_events":
         return f"{args.get('name') or '(namespace)'} in {args.get('namespace') or 'default'}"
     return f"{args.get('kind')}/{args.get('name')}"
@@ -688,6 +824,8 @@ class AgentState(TypedDict, total=False):
     draft: str
     attempts: int
     critic_score: float
+    critic_pass: bool
+    correction: str
     used_llm: bool
 
 
@@ -803,6 +941,11 @@ async def n_generate(state: AgentState) -> dict:
     writer = get_stream_writer()
     low_conf = state["confidence"] in ("low", "unknown")
     context = _build_context(state)
+    correction = state.get("correction")
+    if correction:
+        # The critic rejected the previous fix (e.g. deprecated API); steer the
+        # regeneration to correct it, grounded in current standards.
+        context += "\n\n=== CORRECTION REQUIRED ===\n" + correction
     attempts = state.get("attempts", 0)
     if attempts > 0:
         # This is a retry after the critic rejected the previous draft; tell the
@@ -832,38 +975,60 @@ async def n_generate(state: AgentState) -> dict:
 
 
 async def n_critic(state: AgentState) -> dict:
-    """Score how well the draft is grounded in the retrieved evidence (CPU)."""
-    if state.get("used_llm"):
-        # The LLM is the top of the escalation ladder — nothing to escalate to,
-        # so don't re-critique an LLM answer.
-        return {}
+    """Check the draft: groundedness (CPU) + validate the proposed fix vs the KB.
+
+    Runs for both SLM and LLM answers. Groundedness only gates the SLM path (the
+    LLM is the top of the escalation ladder); the fix-validation gates both, so a
+    deprecated/invalid fix is caught and corrected regardless of which model
+    wrote it.
+    """
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
+    draft = state.get("draft", "")
     context = _build_context(state)
-    writer({"type": "step_start", "name": "Critic (CPU)", "note": "scoring groundedness"})
-    t = time.perf_counter()
-    score = await loop.run_in_executor(None, _groundedness, state.get("draft", ""), context)
+    used_llm = state.get("used_llm", False)
     attempts = state.get("attempts", 0)
-    if score >= GROUNDEDNESS_THRESHOLD:
+    writer({"type": "step_start", "name": "Critic (CPU)", "note": "scoring groundedness + validating fix"})
+    t = time.perf_counter()
+    score = await loop.run_in_executor(None, _groundedness, draft, context)
+    fix_issues = await loop.run_in_executor(None, _validate_draft_fix, draft)
+
+    grounded_ok = used_llm or score >= GROUNDEDNESS_THRESHOLD
+    fix_ok = not fix_issues
+    passed = grounded_ok and fix_ok
+    can_retry = attempts <= MAX_CRITIC_RETRIES
+    if passed:
         verdict = "pass"
-    elif attempts <= MAX_CRITIC_RETRIES:
+    elif can_retry:
         verdict = "refining"
     else:
-        verdict = "escalating"
-    writer({"type": "step_done", "name": "Critic (CPU)", "ms": _ms(t),
-            "detail": f"groundedness {score:.2f} · {verdict}"})
-    return {"critic_score": score}
+        verdict = "accepting" if used_llm else "escalating"
+
+    detail = f"groundedness {score:.2f}"
+    if fix_issues:
+        detail += " · fix uses deprecated/invalid config"
+    detail += f" · {verdict}"
+    writer({"type": "step_done", "name": "Critic (CPU)", "ms": _ms(t), "detail": detail})
+
+    correction = ""
+    if fix_issues and verdict == "refining":
+        correction = ("Your previous draft proposed deprecated or invalid configuration: "
+                      + "; ".join(fix_issues)
+                      + ". Re-issue the fix using only current, non-deprecated APIs from the documentation.")
+    return {"critic_score": score, "critic_pass": passed, "correction": correction}
 
 
 async def n_refine(state: AgentState) -> dict:
-    """Broaden the retrieval query after a weakly-grounded draft."""
+    """Broaden retrieval (and/or carry a fix correction) before regenerating."""
     writer = get_stream_writer()
-    writer({"type": "step_start", "name": "Refine (CPU)", "note": "broadening retrieval"})
+    correcting = bool(state.get("correction"))
+    note = "correcting the proposed fix" if correcting else "broadening retrieval"
+    writer({"type": "step_start", "name": "Refine (CPU)", "note": note})
     t = time.perf_counter()
     category = state.get("category", "").replace("_", " ")
     expanded = f"{state['query']} {category} configuration best practices troubleshooting".strip()
-    writer({"type": "step_done", "name": "Refine (CPU)", "ms": _ms(t),
-            "detail": "expanded query, widening search"})
+    detail = "re-grounding the fix in current docs" if correcting else "expanded query, widening search"
+    writer({"type": "step_done", "name": "Refine (CPU)", "ms": _ms(t), "detail": detail})
     return {"effective_query": expanded, "broaden": True}
 
 
@@ -898,14 +1063,15 @@ def _route_after_plan(state: AgentState) -> str:
 
 
 def _route_after_critic(state: AgentState) -> str:
-    """Pass to the user, loop back to refine retrieval, or escalate to the LLM."""
-    if state.get("used_llm"):
-        return "end"
-    if state.get("critic_score", 0.0) >= GROUNDEDNESS_THRESHOLD:
+    """Pass to the user, loop back to refine (regenerate with a correction), or
+    escalate to the LLM when the CPU path is exhausted."""
+    if state.get("critic_pass"):
         return "end"
     if state.get("attempts", 0) <= MAX_CRITIC_RETRIES:
         return "refine"
-    return "escalate"
+    # Retries exhausted: an SLM draft escalates to the LLM; an LLM draft has
+    # nowhere higher to go, so accept it.
+    return "end" if state.get("used_llm") else "escalate"
 
 
 def _build_agent():
