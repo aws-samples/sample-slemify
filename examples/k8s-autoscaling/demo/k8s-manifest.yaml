@@ -173,7 +173,7 @@ spec:
           resources:
             requests:
               # Memory limit must equal request (security standard).
-              # bge-reranker-base (~280MB) plus torch runtime fits in 2Gi.
+              # The cross-encoder (~280MB) plus torch runtime fits in 2Gi.
               # CPU request drives the thread counts above; reranking is
               # compute-bound, so more cores cut the cross-encoder latency.
               cpu: "6"

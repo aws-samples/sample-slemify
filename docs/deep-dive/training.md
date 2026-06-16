@@ -82,7 +82,7 @@ We built and tested reranker fine-tuning, then **removed it**, because it didn't
 help — and Slemify's premise is to build specialist models *when training adds
 value*. The findings, kept here as a learning:
 
-- A strong general-purpose cross-encoder (e.g. `bge-reranker-base`) is *already*
+- A strong general-purpose cross-encoder is *already*
   well-calibrated for (query, document) relevance. On a fair hard eval (rank the
   answer among its most confusable near-misses) the stock model scored NDCG@5
   0.85.

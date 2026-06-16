@@ -108,7 +108,7 @@ project:
       - noise
 
 model:
-  base: ""       # encoder model ID (e.g. BAAI/bge-base-en-v1.5)
+  base: ""       # encoder model ID (a text encoder for classification)
   head: logistic # classifier head: logistic | linear | mlp
 
 data:
@@ -236,13 +236,13 @@ A: No, and Slemify is deliberate about this. Fine-tuning helps most when the mod
 The reports always show the metric against an honest baseline (stock-vs-tuned for embedding, a trivial baseline for scoring, a regex/memorization baseline for extraction) so you can see whether training actually helped on *your* data — not just trust that it did.
 
 **Q: How much context can the router/classifier handle?**
-A: The default encoder (`BAAI/bge-base-en-v1.5`) caps at ~512 tokens (roughly 350-400 words) and silently truncates beyond that — but that's usually fine, because a router only needs the decision-relevant slice, not the whole input. Feed it the question, the latest turn, or one retrieved chunk at a time, and scale by sending it *less, more often*. If the signal is genuinely buried in long text, trim or summarize to the relevant part first, or point `model.base` at a longer-context encoder. See ["Feed the router a slice"](#feed-the-router-a-slice-not-the-whole-blob) above and the [serving deep dive](docs/deep-dive/serving.md) for the right-tool / wrong-tool guide.
+A: The default text encoder caps at ~512 tokens (roughly 350-400 words) and silently truncates beyond that — but that's usually fine, because a router only needs the decision-relevant slice, not the whole input. Feed it the question, the latest turn, or one retrieved chunk at a time, and scale by sending it *less, more often*. If the signal is genuinely buried in long text, trim or summarize to the relevant part first, or point `model.base` at a longer-context encoder. See ["Feed the router a slice"](#feed-the-router-a-slice-not-the-whole-blob) above and the [serving deep dive](docs/deep-dive/serving.md) for the right-tool / wrong-tool guide.
 
 **Q: What about RAG?**
 A: SLMs and RAG solve different problems, and Slemify now covers both sides. RAG retrieves relevant context for knowledge questions; the retrieval step itself is an embedding model, which you can domain-tune with `task: embedding`. The classification/scoring tasks handle routing and guardrails where you don't need retrieval, you need a fast decision. They work well together: an encoder classifier routes the query, a domain-tuned embedding model retrieves the knowledge, and a generative SLM writes the answer.
 
 **Q: Can I use a different base model?**
-A: Yes. For `task: generation`, any HuggingFace causal LM supported by Unsloth. For encoder-head tasks (`task: classification`, `task: scoring`) and `task: embedding`, any sentence-transformers encoder (e.g. `BAAI/bge-base-en-v1.5`). `task: extraction` (v1) is the exception — its feature-based token tagger uses no encoder, so `model.base` is omitted. The auto-sizer adjusts infrastructure based on the task and model size.
+A: Yes. For `task: generation`, any HuggingFace causal LM supported by Unsloth. For encoder-head tasks (`task: classification`, `task: scoring`) and `task: embedding`, any sentence-transformers text encoder. `task: extraction` (v1) is the exception — its feature-based token tagger uses no encoder, so `model.base` is omitted. The auto-sizer adjusts infrastructure based on the task and model size.
 
 **Q: What happens during a Spot interruption?**
 A: Training checkpoints sync to S3 every 500 steps. The next pod resumes from the last checkpoint automatically. Max work lost: ~20 minutes.

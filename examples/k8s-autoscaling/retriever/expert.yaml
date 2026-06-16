@@ -17,7 +17,7 @@ project:
 # No model.head — contrastive training fine-tunes the encoder itself.
 
 model:
-  base: ""  # encoder model ID to fine-tune (e.g. BAAI/bge-base-en-v1.5, 768d)
+  base: ""  # encoder model ID to fine-tune (a 768d text encoder)
 
 data:
   bucket: slemify-data

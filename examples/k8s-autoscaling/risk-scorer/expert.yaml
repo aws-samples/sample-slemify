@@ -21,7 +21,7 @@ project:
     generative auditor for a full review.
 
 model:
-  base: ""  # encoder model ID for scoring (e.g. BAAI/bge-base-en-v1.5, 768d)
+  base: ""  # encoder model ID for scoring (a 768d text encoder)
   head: linear                 # logistic | linear | mlp (linear = regression)
 
 data:

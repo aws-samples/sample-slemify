@@ -25,9 +25,9 @@ k8s-autoscaling/
 
 | Model | Base | Task | Latency |
 |-------|------|------|---------|
-| Triage | encoder (bge-base, 768d) | `classification` — intent routing + confidence | ~25ms |
-| Risk Scorer | encoder (bge-base, 768d) | `scoring` — operational risk 0.0-1.0 | ~25ms |
-| Retriever | encoder (bge-base, 768d) | `embedding` — domain-tuned RAG vectors | ~25ms |
+| Triage | encoder (768d) | `classification` — intent routing + confidence | ~25ms |
+| Risk Scorer | encoder (768d) | `scoring` — operational risk 0.0-1.0 | ~25ms |
+| Retriever | encoder (768d) | `embedding` — domain-tuned RAG vectors | ~25ms |
 | Auditor | 8B (q4_k_m) | `generation` — structured config analysis | ~14s streaming |
 
 All run on Graviton CPUs with no GPU required for serving. The auditor is fine-tuned on GPU (QLoRA); the encoder-family models train on CPU — triage and risk scorer fit a head in seconds, the retriever contrastively fine-tunes in a few minutes. (The demo also runs a stock cross-encoder *reranker* on CPU — that's a serving pattern, not a Slemify-trained model; see the repo FAQ on why reranking isn't a task.)

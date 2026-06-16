@@ -26,7 +26,7 @@ project:
       - noise
 
 model:
-  base: ""  # encoder model ID for classification (e.g. BAAI/bge-base-en-v1.5, 768d)
+  base: ""  # encoder model ID for classification (a 768d text encoder)
   head: logistic               # logistic | linear | mlp
 
 data:

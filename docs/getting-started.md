@@ -116,7 +116,7 @@ project:
       - noise
 
 model:
-  base: ""        # encoder model ID (e.g. BAAI/bge-base-en-v1.5)
+  base: ""        # encoder model ID (a text encoder for classification)
   head: logistic  # classifier head: logistic | linear | mlp
 
 data:
@@ -136,7 +136,7 @@ training:
 Key choices:
 - **`task: classification`**: routes through the encoder-head path. No GPU, no
   GGUF — the encoder is frozen and only a small classifier head is trained.
-- **encoder base** (e.g. `BAAI/bge-base-en-v1.5`): turns each query into a
+- **encoder base** (a general-purpose text encoder): turns each query into a
   768-dim vector. A single pretrained encoder serves any classification domain.
 - **`head: logistic`**: a logistic-regression head over the embeddings. Fast to
   fit, deterministic, and emits a calibrated confidence (the softmax

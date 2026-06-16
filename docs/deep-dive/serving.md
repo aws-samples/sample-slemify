@@ -46,7 +46,7 @@ models additionally expose a native `POST /score` endpoint that takes
 `{"input": "..."}` and returns `{"score": <float>}`.
 
 Because the classifier embeds in-process and applies a tiny matrix, its latency
-is dominated by the encoder forward pass (~25ms for bge-base on CPU) — there is
+is dominated by the encoder forward pass (~25ms on CPU) — there is
 no token-by-token decode phase, so the latency-planning tables below (which model
 the generation decode loop) do not apply to it.
 
@@ -55,7 +55,7 @@ the generation decode loop) do not apply to it.
 The classification path behaves very differently from a generative SLM when it
 comes to input size, and it's important not to apply the SLM context rules to it:
 
-- **Hard cap, not a latency tradeoff.** `bge-base` has a fixed maximum of **512
+- **Hard cap, not a latency tradeoff.** The encoder has a fixed maximum of **512
   tokens** (~350-400 words). Input beyond that is **silently truncated** — only
   the first ~512 tokens are embedded. Unlike a generative SLM (where bigger input
   means linearly more time, per the tables below), the encoder cannot use more

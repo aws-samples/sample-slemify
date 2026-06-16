@@ -31,7 +31,7 @@ User submits a K8s config question via chat UI
           Retrieves 10 candidate Karpenter/KEDA doc chunks
                 |
                 v
-        [Reranker - bge-reranker-base cross-encoder, CPU]
+        [Reranker - general-purpose cross-encoder, CPU]
           Scores all 10 candidates, keeps the best 2
                 |
                 v
@@ -51,7 +51,7 @@ User submits a K8s config question via chat UI
 | Orchestrator | Python FastAPI | CPU pod | Routes between triage, RAG, auditor, LLM |
 | Triage SLM | llama.cpp | c8g (Graviton4 CPU) | Intent classification, 1.5s |
 | Retriever | Slemify retriever (task: embedding), ONNX | c8g (Graviton4 CPU) | Domain-tuned in-cluster query/doc embeddings, 768d |
-| Reranker | sentence-transformers (bge-reranker-base) | c8g (Graviton4 CPU) | Cross-encoder re-ranks top-10 candidates to best 2 |
+| Reranker | sentence-transformers cross-encoder | c8g (Graviton4 CPU) | Cross-encoder re-ranks top-10 candidates to best 2 |
 | OpenSearch | OpenSearch k-NN | CPU pod | Vector search over 3900+ doc chunks |
 | Auditor SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed |
 | LLM API | Bedrock (Sonnet 4.5) | Managed | Fallback for low confidence queries |
@@ -78,7 +78,7 @@ using 60 queries generated from sampled chunks:
 
 | Encoder | recall@1 | recall@5 | recall@10 | MRR | embed ms/query |
 |---------|---------:|---------:|----------:|----:|---------------:|
-| Stock (bge-base-en-v1.5) | 0.117 | 0.183 | 0.217 | 0.146 | 65.3 |
+| Stock (general-purpose encoder) | 0.117 | 0.183 | 0.217 | 0.146 | 65.3 |
 | Slemify-tuned retriever | 0.250 | 0.383 | 0.433 | 0.303 | 12.3 |
 
 The domain-tuned retriever roughly **doubles retrieval quality** (recall and MRR)
@@ -92,8 +92,8 @@ fine-tuning a retriever pays off (a narrow, domain-specific corpus).
 
 ## Why Keep the Reranker
 
-After vector search returns candidates, a stock cross-encoder
-(`bge-reranker-base`, CPU) re-scores them and the orchestrator keeps only the
+After vector search returns candidates, a stock general-purpose cross-encoder
+(CPU) re-scores them and the orchestrator keeps only the
 best ones for the SLM. A cross-encoder reads the query and a document *together*,
 so it judges relevance more sharply than the retriever, which embeds them
 separately — but it costs ~0.6s per query, so it has to earn that.
