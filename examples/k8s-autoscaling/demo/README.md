@@ -1,60 +1,137 @@
 # K8s Autoscaling Expert Demo
 
-A multi-agent system that audits Kubernetes autoscaling configurations using fine-tuned SLMs on CPUs, RAG for knowledge grounding, and LLM escalation for out-of-domain queries.
+A CPU-first **agent** that audits Kubernetes autoscaling configurations. It
+triages a question, optionally gathers live evidence from the cluster with
+read-only tools, grounds itself in documentation via RAG, drafts an answer with
+a fine-tuned SLM, critiques its own answer, and escalates to a large LLM only
+when the question genuinely needs it.
 
-The demo shows that CPUs handle the full AI inference pipeline (routing, retrieval, generation) without GPUs, delivering domain-accurate results at a fraction of the cost of LLM APIs.
+The point of the demo is **right tool for the right task**: the high-frequency,
+narrow steps (classify, retrieve, rank, generate a domain answer) run on small
+models on CPUs; a large LLM handles the open-ended tail. No GPUs serve traffic.
 
 ## Architecture
 
+The orchestration is a [LangGraph](https://langchain-ai.github.io/langgraph/)
+state graph. Each node runs a CPU model (or Bedrock for the open-ended fallback)
+and streams its progress to the chat UI, so the audience watches every step and
+its latency live.
+
+```mermaid
+flowchart TD
+    U[User query] --> T["Triage SLM · CPU classify<br/>intent + confidence"]
+    T -->|noise| RJ[Reject]
+    T -->|else| P{"Plan<br/>decide tool use"}
+    P -->|names a live resource| TL["Read-only tools · CPU<br/>describe_resource · list_events"]
+    P -->|pasted manifest| VC["validate_config<br/>client-side lint"]
+    P -->|concept question| EM
+    TL --> EM
+    VC --> EM
+    EM["Retriever · CPU<br/>embed query 768d"] --> OS["OpenSearch<br/>vector search"]
+    OS --> RR["Reranker · CPU<br/>cross-encoder top-k"]
+    RR --> GEN{Generate}
+    GEN -->|high confidence| AUD["Auditor SLM · CPU<br/>grounded answer"]
+    GEN -->|low confidence| LLM["LLM API · Bedrock<br/>open-ended fallback"]
+    AUD --> CR{"Critic · CPU<br/>groundedness score"}
+    CR -->|pass| OUT[Answer streamed to user]
+    CR -->|weak, attempts left| RF["Refine query"] --> EM
+    CR -->|still weak| LLM
+    LLM --> OUT
+    RJ --> OUT
 ```
-User submits a K8s config question via chat UI
-        |
-        v
-[Triage SLM - 4B, CPU, ~1.5s]
-  Classifies intent: karpenter_config, keda_config, hpa_config,
-  pdb_disruption, spot_interruption, multi_resource, or noise
-        |
-        |-- noise --> "This doesn't look like a K8s autoscaling question."
-        |
-        |-- low confidence --> [LLM API + RAG] Bedrock Sonnet 4.5 with docs context
-        |
-        |-- high confidence -->
-                |
-                v
-        [Retriever - Slemify-tuned encoder, CPU, ~12ms]
-          Embeds the query locally (768d), no external API call.
-          Domain-tuned on the K8s corpus: ~2x retrieval quality
-          vs a stock encoder (see "Why a domain-tuned retriever").
-                |
-                v
-        [OpenSearch - Vector DB, CPU, ~100ms]
-          Retrieves 10 candidate Karpenter/KEDA doc chunks
-                |
-                v
-        [Reranker - general-purpose cross-encoder, CPU]
-          Scores all 10 candidates, keeps the best 2
-                |
-                v
-        [Auditor SLM - 8B, CPU, streaming ~14s]
-          Structured analysis with RAG context:
-          Error type, severity, root cause, remediation
-                |
-                v
-        Response streamed to user token by token
-```
+
+Two things make this an agent rather than a fixed pipeline: the **plan → tool**
+loop lets it gather live evidence before answering, and the **critic → refine**
+loop lets it grade its own draft and retry (or escalate) when the answer isn't
+well grounded. Both decision points run on CPU.
 
 ## Components
 
-| Component | Runtime | Instance | Role |
-|-----------|---------|----------|------|
-| Chat UI | Static web app | Any | User interface with markdown rendering |
-| Orchestrator | Python FastAPI | CPU pod | Routes between triage, RAG, auditor, LLM |
-| Triage SLM | llama.cpp | c8g (Graviton4 CPU) | Intent classification, 1.5s |
-| Retriever | Slemify retriever (task: embedding), ONNX | c8g (Graviton4 CPU) | Domain-tuned in-cluster query/doc embeddings, 768d |
-| Reranker | sentence-transformers cross-encoder | c8g (Graviton4 CPU) | Cross-encoder re-ranks top-10 candidates to best 2 |
-| OpenSearch | OpenSearch k-NN | CPU pod | Vector search over 3900+ doc chunks |
-| Auditor SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed |
-| LLM API | Bedrock (Sonnet 4.5) | Managed | Fallback for low confidence queries |
+| Component | Runtime | Instance | Role | Custom-trained? |
+|-----------|---------|----------|------|-----------------|
+| Chat UI | Static web app | Any | Live step log + markdown answers | — |
+| Orchestrator | Python FastAPI + LangGraph | CPU pod | The agent graph: triage → plan/tools → retrieve → generate → critic | No — plain code |
+| Triage SLM | llama.cpp | c8g (Graviton4 CPU) | Intent classification + confidence, ~1.5s | Yes (classification head) |
+| Read-only tools | Kubernetes Python client | in orchestrator | `describe_resource`, `list_events`, `validate_config` — gather live evidence | No — code |
+| Retriever | Slemify retriever (`task: embedding`), ONNX | c8g (Graviton4 CPU) | Domain-tuned query/doc embeddings, 768d | **Yes** (fine-tuned encoder) |
+| Reranker | sentence-transformers cross-encoder | c8g (Graviton4 CPU) | Re-ranks candidates to the best few | No — stock |
+| OpenSearch | OpenSearch k-NN | CPU pod | Vector search over 3900+ doc chunks | — |
+| Auditor SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed | **Yes** (fine-tuned generation) |
+| Critic | numpy (groundedness heuristic) | in orchestrator | Scores answer groundedness; drives retry/escalate | No — code |
+| LLM API | Bedrock | Managed | Open-ended fallback / escalation | No — general model |
+
+Routing (which tool to use), argument extraction (the resource name), and the
+critic are deliberately **plain code, not models** — they are control-loop glue,
+and a few rules do the job. See "Right tool for the right task" below.
+
+
+## Read-Only Tools (gathering live evidence)
+
+When a question names a specific cluster object or describes a runtime symptom
+("why isn't NodePool `default` launching nodes?"), the agent gathers live
+evidence before answering, instead of reasoning from documentation alone:
+
+| Tool | What it does | Cluster access |
+|------|--------------|----------------|
+| `describe_resource` | Fetches one object (NodePool, EC2NodeClass, HPA, ScaledObject, PDB, Deployment, Pod, Node) and returns a trimmed view | read (get) |
+| `list_events` | Recent events for that object or namespace | read (list) |
+| `validate_config` | Client-side structural + deprecated-apiVersion lint of a pasted manifest | none (local) |
+
+The tool output is folded into the auditor's context, so the answer is grounded
+in the cluster's real state, not just the docs.
+
+**Safety — everything is read-only:**
+- Tools call the Kubernetes API through the Python client with structured,
+  validated arguments — never a shelled-out `kubectl` with interpolated user
+  text, so there is no command-injection surface.
+- The orchestrator's RBAC is a ClusterRole with **only** `get`/`list`/`watch` —
+  no `create`/`update`/`patch`/`delete`. The agent can read the cluster but can
+  never change it.
+- Resource names and namespaces (untrusted, pulled from the query) are validated
+  against the Kubernetes name regex before any API call.
+- `validate_config` makes no API call at all (server-side dry-run would need
+  write permission), so it works even with tools disabled.
+
+If the orchestrator has no cluster credentials, tools degrade gracefully and the
+agent answers from documentation — the demo still runs.
+
+## Self-Correction (the critic loop)
+
+After the auditor drafts an answer, a CPU **critic** scores how well that draft
+is grounded in the evidence the agent gathered (retrieved docs + tool output).
+On a low score the agent **refines** its query, retrieves again, and regenerates;
+if it still can't ground the answer after a bounded retry, it **escalates** to
+the LLM with everything it gathered. A weakly-grounded draft is replaced in the
+UI, so the audience sees the agent catch and correct itself.
+
+The critic is a lexical-overlap heuristic (does the answer reuse the terms in its
+sources?), calibrated on live answers. It is intentionally **not** a trained
+model — see below. At the default threshold normal answers pass and stay on CPU;
+raise `GROUNDEDNESS_THRESHOLD` (env) to force the loop for a live demo.
+
+## Right Tool for the Right Task
+
+The demo's guiding principle is matching the tool to the task, not training a
+model for every step:
+
+- **Fine-tune where domain quality genuinely improves.** The **auditor**
+  (generation) and the **retriever** (embedding) are fine-tuned on the K8s
+  corpus — that's where a custom model measurably beats a generic one (see the
+  retriever numbers below).
+- **Train a cheap head for a learned closed-set decision.** **Triage** is a
+  logistic head on a frozen encoder — CPU-trained in seconds, deterministic, and
+  its confidence score is what routes between the SLM and the LLM.
+- **Use a stock model where it already wins.** The **reranker** is an
+  off-the-shelf cross-encoder; we measured that *fine-tuning* one on synthetic
+  data made it worse (see "Why Keep the Reranker").
+- **Use plain code for glue.** Tool routing, argument extraction, the guardrail,
+  and the critic are rules — control-loop decisions that don't need ML.
+- **Use a large LLM for the open-ended tail.** Low-confidence or ambiguous
+  questions escalate to Bedrock.
+
+So the agent runs on **three custom-trained models** (auditor, retriever,
+triage), a stock reranker, plain code for the control loop, and an LLM fallback —
+not a fine-tuned model per step.
 
 ## Knowledge Base
 
@@ -122,6 +199,19 @@ but a *stock* cross-encoder used only for serving clearly helps. Don't train it,
 do serve it — both backed by measurement.
 
 ## Demo Prompts (Tested)
+
+### 0. Live tool use (agent inspects the cluster)
+
+When the question names a real object, the agent calls read-only tools before
+answering. Use a NodePool that exists in your cluster:
+
+```
+why isn't NodePool `default` launching nodes? pods are stuck pending
+```
+
+In the step log you'll see: Triage → Plan (decide tool use) → `describe_resource`
++ `list_events` against the live object → Retriever/OpenSearch/Reranker →
+Auditor SLM → Critic. The answer is grounded in the real resource, not just docs.
 
 ### 1. High confidence (Auditor SLM responds)
 
@@ -275,13 +365,17 @@ kubectl port-forward -n slemify svc/k8s-autoscaling-retriever-inference 8083:808
 kubectl port-forward -n slemify svc/k8s-autoscaling-reranker 8084:80
 
 # Install deps
-pip install fastapi uvicorn httpx opensearch-py boto3
+pip install fastapi uvicorn httpx opensearch-py boto3 langgraph kubernetes pyyaml
 
 # Start server (warms up models on boot)
 python3 server.py
 
 # Open http://localhost:8000
 ```
+
+> The agent uses your kubeconfig for the read-only tools when run locally
+> (in-cluster it uses the read-only ServiceAccount). Set `TOOLS_ENABLED=false`
+> to skip cluster access and answer from documentation only.
 
 ## Deploying to Cluster
 
@@ -336,10 +430,11 @@ python3 scripts/index-knowledge.py --append --source=karpenter
 
 ## The Story This Tells
 
-1. CPUs handle the full AI pipeline (triage + retrieval embedding + reranking + vector search + generation)
-2. Fine-tuned SLMs are more accurate than general LLMs on domain-specific tasks
-3. A domain-tuned retriever roughly doubles RAG retrieval quality vs a stock encoder (see "Why a domain-tuned retriever")
-4. RAG grounds the response in current documentation (reduces hallucinations)
-5. The tiered architecture (SLM router + SLM expert + LLM fallback) optimizes cost
-6. Kubernetes-native: Karpenter provisions nodes, KEDA scales, OpenSearch runs in-cluster
-7. Everything on Spot instances with consolidation
+1. **Right tool for the right task** — fine-tune where it earns it (generation, retrieval), use stock models where they win (reranking), use plain code for glue (routing, extraction, critic), and use a large LLM for the open-ended tail
+2. CPUs handle the full AI pipeline: classification, retrieval, reranking, generation, and tool use — no GPUs serve traffic
+3. An agent can route, gather live evidence, and self-correct on CPU; the LLM is one tool in the mix, not the foundation
+4. RAG + live cluster state grounds the response in real evidence (reduces hallucinations)
+5. Fine-tuned SLMs are more accurate than general LLMs on domain-specific tasks
+6. A domain-tuned retriever roughly doubles RAG retrieval quality (see "Why a Domain-Tuned Retriever")
+7. Read-only tools make the agent useful on real clusters without the risk of mutating them
+8. Kubernetes-native: Karpenter provisions nodes, KEDA scales, OpenSearch runs in-cluster — everything on Spot with consolidation
