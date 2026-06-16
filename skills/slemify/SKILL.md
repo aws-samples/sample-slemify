@@ -64,7 +64,7 @@ Look for these signals:
 
 User: "We call Claude 10,000 times a day to classify support tickets into 7 categories, then route them to the right team."
 
-Agent response: "That's a strong SLM candidate. It's high volume, structured output (7 fixed categories), and the same pattern every time with different ticket content. A 3B model fine-tuned on your real tickets would handle this at sub-second latency with no per-token cost. Want me to set this up?"
+Agent response: "That's a strong SLM candidate. It's high volume, structured output (7 fixed categories), and the same pattern every time with different ticket content. A `task: classification` model — a frozen text encoder plus a small trained head, all on CPU — would handle this at ~25ms/query with no per-token cost and no GPU. Want me to set this up?"
 
 User: "We also use Claude to write personalized responses to each ticket."
 
@@ -74,16 +74,40 @@ Agent response: "That's not an SLM candidate. Each response is unique and requir
 
 Once you've identified the opportunity, define the agent precisely:
 
-### Two Patterns
+### Pick the task family
 
-**Router Agent (1-4B model):**
-- Makes a fast decision (classify, route, triage)
-- Output: 2-10 tokens (a label, a category, a confidence score)
+Slemify maps `project.task` onto one of two engines:
+
+**Encoder family — CPU train, CPU serve, no GPU, no GGUF.** A text encoder with a
+small task head, exported to ONNX. Trains in seconds, serves at ~25ms/query.
+Covers most agentic "hot spots":
+- `classification` — route/triage/label into a fixed taxonomy. Returns label + confidence.
+- `scoring` — a single number in [0,1] (risk/quality/confidence guardrails). Returns a score.
+- `extraction` — pull typed entity spans from free-form text. Returns `{type, text}` spans (v1 is a feature-based token tagger; no encoder needed).
+- `embedding` — a domain-tuned retriever for RAG. Returns a vector.
+
+**Generation — GPU train (QLoRA), CPU serve (GGUF/llama.cpp).** A causal LM for
+free-form reasoning. Use `task: generation`, `output_format: free_form`.
+
+Reranking is a deliberate non-goal: a strong general cross-encoder is already
+well-calibrated, and fine-tuning it needs relevance labels Slemify can't
+synthesize — run a stock cross-encoder on CPU as a serving pattern instead.
+
+Inline templates below cover `classification` and `generation`. For `scoring`,
+`extraction`, and `embedding`, see the worked configs in the repo's `examples/`
+(risk-scorer, support-ticket extractor, and retriever) — same shape, with the
+task-specific fields.
+
+### Two agent shapes
+
+**Router / classifier agent (encoder family, CPU):**
+- Makes a fast decision: classify, route, triage, score, or extract
+- Output: a label + confidence, a number, or typed spans — not free-form text
 - No RAG needed (the decision is based on input patterns, not external knowledge)
-- Sub-second latency, handles thousands of requests/day
+- ~25ms/query on CPU, no GPU; handles thousands of requests/day
 - Example: "Is this query about billing, shipping, or technical support?"
 
-**Analyst Agent (7-8B model):**
+**Analyst agent (generation, 7-8B):**
 - Produces structured reasoning about a specific domain
 - Output: 100-500 tokens (analysis with explanation, evidence, recommendations)
 - Uses RAG to ground reasoning in current documentation
@@ -131,7 +155,10 @@ If the cluster isn't set up yet, guide them through:
 
 ### Writing expert.yaml
 
-Based on the design phase, create the config. The base model comes from HuggingFace Hub (any Unsloth-compatible architecture).
+Based on the design phase, create the config. Set `project.task` to the family
+you chose. For `generation` the base is a causal LM (any Unsloth-compatible
+architecture); for the encoder family the base is a text encoder, and
+`classification`/`extraction` also need a `labels` taxonomy.
 
 **Router Agent template:**
 
@@ -140,6 +167,7 @@ apiVersion: slemify/v1
 
 project:
   name: <descriptive-name>
+  task: classification   # frozen encoder + trained head, CPU train + serve
   domain: >
     <One paragraph describing what this agent does, what it classifies,
     and what the categories mean. Be specific.>
@@ -150,8 +178,8 @@ project:
       - category_3
 
 model:
-  base: ""  # HuggingFace model ID (3B recommended for classification)
-  quantize: q4_k_m
+  base: ""        # text encoder ID, 768d (trained + served on CPU; no GGUF)
+  head: logistic  # logistic | linear | mlp
 
 data:
   bucket: <your-s3-bucket>
@@ -174,6 +202,8 @@ apiVersion: slemify/v1
 
 project:
   name: <descriptive-name>
+  task: generation         # causal LM, free-form reasoning
+  output_format: free_form
   domain: >
     <One paragraph describing what this agent analyzes, what domain
     expertise it has, and what structured output it produces.>
@@ -229,7 +259,13 @@ Slemify calls Amazon Bedrock with your raw examples and expert.yaml config. The 
 slemify deploy --config expert.yaml
 ```
 
-This runs: data generation, training (Spot GPU, ~20 min), quantization, serving, and validation report.
+This runs data generation, training, (quantization for generation), serving, and
+a validation report. The path depends on the task:
+- **Encoder family** (classification/scoring/extraction/embedding): a CPU
+  training job (seconds to a few minutes), no GPU and no quantization, then ONNX
+  serving on CPU.
+- **Generation**: QLoRA on a Spot GPU (~15-30 min), then GGUF quantization and
+  CPU serving via llama.cpp.
 
 Check status:
 ```bash
@@ -238,6 +274,8 @@ slemify status <project-name>
 
 ### What to Expect
 
+For **generation** (causal LM):
+
 | Stage | Duration | Cost |
 |-------|----------|------|
 | Data (synthetic generation) | 5-15 min | $10-50 (Bedrock API) |
@@ -245,6 +283,12 @@ slemify status <project-name>
 | Quantization | 2-5 min | included |
 | Serving + Validation | 5-10 min | ~$0.10 |
 | **Total** | **30-60 min** | **$15-55** |
+
+For the **encoder family** (classification/scoring/extraction/embedding) there is
+no GPU and no quantization: data generation is the same Bedrock step, training is
+a CPU job that finishes in seconds to a few minutes, and serving is ONNX on CPU.
+Total is typically **~10-20 min**, dominated by synthetic data generation, at the
+same Bedrock data cost.
 
 ## Phase 4: Validate
 
@@ -322,7 +366,7 @@ The SLM deployment includes KEDA autoscaling by default:
 | Problem | Likely Cause | Fix |
 |---------|-------------|-----|
 | Low accuracy on one class | Not enough examples for that class | Add 10-20 more raw examples, regenerate |
-| Model outputs extra text beyond label | Training data has inconsistent format | Check synthetic pairs, ensure clean pipe-delimited output |
+| Model outputs extra text beyond the label (generation tasks) | Training data has inconsistent format | Check synthetic pairs; the encoder-family tasks avoid this entirely (the head emits a label/number/spans, not free text) |
 | High latency (>3s for router) | mlock not enabled, model paging to disk | Enable mlock in deployment, verify RAM > model size |
 | Training OOM | Model too large for GPU | Use Spot g5.xlarge (24GB) or reduce batch size |
 | Spot interruption during training | Normal | Slemify checkpoints to S3, resumes automatically |

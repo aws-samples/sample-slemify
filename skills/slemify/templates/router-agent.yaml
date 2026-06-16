@@ -1,13 +1,14 @@
-# Router Agent: Fast classification/routing decisions
+# Router / classifier agent: fast classification/routing decisions
 # Use for: intent detection, ticket triage, query routing, validation gates
-# Model: 1-4B (sub-second latency, 2-10 token output)
-# No RAG needed - decision is based on input patterns
+# task: classification — a frozen text encoder + a small trained head, trained
+# and served entirely on CPU in seconds (~25ms/query, returns label+confidence).
+# No GPU, no GGUF. No RAG needed — the decision is based on input patterns.
 
 apiVersion: slemify/v1
 
 project:
   name: <project-name>              # e.g., support-ticket-router
-  task: classification              # encoder + head (CPU). NOTE: available from Phase 2
+  task: classification              # frozen encoder + trained head (CPU)
   domain: >
     <Describe what this agent classifies and what each category means.
     Be specific about the domain and the decision being made.
@@ -26,8 +27,9 @@ project:
     #   - low
 
 model:
-  base: ""                           # HuggingFace model ID (3B recommended for classification)
-  quantize: q4_k_m                   # Q4 keeps model under 2GB
+  base: ""                           # text encoder ID, 768d (trained + served on CPU)
+  head: logistic                     # logistic | linear | mlp
+  # No quantize: encoder-head models are not quantized to GGUF (CPU + ONNX).
 
 data:
   bucket: <your-s3-bucket>
@@ -43,4 +45,4 @@ data:
     pairs: 100                       # Hold-out eval set
 
 training:
-  spot: true                         # Use Spot GPU (~$0.15 per run)
+  spot: true                         # CPU training job (seconds; no GPU)
