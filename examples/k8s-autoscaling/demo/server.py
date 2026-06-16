@@ -384,6 +384,18 @@ def _latest_warning_event(v1, namespace: str, name: str) -> str | None:
         return None
 
 
+def _format_nodepool(d: dict) -> str:
+    """One focused line for a NodePool: the cost/provisioning-relevant fields."""
+    name = (d.get("metadata") or {}).get("name")
+    reqs = (((d.get("spec") or {}).get("template") or {}).get("spec") or {}).get("requirements") or []
+    fields = {r.get("key"): r.get("values") for r in reqs if isinstance(r, dict)}
+    disruption = ((d.get("spec") or {}).get("disruption") or {}).get("consolidationPolicy")
+    return (f"- {name}: capacity-type={fields.get('karpenter.sh/capacity-type') or 'any'}, "
+            f"instance-family={fields.get('karpenter.k8s.aws/instance-family') or '-'}, "
+            f"instance-category={fields.get('karpenter.k8s.aws/instance-category') or '-'}, "
+            f"arch={fields.get('kubernetes.io/arch') or 'any'}, consolidation={disruption or '-'}")
+
+
 def _nodepool_summaries() -> str:
     """Focused per-NodePool view of the cost/provisioning-relevant requirements."""
     try:
@@ -392,22 +404,7 @@ def _nodepool_summaries() -> str:
         items = res.get().items
     except Exception as e:
         return f"(could not list NodePools: {e})"
-    out = []
-    for np in items:
-        d = np.to_dict()
-        name = (d.get("metadata") or {}).get("name")
-        reqs = (((d.get("spec") or {}).get("template") or {}).get("spec") or {}).get("requirements") or []
-        fields = {}
-        for r in reqs:
-            if isinstance(r, dict):
-                fields[r.get("key")] = r.get("values")
-        disruption = ((d.get("spec") or {}).get("disruption") or {}).get("consolidationPolicy")
-        out.append(
-            f"- {name}: capacity-type={fields.get('karpenter.sh/capacity-type') or 'any'}, "
-            f"instance-family={fields.get('karpenter.k8s.aws/instance-family') or '-'}, "
-            f"instance-category={fields.get('karpenter.k8s.aws/instance-category') or '-'}, "
-            f"arch={fields.get('kubernetes.io/arch') or 'any'}, consolidation={disruption or '-'}"
-        )
+    out = [_format_nodepool(np.to_dict()) for np in items]
     return "\n".join(out) if out else "(no NodePools found)"
 
 
@@ -424,7 +421,19 @@ def investigate_cluster(args: dict) -> str:
     namespace = args.get("namespace")
     if namespace and not _valid_k8s_name(namespace):
         return "Invalid namespace."
-    query = (args.get("query") or "").lower()
+    query = (args.get("query") or "")
+
+    # If the user explicitly named a NodePool, focus on that one (so a cost
+    # question about a specific NodePool isn't hijacked by unrelated pods).
+    ref = _resource_ref(query)
+    name = _extract_name(query)
+    if ref and ref.get("kind") == "NodePool" and name:
+        try:
+            np = k8s_client.CustomObjectsApi().get_cluster_custom_object(
+                "karpenter.sh", "v1", "nodepools", name)
+        except Exception as e:
+            return f"(could not fetch NodePool {name}: {e})"
+        return "NODEPOOL:\n" + _format_nodepool(np)
 
     # State-driven triage (general, not keyed to query wording): if any pods are
     # unhealthy, diagnose those; otherwise the issue is more likely the NodePool
@@ -1533,6 +1542,8 @@ function clearAll(){
 
 const SCENARIOS=[
   {label:'\\uD83D\\uDD27 Live tool use', text:'Why is NodePool `default` not launching nodes?'},
+  {label:'\\uD83D\\uDEE0\\uFE0F Fix pending pods', text:'All pods for the payments-api Deployment in namespace `slemify` are stuck in Pending. Why, and how do I fix it?'},
+  {label:'\\uD83D\\uDCB0 Fix Spot cost', text:'NodePool `demo-spot-misconfigured` is only using expensive on-demand instances. Why, and how do I fix it to use Spot?'},
   {label:'\\uD83D\\uDCD8 Concept question', text:'Explain how HPA stabilization windows work'},
   {label:'\\u26A0\\uFE0F Deprecated config', text:'apiVersion: karpenter.sh/v1beta1\\nkind: NodePool\\nmetadata:\\n  name: demo\\nspec:\\n  template:\\n    spec:\\n      requirements:\\n        - key: karpenter.k8s.aws/instance-category\\n          operator: In\\n          values: ["c","m"]'},
   {label:'\\uD83D\\uDEAB Off-topic', text:'what is the weather like today in Seattle?'}
