@@ -110,6 +110,32 @@ _EVENT_SIGNALS = (
 # before any are used against the API server.
 _K8S_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$")
 
+# --- Critic config ---
+#
+# After a draft answer, a CPU critic scores how well the answer is grounded in
+# the retrieved docs + tool evidence. Below the threshold, the agent refines its
+# query and retrieves again (up to MAX_CRITIC_RETRIES extra drafts); if it still
+# fails, it escalates to the LLM. The Phase C critic is a lexical-overlap
+# heuristic standing in for the trained CPU groundedness scorer added later.
+# Calibrated on live answers: well-grounded auditor replies score ~0.20-0.25 and
+# ungrounded/generic ones near 0, so the default passes normal answers (keeping
+# them on CPU) while still catching weak ones. Raise it (env) to demo the loop.
+GROUNDEDNESS_THRESHOLD = float(os.environ.get("GROUNDEDNESS_THRESHOLD", "0.15"))
+MAX_CRITIC_RETRIES = 1
+# Extra candidates/kept-docs pulled when a refine widens the search on retry.
+BROADEN_EXTRA = 4
+
+# Common words ignored when measuring answer-vs-context term overlap, so the
+# groundedness score reflects substantive (mostly domain) terms.
+_STOPWORDS = {
+    "the", "and", "for", "you", "your", "with", "this", "that", "are", "can",
+    "will", "not", "but", "from", "have", "has", "was", "were", "they", "their",
+    "use", "used", "using", "should", "would", "could", "when", "what", "which",
+    "into", "out", "via", "per", "set", "see", "any", "all", "may", "also",
+    "here", "there", "then", "than", "these", "those", "such", "based", "like",
+    "need", "needs", "make", "sure", "want", "does", "doesn", "don", "yes", "no",
+}
+
 TRIAGE_INSTRUCTION = (
     "Classify this Kubernetes autoscaling support query into a routing "
     "category and confidence level."
@@ -412,6 +438,38 @@ def _format_tool_results(results: list) -> str:
         parts.append(f"{header}\n{r['output']}")
     return "\n\n".join(parts)
 
+
+def _build_context(state: dict) -> str:
+    """Assemble the grounding context (tool evidence + retrieved docs)."""
+    sections = []
+    tool_results = state.get("tool_results", [])
+    if tool_results:
+        sections.append("LIVE CLUSTER EVIDENCE (read-only tools):\n" + _format_tool_results(tool_results))
+    docs = state.get("docs", [])
+    if docs:
+        sections.append("\n\n---\n\n".join(docs))
+    return "\n\n===\n\n".join(sections)
+
+
+def _content_terms(text: str) -> set:
+    return {w for w in re.findall(r"[a-z0-9][a-z0-9.\-/]{2,}", (text or "").lower()) if w not in _STOPWORDS}
+
+
+def _groundedness(draft: str, context: str) -> float:
+    """Fraction of the answer's substantive terms that appear in the context.
+
+    A cheap CPU proxy for groundedness: an answer that reuses the documentation
+    and live evidence scores high; a generic or off-topic answer scores low.
+    Stands in for the trained groundedness scorer trained in a later phase.
+    """
+    answer_terms = _content_terms(draft)
+    if not answer_terms:
+        return 0.0
+    context_terms = _content_terms(context)
+    if not context_terms:
+        return 0.0
+    return len(answer_terms & context_terms) / len(answer_terms)
+
 # --- App ---
 
 app = FastAPI()
@@ -625,6 +683,12 @@ class AgentState(TypedDict, total=False):
     embedding: list
     candidates: list
     docs: list
+    effective_query: str
+    broaden: bool
+    draft: str
+    attempts: int
+    critic_score: float
+    used_llm: bool
 
 
 def _ms(t0: float) -> int:
@@ -697,9 +761,10 @@ async def n_run_tool(state: AgentState) -> dict:
 async def n_embed(state: AgentState) -> dict:
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
+    query = state.get("effective_query") or state["query"]
     writer({"type": "step_start", "name": "Retriever (tuned encoder, CPU)", "note": "embedding query → 768d"})
     t = time.perf_counter()
-    embedding = await loop.run_in_executor(None, embed_query, state["query"])
+    embedding = await loop.run_in_executor(None, embed_query, query)
     writer({"type": "step_done", "name": "Retriever (tuned encoder, CPU)", "ms": _ms(t),
             "detail": "domain-tuned ONNX encoder"})
     return {"embedding": embedding}
@@ -708,9 +773,10 @@ async def n_embed(state: AgentState) -> dict:
 async def n_search(state: AgentState) -> dict:
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
-    writer({"type": "step_start", "name": "OpenSearch (vector DB)", "note": f"k-NN search, top {RETRIEVE_CANDIDATES}"})
+    k = RETRIEVE_CANDIDATES + (BROADEN_EXTRA if state.get("broaden") else 0)
+    writer({"type": "step_start", "name": "OpenSearch (vector DB)", "note": f"k-NN search, top {k}"})
     t = time.perf_counter()
-    candidates = await loop.run_in_executor(None, vector_search, state["embedding"], RETRIEVE_CANDIDATES)
+    candidates = await loop.run_in_executor(None, vector_search, state["embedding"], k)
     writer({"type": "step_done", "name": "OpenSearch (vector DB)", "ms": _ms(t),
             "detail": f"{len(candidates)} candidate chunks"})
     return {"candidates": candidates}
@@ -720,11 +786,14 @@ async def n_rerank(state: AgentState) -> dict:
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
     keep_k = 5 if state["confidence"] in ("low", "unknown") else 2
+    if state.get("broaden"):
+        keep_k += 2
     candidates = state["candidates"]
+    query = state.get("effective_query") or state["query"]
     writer({"type": "step_start", "name": "Reranker (cross-encoder, CPU)",
             "note": f"scoring {len(candidates)} pairs → top {keep_k}"})
     t = time.perf_counter()
-    docs = await loop.run_in_executor(None, rerank_docs, state["query"], candidates, keep_k)
+    docs = await loop.run_in_executor(None, rerank_docs, query, candidates, keep_k)
     writer({"type": "step_done", "name": "Reranker (cross-encoder, CPU)", "ms": _ms(t),
             "detail": f"kept top {len(docs)}"})
     return {"docs": docs}
@@ -733,32 +802,90 @@ async def n_rerank(state: AgentState) -> dict:
 async def n_generate(state: AgentState) -> dict:
     writer = get_stream_writer()
     low_conf = state["confidence"] in ("low", "unknown")
-    sections = []
-    tool_results = state.get("tool_results", [])
-    if tool_results:
-        sections.append("LIVE CLUSTER EVIDENCE (read-only tools):\n" + _format_tool_results(tool_results))
-    docs = state.get("docs", [])
-    if docs:
-        sections.append("\n\n---\n\n".join(docs))
-    context = "\n\n===\n\n".join(sections)
+    context = _build_context(state)
+    attempts = state.get("attempts", 0)
+    if attempts > 0:
+        # This is a retry after the critic rejected the previous draft; tell the
+        # UI to start a fresh answer block so drafts don't concatenate.
+        writer({"type": "answer_reset", "reason": "refining"})
+
     if low_conf:
-        gen_name, stream_fn = "LLM API (Bedrock fallback)", stream_llm
+        gen_name, stream_fn, used_llm = "LLM API (Bedrock fallback)", stream_llm, True
         writer({"type": "model", "name": "Claude Sonnet 4.5 (Bedrock)"})
     else:
-        gen_name, stream_fn = "Auditor SLM (8B, CPU)", stream_slm
+        gen_name, stream_fn, used_llm = "Auditor SLM (8B, CPU)", stream_slm, False
         writer({"type": "model", "name": "Auditor SLM (8B, CPU)"})
 
     writer({"type": "step_start", "name": gen_name, "note": "generating answer"})
     t = time.perf_counter()
     first = True
+    parts = []
     async for token in stream_fn(state["query"], context):
         if first:
             writer({"type": "step_done", "name": gen_name, "ms": _ms(t), "detail": "time to first token"})
             first = False
+        parts.append(token)
         writer({"type": "token", "text": token})
     if first:
         writer({"type": "step_done", "name": gen_name, "ms": _ms(t), "detail": "no output"})
-    return {}
+    return {"draft": "".join(parts), "attempts": attempts + 1, "used_llm": used_llm}
+
+
+async def n_critic(state: AgentState) -> dict:
+    """Score how well the draft is grounded in the retrieved evidence (CPU)."""
+    if state.get("used_llm"):
+        # The LLM is the top of the escalation ladder — nothing to escalate to,
+        # so don't re-critique an LLM answer.
+        return {}
+    writer = get_stream_writer()
+    loop = asyncio.get_event_loop()
+    context = _build_context(state)
+    writer({"type": "step_start", "name": "Critic (CPU)", "note": "scoring groundedness"})
+    t = time.perf_counter()
+    score = await loop.run_in_executor(None, _groundedness, state.get("draft", ""), context)
+    attempts = state.get("attempts", 0)
+    if score >= GROUNDEDNESS_THRESHOLD:
+        verdict = "pass"
+    elif attempts <= MAX_CRITIC_RETRIES:
+        verdict = "refining"
+    else:
+        verdict = "escalating"
+    writer({"type": "step_done", "name": "Critic (CPU)", "ms": _ms(t),
+            "detail": f"groundedness {score:.2f} · {verdict}"})
+    return {"critic_score": score}
+
+
+async def n_refine(state: AgentState) -> dict:
+    """Broaden the retrieval query after a weakly-grounded draft."""
+    writer = get_stream_writer()
+    writer({"type": "step_start", "name": "Refine (CPU)", "note": "broadening retrieval"})
+    t = time.perf_counter()
+    category = state.get("category", "").replace("_", " ")
+    expanded = f"{state['query']} {category} configuration best practices troubleshooting".strip()
+    writer({"type": "step_done", "name": "Refine (CPU)", "ms": _ms(t),
+            "detail": "expanded query, widening search"})
+    return {"effective_query": expanded, "broaden": True}
+
+
+async def n_escalate(state: AgentState) -> dict:
+    """The CPU critic kept failing — escalate to the LLM with gathered context."""
+    writer = get_stream_writer()
+    context = _build_context(state)
+    writer({"type": "answer_reset", "reason": "escalating"})
+    writer({"type": "model", "name": "Claude Sonnet 4.5 (Bedrock)"})
+    writer({"type": "step_start", "name": "LLM API (Bedrock escalation)",
+            "note": "CPU critic kept failing — escalating"})
+    t = time.perf_counter()
+    first = True
+    async for token in stream_llm(state["query"], context):
+        if first:
+            writer({"type": "step_done", "name": "LLM API (Bedrock escalation)", "ms": _ms(t),
+                    "detail": "time to first token"})
+            first = False
+        writer({"type": "token", "text": token})
+    if first:
+        writer({"type": "step_done", "name": "LLM API (Bedrock escalation)", "ms": _ms(t), "detail": "no output"})
+    return {"used_llm": True}
 
 
 def _route_after_triage(state: AgentState) -> str:
@@ -768,6 +895,17 @@ def _route_after_triage(state: AgentState) -> str:
 def _route_after_plan(state: AgentState) -> str:
     """Loop into the tool path while tools remain; otherwise retrieve."""
     return "extract_args" if state.get("pending_tools") else "embed"
+
+
+def _route_after_critic(state: AgentState) -> str:
+    """Pass to the user, loop back to refine retrieval, or escalate to the LLM."""
+    if state.get("used_llm"):
+        return "end"
+    if state.get("critic_score", 0.0) >= GROUNDEDNESS_THRESHOLD:
+        return "end"
+    if state.get("attempts", 0) <= MAX_CRITIC_RETRIES:
+        return "refine"
+    return "escalate"
 
 
 def _build_agent():
@@ -781,6 +919,9 @@ def _build_agent():
     g.add_node("search", n_search)
     g.add_node("rerank", n_rerank)
     g.add_node("generate", n_generate)
+    g.add_node("critic", n_critic)
+    g.add_node("refine", n_refine)
+    g.add_node("escalate", n_escalate)
     g.add_edge(START, "triage")
     g.add_conditional_edges("triage", _route_after_triage, {"reject": "reject", "plan": "plan"})
     g.add_edge("reject", END)
@@ -790,7 +931,11 @@ def _build_agent():
     g.add_edge("embed", "search")
     g.add_edge("search", "rerank")
     g.add_edge("rerank", "generate")
-    g.add_edge("generate", END)
+    g.add_edge("generate", "critic")
+    g.add_conditional_edges("critic", _route_after_critic,
+                            {"end": END, "refine": "refine", "escalate": "escalate"})
+    g.add_edge("refine", "embed")
+    g.add_edge("escalate", END)
     return g.compile()
 
 
@@ -977,6 +1122,13 @@ async function send() {
           addMsg(msg.name, 'model-badge ' + (isSlm ? 'slm' : 'llm'));
         } else if (msg.type === 'response') {
           addMsg(renderMd(msg.text), 'system');
+        } else if (msg.type === 'answer_reset') {
+          if (responseDiv && rawText) responseDiv.innerHTML = renderMd(rawText);
+          responseDiv = null; rawText = '';
+          const note = msg.reason === 'escalating'
+            ? 'CPU critic kept failing \u2014 escalating to the LLM.'
+            : 'Draft was weakly grounded \u2014 refining and retrying.';
+          addMsg(note, 'status');
         } else if (msg.type === 'token') {
           if (!responseDiv) responseDiv = addMsg('', 'system');
           rawText += msg.text;
