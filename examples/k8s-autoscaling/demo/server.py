@@ -1155,12 +1155,16 @@ async def n_remediate(state: AgentState) -> dict:
     AND a bounded remediation is detected for a NodePool the user named. The
     apply itself dry-runs, patches one field, and is followed by a verify re-read.
     """
-    if not (ALLOW_APPLY and state.get("autopilot")):
-        return {}
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
     rem = await loop.run_in_executor(None, detect_remediation, state["query"])
     if not rem:
+        return {}
+    if not state.get("autopilot"):
+        # Approve mode: surface the fix so the UI can offer an "Apply" button.
+        # No mutation happens here.
+        writer({"type": "proposal", "action": rem["action"], "target": rem["target"],
+                "summary": rem["summary"]})
         return {}
     action, target = rem["action"], rem["target"]
     apply_fn, verify_fn = _REMEDIATIONS[action]
@@ -1253,6 +1257,57 @@ async def query_endpoint(q: Query):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+class ApplyRequest(BaseModel):
+    action: str
+    target: str
+
+
+@app.get("/config")
+async def config():
+    """Tell the UI whether apply (approve/autopilot) is available on this server."""
+    return {"apply_enabled": ALLOW_APPLY}
+
+
+@app.post("/apply")
+async def apply_endpoint(req: ApplyRequest):
+    """Execute a whitelisted remediation on a named target, then verify it.
+
+    Gated by ALLOW_APPLY and restricted to the remediation whitelist + a valid
+    target name — the same bounded path the autopilot uses, triggered by the
+    user's explicit approval instead of automatically.
+    """
+    async def event_stream():
+        if not ALLOW_APPLY:
+            yield sse("response", text="Apply is disabled on this server.")
+            yield "data: [DONE]\n\n"
+            return
+        entry = _REMEDIATIONS.get(req.action)
+        if not entry or not _valid_k8s_name(req.target):
+            yield sse("response", text="Unknown or invalid remediation request.")
+            yield "data: [DONE]\n\n"
+            return
+        apply_fn, verify_fn = entry
+        loop = asyncio.get_event_loop()
+        yield sse("step_start", name="Apply fix", note=f"{req.action} on {req.target}")
+        t = time.perf_counter()
+        result = await loop.run_in_executor(None, apply_fn, req.target)
+        yield sse("step_done", name="Apply fix", ms=round((time.perf_counter() - t) * 1000),
+                  detail=result["message"])
+        if result["ok"]:
+            yield sse("step_start", name="Verify (CPU)", note=f"re-checking {req.target}")
+            t = time.perf_counter()
+            check = await loop.run_in_executor(None, verify_fn, req.target)
+            yield sse("step_done", name="Verify (CPU)", ms=round((time.perf_counter() - t) * 1000),
+                      detail=check["message"])
+            status = "Applied and verified" if check["ok"] else "Applied, but verification failed"
+            yield sse("response", text=f"**{status}.** {check['message']}")
+        else:
+            yield sse("response", text=f"**Could not apply:** {result['message']}")
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 # --- UI ---
 
 @app.get("/")
@@ -1308,6 +1363,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .input-area button{background:var(--accent);color:#fff;border:none;padding:0 22px;border-radius:10px;cursor:pointer;font-size:14px;font-weight:600}
 .input-area button:hover{background:var(--accent-hover)}
 .input-area button:disabled{opacity:.5;cursor:not-allowed}
+.switch{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none;border:1px solid var(--border);padding:5px 10px;border-radius:7px}
+.switch input{accent-color:var(--accent);margin:0}
+.proposal{align-self:flex-start;max-width:88%;background:var(--surface);border:1px solid var(--accent);border-radius:12px;padding:12px 15px;font-size:13px}
+.proposal .ptitle{font-weight:600;color:var(--strong);margin-bottom:4px}
+.proposal .psum{color:var(--muted);margin-bottom:8px}
+.proposal button{background:var(--accent);color:#fff;border:none;padding:7px 14px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600}
+.proposal button:hover{background:var(--accent-hover)}
+.proposal button:disabled{opacity:.5;cursor:not-allowed}
 .trace-pane{display:flex;flex-direction:column;min-height:0;background:var(--panel)}
 .trace-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;font-size:13px;font-weight:600}
 .trace-head .total{font-size:12px;color:var(--muted);font-weight:600;font-variant-numeric:tabular-nums}
@@ -1354,6 +1417,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <div><h1>K8s Autoscaling Agent</h1><div class="sub">CPU-first agent &middot; right tool for the right task</div></div>
   </div>
   <div class="appbar-right">
+    <label class="switch" id="autopilotWrap" style="display:none" title="When on, the agent applies the fix automatically; off = it proposes and waits for your approval">
+      <input type="checkbox" id="autopilot"><span>Autopilot</span>
+    </label>
     <div class="tally" title="Queries answered without escalating to the LLM"><span class="dot"></span><span id="tallyText">&mdash; handled on CPU</span></div>
     <button class="iconbtn" onclick="toggleTheme()">Theme</button>
     <button class="iconbtn" onclick="clearAll()">Clear</button>
@@ -1481,7 +1547,8 @@ async function send(){
   addMsg(esc(text).replace(/\\n/g,'<br>'),'user');
 
   let usedLLM=false;
-  const resp=await fetch('/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+  const auto = document.getElementById('autopilot');
+  const resp=await fetch('/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text, autopilot: !!(auto && auto.checked)})});
   const reader=resp.body.getReader(); const dec=new TextDecoder();
   let responseDiv=null, rawText='', buffer='';
 
@@ -1507,6 +1574,7 @@ async function send(){
           addMsg('<span class="ic">'+(llm?'\\u2601\\uFE0F':'\\uD83E\\uDDE0')+'</span> '+esc(msg.name),'badge '+(llm?'llm':'cpu'));
         }
         else if(msg.type==='response'){ addMsg(renderMd(msg.text),'system'); }
+        else if(msg.type==='proposal'){ addProposal(msg); }
         else if(msg.type==='answer_reset'){
           if(responseDiv&&rawText) responseDiv.innerHTML=renderMd(rawText);
           responseDiv=null; rawText='';
@@ -1525,6 +1593,43 @@ async function send(){
   }
   btn.disabled=false; input.focus();
 }
+function addProposal(msg){
+  const e=document.getElementById('empty'); if(e) e.remove();
+  const div=document.createElement('div'); div.className='proposal';
+  div.innerHTML='<div class="ptitle">\\uD83D\\uDD27 Proposed fix</div><div class="psum">'+esc(msg.summary)+'</div>';
+  const btn=document.createElement('button'); btn.textContent='Apply this fix';
+  btn.onclick=()=>applyFix(msg.action, msg.target, btn);
+  div.appendChild(btn);
+  chat.appendChild(div); chat.scrollTop=chat.scrollHeight;
+}
+
+async function applyFix(action, target, btn){
+  btn.disabled=true; btn.textContent='Applying\\u2026';
+  const resp=await fetch('/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,target})});
+  const reader=resp.body.getReader(); const dec=new TextDecoder(); let buffer='';
+  while(true){
+    const {done,value}=await reader.read(); if(done) break;
+    buffer+=dec.decode(value,{stream:true});
+    const lines=buffer.split('\\n'); buffer=lines.pop();
+    for(const line of lines){
+      if(!line.startsWith('data: ')) continue;
+      const data=line.slice(6);
+      if(data==='[DONE]') break;
+      try{
+        const m=JSON.parse(data);
+        if(m.type==='step_start'){ addStep(m.name, m.note); gActivate(m.name); }
+        else if(m.type==='step_done'){ finishStep(m.name, m.ms, m.detail); gDone(m.name); }
+        else if(m.type==='response'){ addMsg(renderMd(m.text),'system'); }
+      }catch(e){}
+    }
+  }
+  btn.textContent='Applied';
+}
+
+fetch('/config').then(r=>r.json()).then(c=>{
+  if(c && c.apply_enabled){ const w=document.getElementById('autopilotWrap'); if(w) w.style.display=''; }
+}).catch(()=>{});
+
 input.addEventListener('keydown', e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); }});
 updateTally();
 </script></body></html>"""
