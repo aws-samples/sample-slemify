@@ -475,6 +475,99 @@ def _run_tool(tool: str, args: dict) -> str:
     return fn(args)
 
 
+# --- Remediation (write actions, gated and bounded) ---
+#
+# Apply is OFF unless ALLOW_APPLY is set AND the orchestrator has write RBAC.
+# Remediations are a small whitelist of deterministic, validated patches against
+# a SPECIFIC named target — never free-form model YAML, never a blanket change.
+# Each dry-runs (server-side) before applying, touches only the intended field,
+# and is followed by a re-read to verify.
+ALLOW_APPLY = os.environ.get("ALLOW_APPLY", "false").lower() in ("1", "true", "yes")
+
+
+def _nodepool_capacity_types(np: dict):
+    reqs = (((np.get("spec") or {}).get("template") or {}).get("spec") or {}).get("requirements") or []
+    for r in reqs:
+        if r.get("key") == "karpenter.sh/capacity-type":
+            return r.get("values")
+    return None
+
+
+def enable_spot_on_nodepool(name: str) -> dict:
+    """Add 'spot' to one named NodePool's capacity-type. Deterministic patch:
+    dry-runs first, changes only the capacity-type values, nothing else."""
+    if not ALLOW_APPLY:
+        return {"ok": False, "message": "Apply is disabled (set ALLOW_APPLY=true and grant write RBAC)."}
+    if not _valid_k8s_name(name):
+        return {"ok": False, "message": "Invalid NodePool name."}
+    api = k8s_client.CustomObjectsApi()
+    try:
+        np = api.get_cluster_custom_object("karpenter.sh", "v1", "nodepools", name)
+    except Exception as e:
+        return {"ok": False, "message": f"Could not fetch NodePool {name}: {e}"}
+    reqs = (((np.get("spec") or {}).get("template") or {}).get("spec") or {}).get("requirements") or []
+    amended = False
+    for r in reqs:
+        if r.get("key") == "karpenter.sh/capacity-type":
+            vals = r.get("values") or []
+            if "spot" in vals:
+                return {"ok": True, "message": f"NodePool {name} already allows Spot; no change needed."}
+            r["values"] = sorted(set(vals) | {"spot"})
+            amended = True
+    if not amended:
+        return {"ok": False, "message": f"NodePool {name} has no capacity-type requirement to amend."}
+    patch = {"spec": {"template": {"spec": {"requirements": reqs}}}}
+    try:
+        api.patch_cluster_custom_object("karpenter.sh", "v1", "nodepools", name, body=patch, dry_run="All")
+        api.patch_cluster_custom_object("karpenter.sh", "v1", "nodepools", name, body=patch)
+    except Exception as e:
+        return {"ok": False, "message": f"Apply failed (dry-run or apply): {e}"}
+    return {"ok": True, "message": f"Patched NodePool {name}: capacity-type now includes 'spot'."}
+
+
+def verify_nodepool_spot(name: str) -> dict:
+    """Re-read the NodePool to confirm the remediation took effect."""
+    api = k8s_client.CustomObjectsApi()
+    try:
+        np = api.get_cluster_custom_object("karpenter.sh", "v1", "nodepools", name)
+    except Exception as e:
+        return {"ok": False, "message": f"Could not re-read NodePool {name}: {e}"}
+    caps = _nodepool_capacity_types(np)
+    if caps and "spot" in caps:
+        return {"ok": True, "message": f"Verified: NodePool {name} capacity-type is now {caps}."}
+    return {"ok": False, "message": f"Verification failed: capacity-type is {caps}."}
+
+
+# Whitelist of structured remediations the agent may apply. Each entry maps to an
+# (apply, verify) pair operating on a single named target.
+_REMEDIATIONS = {
+    "enable_spot_on_nodepool": (enable_spot_on_nodepool, verify_nodepool_spot),
+}
+
+
+def detect_remediation(query: str) -> dict | None:
+    """Map a query to a safe, applicable remediation on an EXPLICITLY NAMED
+    target. Returns None unless the user named a NodePool that genuinely lacks
+    Spot — so apply is always bounded to a resource the user pointed at, never a
+    blanket change across the cluster."""
+    if not ALLOW_APPLY:
+        return None
+    ref = _resource_ref(query)
+    name = _extract_name(query)
+    if not (ref and ref.get("kind") == "NodePool" and name):
+        return None
+    try:
+        np = k8s_client.CustomObjectsApi().get_cluster_custom_object(
+            "karpenter.sh", "v1", "nodepools", name)
+    except Exception:
+        return None
+    caps = _nodepool_capacity_types(np)
+    if caps is not None and "spot" not in caps:
+        return {"action": "enable_spot_on_nodepool", "target": name,
+                "summary": f"add 'spot' to NodePool {name} capacity-type"}
+    return None
+
+
 # --- Heuristic planner + argument extractor (Phase B stubs) ---
 #
 # These are deliberately simple rules that stand in for the CPU classification
@@ -614,6 +707,7 @@ _ready = False
 
 class Query(BaseModel):
     text: str
+    autopilot: bool = False
 
 
 def sse(event_type: str, **kwargs) -> str:
@@ -827,6 +921,7 @@ class AgentState(TypedDict, total=False):
     critic_pass: bool
     correction: str
     used_llm: bool
+    autopilot: bool
 
 
 def _ms(t0: float) -> int:
@@ -1053,6 +1148,38 @@ async def n_escalate(state: AgentState) -> dict:
     return {"used_llm": True}
 
 
+async def n_remediate(state: AgentState) -> dict:
+    """Optionally apply a structured fix (autopilot) and verify it took effect.
+
+    Read-only by default: only acts when autopilot is on AND apply is enabled
+    AND a bounded remediation is detected for a NodePool the user named. The
+    apply itself dry-runs, patches one field, and is followed by a verify re-read.
+    """
+    if not (ALLOW_APPLY and state.get("autopilot")):
+        return {}
+    writer = get_stream_writer()
+    loop = asyncio.get_event_loop()
+    rem = await loop.run_in_executor(None, detect_remediation, state["query"])
+    if not rem:
+        return {}
+    action, target = rem["action"], rem["target"]
+    apply_fn, verify_fn = _REMEDIATIONS[action]
+    writer({"type": "step_start", "name": "Apply fix (autopilot)", "note": rem["summary"]})
+    t = time.perf_counter()
+    result = await loop.run_in_executor(None, apply_fn, target)
+    writer({"type": "step_done", "name": "Apply fix (autopilot)", "ms": _ms(t), "detail": result["message"]})
+    if not result["ok"]:
+        writer({"type": "response", "text": f"**Autopilot could not apply the fix:** {result['message']}"})
+        return {}
+    writer({"type": "step_start", "name": "Verify (CPU)", "note": f"re-checking {target}"})
+    t = time.perf_counter()
+    check = await loop.run_in_executor(None, verify_fn, target)
+    writer({"type": "step_done", "name": "Verify (CPU)", "ms": _ms(t), "detail": check["message"]})
+    status = "applied and verified" if check["ok"] else "applied, but verification failed"
+    writer({"type": "response", "text": f"**Autopilot {status}.** {check['message']}"})
+    return {}
+
+
 def _route_after_triage(state: AgentState) -> str:
     return "reject" if state["category"] == "noise" else "plan"
 
@@ -1088,6 +1215,7 @@ def _build_agent():
     g.add_node("critic", n_critic)
     g.add_node("refine", n_refine)
     g.add_node("escalate", n_escalate)
+    g.add_node("remediate", n_remediate)
     g.add_edge(START, "triage")
     g.add_conditional_edges("triage", _route_after_triage, {"reject": "reject", "plan": "plan"})
     g.add_edge("reject", END)
@@ -1099,9 +1227,10 @@ def _build_agent():
     g.add_edge("rerank", "generate")
     g.add_edge("generate", "critic")
     g.add_conditional_edges("critic", _route_after_critic,
-                            {"end": END, "refine": "refine", "escalate": "escalate"})
+                            {"end": "remediate", "refine": "refine", "escalate": "escalate"})
     g.add_edge("refine", "embed")
     g.add_edge("escalate", END)
+    g.add_edge("remediate", END)
     return g.compile()
 
 
@@ -1116,7 +1245,7 @@ async def query_endpoint(q: Query):
         t_start = time.perf_counter()
         # stream_mode="custom" yields exactly the dicts each node writes, so the
         # UI's SSE contract is preserved without LangChain message plumbing.
-        async for event in agent.astream({"query": q.text}, stream_mode="custom"):
+        async for event in agent.astream({"query": q.text, "autopilot": q.autopilot}, stream_mode="custom"):
             yield f"data: {json.dumps(event)}\n\n"
         yield sse("total", ms=round((time.perf_counter() - t_start) * 1000))
         yield "data: [DONE]\n\n"

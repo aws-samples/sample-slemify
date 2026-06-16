@@ -1,0 +1,40 @@
+# OPT-IN write RBAC for the agent's apply (autopilot / approve-to-apply) modes.
+#
+# This is NOT applied by default. Without it — and without ALLOW_APPLY=true on
+# the orchestrator Deployment — the agent is strictly read-only and cannot
+# change the cluster. Apply it only when you want the agent to remediate:
+#
+#   kubectl apply -f k8s-rbac-apply.yaml
+#
+# It grants the orchestrator ServiceAccount the minimum write verbs for the
+# whitelisted remediations (currently: patch a NodePool's capacity-type to
+# enable Spot). Scope this down further if you only need specific NodePools.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8s-autoscaling-orchestrator-apply
+  labels:
+    app: k8s-autoscaling-orchestrator
+    slemify.io/component: demo
+rules:
+  # Patch NodePools (e.g. add 'spot' to capacity-type). No create/delete.
+  - apiGroups: ["karpenter.sh"]
+    resources: ["nodepools"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k8s-autoscaling-orchestrator-apply
+  labels:
+    app: k8s-autoscaling-orchestrator
+    slemify.io/component: demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: k8s-autoscaling-orchestrator-apply
+subjects:
+  - kind: ServiceAccount
+    name: k8s-autoscaling-orchestrator
+    namespace: slemify
