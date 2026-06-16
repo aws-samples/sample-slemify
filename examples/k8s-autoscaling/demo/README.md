@@ -206,7 +206,7 @@ When the question names a real object, the agent calls read-only tools before
 answering. Use a NodePool that exists in your cluster:
 
 ```
-why isn't NodePool `default` launching nodes? pods are stuck pending
+Why is NodePool `default` not launching nodes?
 ```
 
 In the step log you'll see: Triage → Plan (decide tool use) → `describe_resource`

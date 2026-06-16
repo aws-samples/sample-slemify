@@ -966,183 +966,272 @@ async def index():
 
 
 INDEX_HTML = """<!DOCTYPE html>
-<html data-theme="dark"><head><meta charset="UTF-8"><title>K8s Autoscaling Expert</title>
+<html data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K8s Autoscaling Agent</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
-:root[data-theme="dark"]{--bg:#0f1117;--fg:#e6edf3;--surface:#161b22;--border:#30363d;--muted:#8b949e;--accent:#1f6feb;--accent-hover:#388bfd;--code-bg:#0d1117;--strong:#f0f6fc;--user-bg:#1f6feb;--slm-color:#3fb950;--slm-border:#238636;--slm-bg:rgba(63,185,80,0.1);--llm-color:#a371f7;--llm-border:#8957e5;--llm-bg:rgba(163,113,247,0.1)}
-:root[data-theme="light"]{--bg:#ffffff;--fg:#1f2328;--surface:#f6f8fa;--border:#d1d9e0;--muted:#656d76;--accent:#0969da;--accent-hover:#0550ae;--code-bg:#f6f8fa;--strong:#1f2328;--user-bg:#0969da;--slm-color:#1a7f37;--slm-border:#1a7f37;--slm-bg:rgba(26,127,55,0.08);--llm-color:#8250df;--llm-border:#8250df;--llm-bg:rgba(130,80,223,0.08)}
+:root[data-theme="dark"]{--bg:#0d1117;--panel:#0f1117;--surface:#161b22;--surface2:#1c2230;--fg:#e6edf3;--border:#2a3038;--muted:#8b949e;--accent:#1f6feb;--accent-hover:#388bfd;--code-bg:#0d1117;--strong:#f0f6fc;--user-bg:#1f6feb;--cpu:#3fb950;--cpu-bg:rgba(63,185,80,0.12);--llm:#a371f7;--llm-bg:rgba(163,113,247,0.14)}
+:root[data-theme="light"]{--bg:#f6f8fa;--panel:#ffffff;--surface:#ffffff;--surface2:#f6f8fa;--fg:#1f2328;--border:#d1d9e0;--muted:#656d76;--accent:#0969da;--accent-hover:#0550ae;--code-bg:#f6f8fa;--strong:#1f2328;--user-bg:#0969da;--cpu:#1a7f37;--cpu-bg:rgba(26,127,55,0.10);--llm:#8250df;--llm-bg:rgba(130,80,223,0.10)}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--fg);height:100vh;display:flex;flex-direction:column;transition:background .2s,color .2s}
-.header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-.header h1{font-size:18px;font-weight:600}
-.header .actions{display:flex;gap:8px}
-.header button{background:transparent;border:1px solid var(--border);color:var(--muted);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px}
-.header button:hover{border-color:var(--accent);color:var(--accent)}
-.chat{flex:1;overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:16px}
-.msg{max-width:85%;padding:12px 16px;border-radius:12px;font-size:14px;line-height:1.7}
-.msg.user{align-self:flex-end;background:var(--user-bg);color:white;white-space:pre-wrap}
-.msg.system{align-self:flex-start;background:var(--surface);border:1px solid var(--border)}
-.msg.status{align-self:flex-start;color:var(--muted);font-size:12px;padding:4px 0;display:flex;align-items:center;gap:6px}
-.msg.status::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--muted);animation:pulse 1.5s infinite}
-.msg.step{align-self:stretch;max-width:100%;display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);padding:8px 12px;border-radius:8px;font-size:13px}
-.msg.step .step-name{font-weight:600}
-.msg.step .step-note{color:var(--muted);font-size:12px;flex:1}
-.msg.step .dur{margin-left:auto;font-variant-numeric:tabular-nums;font-weight:600;color:var(--accent)}
-.msg.step.done .dur{color:var(--slm-color)}
-.msg.step .spinner{width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;display:inline-block;flex-shrink:0}
-.msg.step .check{color:var(--slm-color);font-weight:700;flex-shrink:0}
-.msg.total{align-self:stretch;max-width:100%;text-align:right;color:var(--strong);font-weight:600;font-size:13px;padding:4px 12px;border-top:1px solid var(--border)}
-.msg.model-badge{align-self:flex-start;font-size:11px;padding:4px 10px;border-radius:20px;font-weight:500;border:1px solid}
-.msg.model-badge.slm{color:var(--slm-color);border-color:var(--slm-border);background:var(--slm-bg)}
-.msg.model-badge.llm{color:var(--llm-color);border-color:var(--llm-border);background:var(--llm-bg)}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--fg);height:100vh;display:flex;flex-direction:column;transition:background .2s,color .2s}
+.appbar{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;background:var(--panel);border-bottom:1px solid var(--border)}
+.brand{display:flex;align-items:center;gap:12px}
+.brand .logo{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--accent),var(--cpu));display:flex;align-items:center;justify-content:center;font-size:16px}
+.brand h1{font-size:15px;font-weight:650}
+.brand .sub{font-size:12px;color:var(--muted)}
+.appbar-right{display:flex;align-items:center;gap:10px}
+.tally{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:var(--cpu);background:var(--cpu-bg);border:1px solid var(--cpu);padding:5px 11px;border-radius:20px}
+.tally .dot{width:7px;height:7px;border-radius:50%;background:var(--cpu)}
+.iconbtn{background:transparent;border:1px solid var(--border);color:var(--muted);padding:6px 11px;border-radius:7px;cursor:pointer;font-size:12px}
+.iconbtn:hover{border-color:var(--accent);color:var(--accent)}
+.layout{flex:1;display:grid;grid-template-columns:1fr 390px;min-height:0}
+.conv{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--border)}
+.chat{flex:1;overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:14px}
+.empty{margin:auto;text-align:center;color:var(--muted);max-width:400px}
+.empty h2{font-size:16px;color:var(--fg);margin-bottom:6px;font-weight:600}
+.empty p{font-size:13px;line-height:1.6}
+.msg{max-width:88%;padding:11px 15px;border-radius:13px;font-size:14px;line-height:1.7}
+.msg.user{align-self:flex-end;background:var(--user-bg);color:#fff;white-space:pre-wrap;border-bottom-right-radius:4px}
+.msg.system{align-self:flex-start;background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:4px}
+.msg.status{align-self:center;color:var(--muted);font-size:12px;font-style:italic;padding:2px}
+.badge{align-self:flex-start;font-size:11px;padding:4px 11px;border-radius:20px;font-weight:600;border:1px solid;display:inline-flex;gap:6px;align-items:center}
+.badge.cpu{color:var(--cpu);border-color:var(--cpu);background:var(--cpu-bg)}
+.badge.llm{color:var(--llm);border-color:var(--llm);background:var(--llm-bg)}
 .msg h1,.msg h2,.msg h3{margin:12px 0 6px;font-weight:600}
 .msg h1{font-size:16px}.msg h2{font-size:15px}.msg h3{font-size:14px}
-.msg p{margin:6px 0}
-.msg ul,.msg ol{margin:6px 0;padding-left:20px}
-.msg li{margin:3px 0}
-.msg pre{background:var(--code-bg);padding:12px;border-radius:6px;overflow-x:auto;margin:8px 0;font-size:13px;border:1px solid var(--border)}
-.msg code{font-size:13px;font-family:'SF Mono',Menlo,monospace;background:var(--code-bg);padding:2px 5px;border-radius:3px}
+.msg p{margin:6px 0}.msg ul,.msg ol{margin:6px 0;padding-left:20px}.msg li{margin:3px 0}
+.msg pre{background:var(--code-bg);padding:12px;border-radius:6px;overflow-x:auto;margin:8px 0;font-size:12.5px;border:1px solid var(--border)}
+.msg code{font-size:12.5px;font-family:'SF Mono',Menlo,monospace;background:var(--code-bg);padding:2px 5px;border-radius:3px}
 .msg pre code{background:none;padding:0}
-.msg strong{color:var(--strong)}
-.msg hr{border:none;border-top:1px solid var(--border);margin:12px 0}
-.input-area{padding:16px 24px;border-top:1px solid var(--border);display:flex;gap:12px}
-.input-area textarea{flex:1;background:var(--surface);border:1px solid var(--border);color:var(--fg);padding:12px;border-radius:8px;font-size:14px;resize:none;height:80px;font-family:inherit}
+.msg strong{color:var(--strong)}.msg hr{border:none;border-top:1px solid var(--border);margin:12px 0}
+.scenarios{display:flex;flex-wrap:wrap;gap:8px;padding:10px 20px 0}
+.chip{background:var(--surface2);border:1px solid var(--border);color:var(--fg);font-size:12px;padding:6px 12px;border-radius:20px;cursor:pointer;transition:.15s}
+.chip:hover{border-color:var(--accent);color:var(--accent)}
+.input-area{padding:12px 20px 18px;display:flex;gap:10px}
+.input-area textarea{flex:1;background:var(--surface);border:1px solid var(--border);color:var(--fg);padding:11px 13px;border-radius:10px;font-size:14px;resize:none;height:64px;font-family:inherit}
 .input-area textarea:focus{outline:none;border-color:var(--accent)}
-.input-area button{background:var(--accent);color:white;border:none;padding:12px 24px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:500}
+.input-area button{background:var(--accent);color:#fff;border:none;padding:0 22px;border-radius:10px;cursor:pointer;font-size:14px;font-weight:600}
 .input-area button:hover{background:var(--accent-hover)}
-.input-area button:disabled{opacity:0.5;cursor:not-allowed}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+.input-area button:disabled{opacity:.5;cursor:not-allowed}
+.trace-pane{display:flex;flex-direction:column;min-height:0;background:var(--panel)}
+.trace-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;font-size:13px;font-weight:600}
+.trace-head .total{font-size:12px;color:var(--muted);font-weight:600;font-variant-numeric:tabular-nums}
+.trace{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:8px}
+.trace .hint{color:var(--muted);font-size:12px;text-align:center;margin:auto;line-height:1.6;max-width:260px}
+.step{display:flex;gap:10px;background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--muted);border-radius:8px;padding:9px 11px;animation:slidein .2s ease}
+.step.cpu{border-left-color:var(--cpu)}
+.step.llm{border-left-color:var(--llm)}
+.step .ic{font-size:15px;line-height:1.4;flex-shrink:0;width:20px;text-align:center}
+.step .body{flex:1;min-width:0}
+.step .top{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.step .nm{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.step .dur{font-size:12px;font-variant-numeric:tabular-nums;color:var(--muted);flex-shrink:0}
+.step.done.cpu .dur{color:var(--cpu)}
+.step.done.llm .dur{color:var(--llm)}
+.step .dt{font-size:11.5px;color:var(--muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.step .bar{height:3px;border-radius:2px;background:var(--border);margin-top:7px;overflow:hidden}
+.step .bar i{display:block;height:100%;width:0;background:var(--cpu);transition:width .3s}
+.step.llm .bar i{background:var(--llm)}
+.step .spin{width:13px;height:13px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0;align-self:center}
+.step .chk{color:var(--cpu);font-weight:700;flex-shrink:0;align-self:center}
+.step.llm .chk{color:var(--llm)}
+.legend{border-top:1px solid var(--border);padding:10px 16px;display:flex;flex-wrap:wrap;gap:14px;font-size:11px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:5px}
+.legend .sw{width:9px;height:9px;border-radius:2px}
+.gmap{padding:14px 12px 12px;border-bottom:1px solid var(--border);background:var(--panel)}
+.gmap .grow{display:flex;align-items:center;justify-content:center;gap:6px}
+.gnode{font-size:11px;font-weight:600;padding:5px 10px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--muted);white-space:nowrap;transition:border-color .2s,color .2s,background .2s}
+.gnode.cpu.active,.gnode.cpu.done{border-color:var(--cpu);color:var(--cpu);background:var(--cpu-bg)}
+.gnode.llm.active,.gnode.llm.done{border-color:var(--llm);color:var(--llm);background:var(--llm-bg)}
+.gnode.active{animation:gpulse 1.1s infinite}
+.gnode .gchk{margin-left:5px}
+.gconn{width:1px;height:9px;background:var(--border);margin:0 auto}
+.gbranch{font-size:11px;color:var(--muted)}
+.gloop{font-size:10px;color:var(--muted)}
+@keyframes gpulse{0%,100%{opacity:1}50%{opacity:.5}}
 @keyframes spin{to{transform:rotate(360deg)}}
+@keyframes slidein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@media(max-width:860px){.layout{grid-template-columns:1fr}.trace-pane{display:none}}
 </style></head><body>
-<div class="header">
-  <h1>K8s Autoscaling Expert</h1>
-  <div class="actions">
-    <button onclick="toggleTheme()">Light/Dark</button>
-    <button onclick="clearChat()">Clear</button>
+<div class="appbar">
+  <div class="brand">
+    <div class="logo">&#9881;</div>
+    <div><h1>K8s Autoscaling Agent</h1><div class="sub">CPU-first agent &middot; right tool for the right task</div></div>
+  </div>
+  <div class="appbar-right">
+    <div class="tally" title="Queries answered without escalating to the LLM"><span class="dot"></span><span id="tallyText">&mdash; handled on CPU</span></div>
+    <button class="iconbtn" onclick="toggleTheme()">Theme</button>
+    <button class="iconbtn" onclick="clearAll()">Clear</button>
   </div>
 </div>
-<div class="chat" id="chat"></div>
-<div class="input-area">
-  <textarea id="input" placeholder="Paste a K8s config or ask a question..."></textarea>
-  <button id="send" onclick="send()">Send</button>
+<div class="layout">
+  <section class="conv">
+    <div class="chat" id="chat"><div class="empty" id="empty"><h2>Ask the agent</h2><p>Paste a Kubernetes autoscaling config or ask a question. Watch the agent route, use read-only tools, retrieve, answer, and check itself &mdash; live on the right.</p></div></div>
+    <div class="scenarios" id="scenarios"></div>
+    <div class="input-area">
+      <textarea id="input" placeholder="Paste a K8s config or ask a question..."></textarea>
+      <button id="send" onclick="send()">Send</button>
+    </div>
+  </section>
+  <aside class="trace-pane">
+    <div class="trace-head"><span>Agent trace</span><span class="total" id="traceTotal"></span></div>
+    <div class="gmap" id="gmap">
+      <div class="grow"><div class="gnode cpu" id="g-triage">Triage</div></div>
+      <div class="gconn"></div>
+      <div class="grow"><div class="gnode cpu" id="g-plan">Plan</div><span class="gbranch">&rarr;</span><div class="gnode cpu" id="g-tools">Tools &#8635;</div></div>
+      <div class="gconn"></div>
+      <div class="grow"><div class="gnode cpu" id="g-retrieve">Retrieve &middot; Rerank</div></div>
+      <div class="gconn"></div>
+      <div class="grow"><div class="gnode cpu" id="g-generate">Auditor SLM</div><span class="gbranch">&rarr;</span><div class="gnode llm" id="g-llm">LLM</div></div>
+      <div class="gconn"></div>
+      <div class="grow"><div class="gnode cpu" id="g-critic">Critic</div><span class="gloop">&#8635; refine</span></div>
+    </div>
+    <div class="trace" id="trace"><div class="hint">The agent's steps appear here as it works &mdash; each node, its timing, and whether it ran on CPU or the LLM.</div></div>
+    <div class="legend"><span><span class="sw" style="background:var(--cpu)"></span>CPU</span><span><span class="sw" style="background:var(--llm)"></span>LLM</span></div>
+  </aside>
 </div>
 <script>
 const chat = document.getElementById('chat');
+const trace = document.getElementById('trace');
 const input = document.getElementById('input');
 const btn = document.getElementById('send');
+const tallyText = document.getElementById('tallyText');
+const traceTotal = document.getElementById('traceTotal');
 
-function toggleTheme() {
-  const html = document.documentElement;
-  html.dataset.theme = html.dataset.theme === 'dark' ? 'light' : 'dark';
+const NODE = {
+  classify:{ic:'\\uD83E\\uDDED'}, plan:{ic:'\\uD83E\\uDDE9'}, extract:{ic:'\\u2702\\uFE0F'},
+  tool:{ic:'\\uD83D\\uDD27'}, retrieve:{ic:'\\uD83D\\uDD0E'}, generate:{ic:'\\uD83E\\uDDE0'},
+  llm:{ic:'\\u2601\\uFE0F'}, critic:{ic:'\\uD83D\\uDEE1\\uFE0F'}, refine:{ic:'\\u21BB'}, other:{ic:'\\u2022'}
+};
+function nodeType(name){
+  const n = name.toLowerCase();
+  if(n.includes('triage')) return 'classify';
+  if(n.includes('router')||n.includes('planner')||n.includes('plan')) return 'plan';
+  if(n.includes('extractor')||n.includes('extract')) return 'extract';
+  if(n.startsWith('tool')) return 'tool';
+  if(n.includes('retriever')||n.includes('opensearch')||n.includes('reranker')) return 'retrieve';
+  if(n.includes('auditor')) return 'generate';
+  if(n.includes('llm')||n.includes('bedrock')) return 'llm';
+  if(n.includes('critic')) return 'critic';
+  if(n.includes('refine')) return 'refine';
+  return 'other';
+}
+const BAR_SCALE = 3000;
+function fmt(ms){ return ms>=1000 ? (ms/1000).toFixed(2)+'s' : ms+' ms'; }
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function renderMd(t){ try{ return marked.parse(t); }catch(e){ return t; } }
+function toggleTheme(){ const h=document.documentElement; h.dataset.theme = h.dataset.theme==='dark'?'light':'dark'; }
+
+let totalRuns=0, cpuRuns=0;
+function updateTally(){ tallyText.textContent = totalRuns ? (cpuRuns+' / '+totalRuns+' handled on CPU') : '\\u2014 handled on CPU'; }
+
+function addMsg(html, cls){
+  const e=document.getElementById('empty'); if(e) e.remove();
+  const d=document.createElement('div'); d.className='msg '+cls; d.innerHTML=html;
+  chat.appendChild(d); chat.scrollTop=chat.scrollHeight; return d;
 }
 
-function addMsg(html, cls) {
-  const div = document.createElement('div');
-  div.className = 'msg ' + cls;
-  div.innerHTML = html;
-  chat.appendChild(div);
-  chat.scrollTop = chat.scrollHeight;
-  return div;
+let steps={};
+function addStep(name, note){
+  const t = nodeType(name), cpu = t!=='llm';
+  const d=document.createElement('div');
+  d.className='step running '+(cpu?'cpu':'llm');
+  d.innerHTML='<span class="ic">'+(NODE[t]||NODE.other).ic+'</span>'+
+    '<div class="body"><div class="top"><span class="nm">'+esc(name)+'</span><span class="dur"></span></div>'+
+    '<div class="dt">'+esc(note||'working...')+'</div><div class="bar"><i></i></div></div>'+
+    '<span class="spin"></span>';
+  trace.appendChild(d); trace.scrollTop=trace.scrollHeight;
+  steps[name]=d;
+}
+function finishStep(name, ms, detail){
+  const d=steps[name]; if(!d) return;
+  d.classList.remove('running'); d.classList.add('done');
+  const sp=d.querySelector('.spin'); if(sp){ const c=document.createElement('span'); c.className='chk'; c.textContent='\\u2713'; sp.replaceWith(c); }
+  if(detail) d.querySelector('.dt').textContent=detail;
+  d.querySelector('.dur').textContent=fmt(ms);
+  d.querySelector('.bar i').style.width=Math.max(3,Math.min(100,ms/BAR_SCALE*100))+'%';
+}
+function traceNote(text){
+  const d=document.createElement('div'); d.className='step'; d.style.borderLeftColor='var(--accent)';
+  d.innerHTML='<span class="ic">\\u21BB</span><div class="body"><div class="top"><span class="nm">'+esc(text)+'</span></div></div>';
+  trace.appendChild(d); trace.scrollTop=trace.scrollHeight;
 }
 
-function renderMd(text) {
-  try { return marked.parse(text); } catch(e) { return text; }
+const GIDS=['triage','plan','tools','retrieve','generate','llm','critic'];
+const GMAP={classify:'triage',plan:'plan',extract:'tools',tool:'tools',retrieve:'retrieve',generate:'generate',llm:'llm',critic:'critic'};
+function graphEl(name){ const id=GMAP[nodeType(name)]; return id?document.getElementById('g-'+id):null; }
+function gReset(){ GIDS.forEach(id=>{ const el=document.getElementById('g-'+id); if(el){ el.classList.remove('active','done'); const c=el.querySelector('.gchk'); if(c) c.remove(); } }); }
+function gActivate(name){ const el=graphEl(name); if(el){ el.classList.remove('done'); el.classList.add('active'); } }
+function gDone(name){ const el=graphEl(name); if(!el) return; el.classList.remove('active'); el.classList.add('done'); if(!el.querySelector('.gchk')){ const c=document.createElement('span'); c.className='gchk'; c.textContent='\\u2713'; el.appendChild(c); } }
+
+function clearAll(){
+  chat.innerHTML='<div class="empty" id="empty"><h2>Ask the agent</h2><p>Paste a Kubernetes autoscaling config or ask a question.</p></div>';
+  trace.innerHTML='<div class="hint">The agent\\'s steps appear here as it works.</div>';
+  traceTotal.textContent='';
 }
 
-let steps = {};
-function fmt(ms) { return ms >= 1000 ? (ms/1000).toFixed(2) + 's' : ms + ' ms'; }
+const SCENARIOS=[
+  {label:'\\uD83D\\uDD27 Live tool use', text:'Why is NodePool `default` not launching nodes?'},
+  {label:'\\uD83D\\uDCD8 Concept question', text:'Explain how HPA stabilization windows work'},
+  {label:'\\u26A0\\uFE0F Deprecated config', text:'apiVersion: karpenter.sh/v1beta1\\nkind: NodePool\\nmetadata:\\n  name: demo\\nspec:\\n  template:\\n    spec:\\n      requirements:\\n        - key: karpenter.k8s.aws/instance-category\\n          operator: In\\n          values: ["c","m"]'},
+  {label:'\\uD83D\\uDEAB Off-topic', text:'what is the weather like today in Seattle?'}
+];
+const scBar=document.getElementById('scenarios');
+SCENARIOS.forEach(s=>{ const b=document.createElement('button'); b.className='chip'; b.textContent=s.label; b.onclick=()=>{ input.value=s.text; send(); }; scBar.appendChild(b); });
 
-function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+async function send(){
+  const text=input.value.trim(); if(!text) return;
+  input.value=''; btn.disabled=true; steps={};
+  trace.innerHTML=''; traceTotal.textContent=''; gReset();
+  addMsg(esc(text).replace(/\\n/g,'<br>'),'user');
 
-function addStep(name, note) {
-  const div = document.createElement('div');
-  div.className = 'msg step running';
-  div.innerHTML = '<span class="spinner"></span>' +
-    '<span class="step-name">' + escapeHtml(name) + '</span>' +
-    '<span class="step-note">' + escapeHtml(note || '') + '</span>' +
-    '<span class="dur"></span>';
-  chat.appendChild(div);
-  chat.scrollTop = chat.scrollHeight;
-  steps[name] = div;
-}
+  let usedLLM=false;
+  const resp=await fetch('/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+  const reader=resp.body.getReader(); const dec=new TextDecoder();
+  let responseDiv=null, rawText='', buffer='';
 
-function finishStep(name, ms, detail) {
-  const div = steps[name];
-  if (!div) return;
-  div.className = 'msg step done';
-  const spinner = div.querySelector('.spinner');
-  if (spinner) { const c = document.createElement('span'); c.className = 'check'; c.textContent = '\u2713'; spinner.replaceWith(c); }
-  if (detail) div.querySelector('.step-note').textContent = detail;
-  div.querySelector('.dur').textContent = fmt(ms);
-}
-
-function clearChat() { chat.innerHTML = ''; }
-
-async function send() {
-  const text = input.value.trim();
-  if (!text) return;
-  input.value = '';
-  btn.disabled = true;
-  steps = {};
-  addMsg(text.replace(/</g,'&lt;').replace(/\\n/g,'<br>'), 'user');
-
-  const resp = await fetch('/query', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({text})
-  });
-
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let responseDiv = null, rawText = '', buffer = '';
-
-  while (true) {
-    const {done, value} = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, {stream: true});
-    const lines = buffer.split('\\n');
-    buffer = lines.pop();
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const data = line.slice(6);
-      if (data === '[DONE]') {
-        if (responseDiv && rawText) responseDiv.innerHTML = renderMd(rawText);
+  while(true){
+    const {done,value}=await reader.read(); if(done) break;
+    buffer+=dec.decode(value,{stream:true});
+    const lines=buffer.split('\\n'); buffer=lines.pop();
+    for(const line of lines){
+      if(!line.startsWith('data: ')) continue;
+      const data=line.slice(6);
+      if(data==='[DONE]'){
+        if(responseDiv&&rawText) responseDiv.innerHTML=renderMd(rawText);
+        totalRuns++; if(!usedLLM) cpuRuns++; updateTally();
         break;
       }
-      try {
-        const msg = JSON.parse(data);
-        if (msg.type === 'step_start') {
-          addStep(msg.name, msg.note);
-        } else if (msg.type === 'step_done') {
-          finishStep(msg.name, msg.ms, msg.detail);
-        } else if (msg.type === 'total') {
-          addMsg('Total pipeline time: <strong>' + fmt(msg.ms) + '</strong>', 'total');
-        } else if (msg.type === 'model') {
-          const isSlm = msg.name.toLowerCase().includes('slm');
-          addMsg(msg.name, 'model-badge ' + (isSlm ? 'slm' : 'llm'));
-        } else if (msg.type === 'response') {
-          addMsg(renderMd(msg.text), 'system');
-        } else if (msg.type === 'answer_reset') {
-          if (responseDiv && rawText) responseDiv.innerHTML = renderMd(rawText);
-          responseDiv = null; rawText = '';
-          const note = msg.reason === 'escalating'
-            ? 'CPU critic kept failing \u2014 escalating to the LLM.'
-            : 'Draft was weakly grounded \u2014 refining and retrying.';
-          addMsg(note, 'status');
-        } else if (msg.type === 'token') {
-          if (!responseDiv) responseDiv = addMsg('', 'system');
-          rawText += msg.text;
-          responseDiv.innerHTML = renderMd(rawText);
-          chat.scrollTop = chat.scrollHeight;
+      try{
+        const msg=JSON.parse(data);
+        if(msg.type==='step_start'){ addStep(msg.name, msg.note); gActivate(msg.name); }
+        else if(msg.type==='step_done'){ finishStep(msg.name, msg.ms, msg.detail); gDone(msg.name); }
+        else if(msg.type==='total'){ traceTotal.textContent='total '+fmt(msg.ms); }
+        else if(msg.type==='model'){
+          const llm=!msg.name.toLowerCase().includes('slm'); if(llm) usedLLM=true;
+          addMsg('<span class="ic">'+(llm?'\\u2601\\uFE0F':'\\uD83E\\uDDE0')+'</span> '+esc(msg.name),'badge '+(llm?'llm':'cpu'));
         }
-      } catch(e) {}
+        else if(msg.type==='response'){ addMsg(renderMd(msg.text),'system'); }
+        else if(msg.type==='answer_reset'){
+          if(responseDiv&&rawText) responseDiv.innerHTML=renderMd(rawText);
+          responseDiv=null; rawText='';
+          const esc_note = msg.reason==='escalating'
+            ? 'CPU critic kept failing \\u2014 escalating to the LLM.'
+            : 'Draft was weakly grounded \\u2014 refining and retrying.';
+          addMsg(esc_note,'status');
+          traceNote(msg.reason==='escalating'?'escalating to LLM':'refining & retrying');
+        }
+        else if(msg.type==='token'){
+          if(!responseDiv) responseDiv=addMsg('','system');
+          rawText+=msg.text; responseDiv.innerHTML=renderMd(rawText); chat.scrollTop=chat.scrollHeight;
+        }
+      }catch(e){}
     }
   }
-  btn.disabled = false;
-  input.focus();
+  btn.disabled=false; input.focus();
 }
-
-input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }});
+input.addEventListener('keydown', e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); }});
+updateTally();
 </script></body></html>"""
 
 
