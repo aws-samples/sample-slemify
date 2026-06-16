@@ -1,0 +1,50 @@
+apiVersion: slemify/v1
+
+project:
+  name: k8s-autoscaling-arg-extractor
+  task: extraction
+  domain: >
+    Extract the resource identifiers an agent needs to call read-only Kubernetes
+    tools, from a free-form Kubernetes autoscaling question. Messages are noisy
+    Slack-style queries that name a cluster object and often describe a symptom
+    ("why is NodePool default not launching nodes?", "the web-app HPA in the
+    payments namespace isn't scaling up"). Pull out three entity types:
+      - RESOURCE_KIND: the Kubernetes resource type being asked about. Examples:
+        NodePool, EC2NodeClass, HPA, HorizontalPodAutoscaler, ScaledObject,
+        PodDisruptionBudget, PDB, Deployment, Pod, Node. Surface forms vary in
+        case and abbreviation.
+      - RESOURCE_NAME: the specific object name (an RFC 1123 identifier such as
+        default, web-app, ray-head-pool), often quoted, backticked, or following
+        the kind word.
+      - NAMESPACE: the Kubernetes namespace the object lives in, when stated
+        (e.g. "in the payments namespace", "-n kube-system").
+    A query may contain none, some, or all of these. RESOURCE_NAME is the hard,
+    open-vocabulary case where a trained tagger beats hand-written regex.
+  labels:
+    entities:
+      - RESOURCE_KIND
+      - RESOURCE_NAME
+      - NAMESPACE
+
+# task=extraction (v1) trains a feature-based token tagger on CPU and serves it
+# with no encoder, so model.base and model.head are intentionally omitted.
+model: {}
+
+data:
+  bucket: slemify-data
+  path: k8s-autoscaling/data/
+  sources:
+    - path: queries/
+      type: raw
+  synthetic:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 1000
+  evaluation:
+    model: eu.anthropic.claude-sonnet-4-6
+    pairs: 150
+    sources:
+      - path: eval-queries/
+        type: raw
+
+training:
+  spot: true

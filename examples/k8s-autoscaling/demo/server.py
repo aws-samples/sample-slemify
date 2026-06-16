@@ -54,6 +54,10 @@ RERANKER_URL = os.environ.get("RERANKER_URL", "http://localhost:8084")
 # read-only tool the agent should use; replaces the heuristic planner stub. The
 # heuristic remains a fallback if this service is unreachable.
 TOOL_ROUTER_URL = os.environ.get("TOOL_ROUTER_URL", "http://localhost:8086")
+# In-cluster trained CPU arg-extractor (task: extraction). Pulls the resource
+# identifiers (kind/name/namespace) the read-only tools need from the query;
+# replaces the heuristic extractor stub. Heuristic remains a fallback.
+ARG_EXTRACTOR_URL = os.environ.get("ARG_EXTRACTOR_URL", "http://localhost:8087")
 INDEX_NAME = os.environ.get("INDEX_NAME", "k8s-autoscaling-knowledge")
 # Candidates pulled from vector search before re-ranking. The cross-encoder
 # reranker scores every candidate on CPU, so this count is the main lever on
@@ -449,8 +453,8 @@ def route_tools(query: str) -> dict:
         if label == "inspect_resource":
             if not _k8s_available:
                 tools, suffix = [], " — cluster tools disabled"
-            elif not (_resource_ref(query) and _extract_name(query)):
-                tools, suffix = [], " — no resource target, using docs"
+            elif not _resource_ref(query):
+                tools, suffix = [], " — no resource kind mentioned, using docs"
             else:
                 suffix = " → " + ", ".join(tools)
         elif tools:
@@ -477,6 +481,43 @@ def _extract_args(query: str, tool: str) -> dict:
         "name": _extract_name(query),
         "namespace": _extract_namespace(query),
     }
+
+
+def extract_k8s_args(query: str) -> dict:
+    """Extract resource identifiers via the trained CPU tagger; heuristic fallback.
+
+    Returns the structured args the read-only tools consume. The tagger gives
+    surface spans (RESOURCE_KIND/RESOURCE_NAME/NAMESPACE); the kind text is
+    mapped to its API metadata via RESOURCE_KEYWORDS, and name/namespace are
+    validated against the k8s name regex before use.
+    """
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.post(f"{ARG_EXTRACTOR_URL}/extract", json={"input": query})
+            resp.raise_for_status()
+            spans = resp.json().get("spans", [])
+        kind_text = name = namespace = None
+        for s in spans:
+            stype, text = s.get("type"), (s.get("text") or "").strip()
+            if stype == "RESOURCE_KIND" and not kind_text:
+                kind_text = text
+            elif stype == "RESOURCE_NAME" and not name:
+                name = text
+            elif stype == "NAMESPACE" and not namespace:
+                namespace = text
+        # Map the extracted kind surface form to API metadata; fall back to a
+        # keyword scan of the whole query if the span doesn't resolve.
+        ref = _resource_ref(kind_text or "") or _resource_ref(query) or {}
+        return {
+            "api_version": ref.get("api_version"),
+            "kind": ref.get("kind"),
+            "namespaced": ref.get("namespaced", True),
+            "name": name if (name and _valid_k8s_name(name)) else None,
+            "namespace": namespace if (namespace and _valid_k8s_name(namespace)) else None,
+        }
+    except Exception as e:
+        print(f"  Arg-extractor unavailable, using heuristic: {e}")
+        return _extract_args(query, "describe_resource")
 
 
 def _args_summary(tool: str, args: dict) -> str:
@@ -598,6 +639,13 @@ async def warmup():
         print("  Warmup reranker: ok")
     except Exception as e:
         print(f"  Warmup reranker: failed ({e})")
+
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, extract_k8s_args, "warmup NodePool default")
+        print("  Warmup arg-extractor: ok")
+    except Exception as e:
+        print(f"  Warmup arg-extractor: failed ({e})")
 
     print("  All services warmed up")
     _ready = True
@@ -797,9 +845,16 @@ async def n_extract_args(state: AgentState) -> dict:
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
     tool = state["pending_tools"][0]
-    writer({"type": "step_start", "name": "Arg extractor (CPU)", "note": f"args for {tool}"})
+    if tool == "validate_config":
+        return {"resource": {"yaml": state["query"]}}
+    # describe_resource and list_events share the same extracted resource — only
+    # call the tagger once per query, then reuse it across the tool loop.
+    cached = state.get("resource")
+    if cached and cached.get("kind"):
+        return {}
+    writer({"type": "step_start", "name": "Arg extractor (CPU)", "note": "extracting resource identifiers"})
     t = time.perf_counter()
-    args = await loop.run_in_executor(None, _extract_args, state["query"], tool)
+    args = await loop.run_in_executor(None, extract_k8s_args, state["query"])
     writer({"type": "step_done", "name": "Arg extractor (CPU)", "ms": _ms(t),
             "detail": _args_summary(tool, args)})
     return {"resource": args}
