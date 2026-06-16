@@ -1,10 +1,13 @@
-"""Multi-agent orchestrator with RAG and LLM fallback.
+"""Multi-agent orchestrator with RAG and LLM fallback (LangGraph).
 
-Routes queries through: Triage SLM -> OpenSearch RAG -> Auditor SLM (or LLM API).
-Streams responses via SSE to a chat UI.
+The control flow is a LangGraph state graph: triage -> (reject | retrieve ->
+rerank -> generate), with the Auditor SLM by default and a Bedrock LLM fallback
+on low triage confidence. Each node streams its progress (per-stage timing and
+tokens) to the chat UI via LangGraph's custom stream writer, so the SSE contract
+the UI consumes is unchanged.
 
 Usage:
-  pip install fastapi uvicorn httpx opensearch-py boto3
+  pip install fastapi uvicorn httpx opensearch-py boto3 langgraph
   python3 server.py
 """
 
@@ -12,11 +15,14 @@ import asyncio
 import json
 import os
 import time
+from typing import TypedDict
 
 import boto3
 import httpx
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
+from langgraph.config import get_stream_writer
+from langgraph.graph import END, START, StateGraph
 from opensearchpy import OpenSearch
 from pydantic import BaseModel
 
@@ -305,85 +311,141 @@ async def stream_llm(text: str, context: str = ""):
             yield delta["text"]
 
 
+# --- Agent graph (LangGraph) ---
+#
+# The orchestration is a state graph. Each node runs a CPU SLM (or Bedrock for
+# the fallback) and streams its progress via LangGraph's custom stream writer —
+# the same SSE event vocabulary the UI already consumes (step_start/step_done/
+# model/token/response). Blocking backend calls run in a thread so the event
+# loop stays free to flush events live.
+
+
+class AgentState(TypedDict, total=False):
+    query: str
+    category: str
+    confidence: str
+    embedding: list
+    candidates: list
+    docs: list
+
+
+def _ms(t0: float) -> int:
+    return round((time.perf_counter() - t0) * 1000)
+
+
+async def n_triage(state: AgentState) -> dict:
+    writer = get_stream_writer()
+    loop = asyncio.get_event_loop()
+    writer({"type": "step_start", "name": "Triage SLM (4B, CPU)", "note": "classifying intent"})
+    t = time.perf_counter()
+    result = await loop.run_in_executor(None, classify, state["query"])
+    writer({"type": "step_done", "name": "Triage SLM (4B, CPU)", "ms": _ms(t),
+            "detail": f"{result['category'].replace('_', ' ')} · {result['confidence']} confidence"})
+    return {"category": result["category"], "confidence": result["confidence"]}
+
+
+async def n_reject(state: AgentState) -> dict:
+    get_stream_writer()({"type": "response",
+                         "text": "This does not look like a K8s autoscaling question."})
+    return {}
+
+
+async def n_embed(state: AgentState) -> dict:
+    writer = get_stream_writer()
+    loop = asyncio.get_event_loop()
+    writer({"type": "step_start", "name": "Retriever (tuned encoder, CPU)", "note": "embedding query → 768d"})
+    t = time.perf_counter()
+    embedding = await loop.run_in_executor(None, embed_query, state["query"])
+    writer({"type": "step_done", "name": "Retriever (tuned encoder, CPU)", "ms": _ms(t),
+            "detail": "domain-tuned ONNX encoder"})
+    return {"embedding": embedding}
+
+
+async def n_search(state: AgentState) -> dict:
+    writer = get_stream_writer()
+    loop = asyncio.get_event_loop()
+    writer({"type": "step_start", "name": "OpenSearch (vector DB)", "note": f"k-NN search, top {RETRIEVE_CANDIDATES}"})
+    t = time.perf_counter()
+    candidates = await loop.run_in_executor(None, vector_search, state["embedding"], RETRIEVE_CANDIDATES)
+    writer({"type": "step_done", "name": "OpenSearch (vector DB)", "ms": _ms(t),
+            "detail": f"{len(candidates)} candidate chunks"})
+    return {"candidates": candidates}
+
+
+async def n_rerank(state: AgentState) -> dict:
+    writer = get_stream_writer()
+    loop = asyncio.get_event_loop()
+    keep_k = 5 if state["confidence"] in ("low", "unknown") else 2
+    candidates = state["candidates"]
+    writer({"type": "step_start", "name": "Reranker (cross-encoder, CPU)",
+            "note": f"scoring {len(candidates)} pairs → top {keep_k}"})
+    t = time.perf_counter()
+    docs = await loop.run_in_executor(None, rerank_docs, state["query"], candidates, keep_k)
+    writer({"type": "step_done", "name": "Reranker (cross-encoder, CPU)", "ms": _ms(t),
+            "detail": f"kept top {len(docs)}"})
+    return {"docs": docs}
+
+
+async def n_generate(state: AgentState) -> dict:
+    writer = get_stream_writer()
+    low_conf = state["confidence"] in ("low", "unknown")
+    context = "\n\n---\n\n".join(state.get("docs", []))
+    if low_conf:
+        gen_name, stream_fn = "LLM API (Bedrock fallback)", stream_llm
+        writer({"type": "model", "name": "Claude Sonnet 4.5 (Bedrock)"})
+    else:
+        gen_name, stream_fn = "Auditor SLM (8B, CPU)", stream_slm
+        writer({"type": "model", "name": "Auditor SLM (8B, CPU)"})
+
+    writer({"type": "step_start", "name": gen_name, "note": "generating answer"})
+    t = time.perf_counter()
+    first = True
+    async for token in stream_fn(state["query"], context):
+        if first:
+            writer({"type": "step_done", "name": gen_name, "ms": _ms(t), "detail": "time to first token"})
+            first = False
+        writer({"type": "token", "text": token})
+    if first:
+        writer({"type": "step_done", "name": gen_name, "ms": _ms(t), "detail": "no output"})
+    return {}
+
+
+def _route_after_triage(state: AgentState) -> str:
+    return "reject" if state["category"] == "noise" else "embed"
+
+
+def _build_agent():
+    g = StateGraph(AgentState)
+    g.add_node("triage", n_triage)
+    g.add_node("reject", n_reject)
+    g.add_node("embed", n_embed)
+    g.add_node("search", n_search)
+    g.add_node("rerank", n_rerank)
+    g.add_node("generate", n_generate)
+    g.add_edge(START, "triage")
+    g.add_conditional_edges("triage", _route_after_triage, {"reject": "reject", "embed": "embed"})
+    g.add_edge("reject", END)
+    g.add_edge("embed", "search")
+    g.add_edge("search", "rerank")
+    g.add_edge("rerank", "generate")
+    g.add_edge("generate", END)
+    return g.compile()
+
+
+agent = _build_agent()
+
+
 # --- Route handler ---
 
 @app.post("/query")
 async def query_endpoint(q: Query):
     async def event_stream():
-        loop = asyncio.get_event_loop()
         t_start = time.perf_counter()
-
-        def elapsed_ms(t0: float) -> int:
-            return round((time.perf_counter() - t0) * 1000)
-
-        # --- Step 1: Triage SLM ---
-        yield sse("step_start", name="Triage SLM (4B, CPU)", note="classifying intent")
-        t = time.perf_counter()
-        result = await loop.run_in_executor(None, classify, q.text)
-        yield sse(
-            "step_done", name="Triage SLM (4B, CPU)", ms=elapsed_ms(t),
-            detail=f"{result['category'].replace('_', ' ')} · {result['confidence']} confidence",
-        )
-
-        # Route noise (no retrieval, no generation)
-        if result["category"] == "noise":
-            yield sse("response", text="This does not look like a K8s autoscaling question.")
-            yield sse("total", ms=elapsed_ms(t_start))
-            yield "data: [DONE]\n\n"
-            return
-
-        low_conf = result["confidence"] in ("low", "unknown")
-        keep_k = 5 if low_conf else 2
-
-        # --- Step 2: Embed query (Slemify-tuned retriever) ---
-        yield sse("step_start", name="Retriever (tuned encoder, CPU)", note="embedding query → 768d")
-        t = time.perf_counter()
-        embedding = await loop.run_in_executor(None, embed_query, q.text)
-        yield sse("step_done", name="Retriever (tuned encoder, CPU)", ms=elapsed_ms(t),
-                  detail="domain-tuned ONNX encoder")
-
-        # --- Step 3: Vector search (OpenSearch k-NN) ---
-        yield sse("step_start", name="OpenSearch (vector DB)", note=f"k-NN search, top {RETRIEVE_CANDIDATES}")
-        t = time.perf_counter()
-        candidates = await loop.run_in_executor(None, vector_search, embedding, RETRIEVE_CANDIDATES)
-        yield sse("step_done", name="OpenSearch (vector DB)", ms=elapsed_ms(t),
-                  detail=f"{len(candidates)} candidate chunks")
-
-        # --- Step 4: Rerank (cross-encoder) ---
-        yield sse("step_start", name="Reranker (cross-encoder, CPU)",
-                  note=f"scoring {len(candidates)} pairs → top {keep_k}")
-        t = time.perf_counter()
-        docs = await loop.run_in_executor(None, rerank_docs, q.text, candidates, keep_k)
-        yield sse("step_done", name="Reranker (cross-encoder, CPU)", ms=elapsed_ms(t),
-                  detail=f"kept top {len(docs)}")
-
-        context = "\n\n---\n\n".join(docs)
-
-        # --- Step 5: Generation (Auditor SLM, or LLM fallback on low confidence) ---
-        if low_conf:
-            gen_name = "LLM API (Bedrock fallback)"
-            stream_fn = stream_llm
-            yield sse("model", name="Claude Sonnet 4.5 (Bedrock)")
-        else:
-            gen_name = "Auditor SLM (8B, CPU)"
-            stream_fn = stream_slm
-            yield sse("model", name="Auditor SLM (8B, CPU)")
-
-        yield sse("step_start", name=gen_name, note="generating answer")
-        t = time.perf_counter()
-        first = True
-        async for token in stream_fn(q.text, context):
-            if first:
-                # Report time-to-first-token: the latency the user actually
-                # waits before the answer starts streaming.
-                yield sse("step_done", name=gen_name, ms=elapsed_ms(t),
-                          detail="time to first token")
-                first = False
-            yield sse("token", text=token)
-        if first:
-            yield sse("step_done", name=gen_name, ms=elapsed_ms(t), detail="no output")
-
-        yield sse("total", ms=elapsed_ms(t_start))
+        # stream_mode="custom" yields exactly the dicts each node writes, so the
+        # UI's SSE contract is preserved without LangChain message plumbing.
+        async for event in agent.astream({"query": q.text}, stream_mode="custom"):
+            yield f"data: {json.dumps(event)}\n\n"
+        yield sse("total", ms=round((time.perf_counter() - t_start) * 1000))
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

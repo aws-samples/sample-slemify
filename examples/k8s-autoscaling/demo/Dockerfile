@@ -7,7 +7,8 @@ RUN pip install --no-cache-dir \
     uvicorn==0.34.2 \
     httpx==0.28.1 \
     opensearch-py==2.8.0 \
-    boto3==1.38.12
+    boto3==1.38.12 \
+    langgraph==1.2.5
 
 COPY server.py .
 
