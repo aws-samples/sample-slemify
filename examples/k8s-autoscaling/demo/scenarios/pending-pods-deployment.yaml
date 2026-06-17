@@ -1,0 +1,52 @@
+# Demo scenario: a Deployment whose pods are stuck Pending because of a
+# nodeSelector that no node in the cluster satisfies (and no NodePool can
+# provide). The fix the agent applies is to remove that impossible key so the
+# pods can schedule.
+#
+# Applying this manifest RESETS the scenario to its broken state — it puts the
+# impossible nodeSelector back. Pair it with a delete first (see reset-demo.sh)
+# so all replicas come back freshly Pending rather than a rolling mix.
+#
+# NOTE: fixing this one has a real cost — once the pods schedule, Karpenter may
+# launch a node. Reset (or delete) it after demoing so the node consolidates away.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-api
+  namespace: slemify
+  labels:
+    demo.slemify.io/scenario: unschedulable
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: payments-api
+  template:
+    metadata:
+      labels:
+        app: payments-api
+    spec:
+      # The misconfiguration: a node label that no node has and no NodePool can
+      # provide, so pods stay Pending with a clear FailedScheduling event.
+      nodeSelector:
+        demo.slemify.io/zone: imaginary-zone
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:3.9@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

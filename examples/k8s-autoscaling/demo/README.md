@@ -418,6 +418,22 @@ With autopilot **off** you get the proposed fix plus the *Apply this fix* button
 and manual command; with autopilot **on** the agent patches out the bad
 `nodeSelector` key and re-reads the Deployment to confirm the pods can schedule.
 
+### Resetting the scenarios
+
+Once the agent fixes a problem the resource is healthy, so re-break it before
+the next run. The scenario manifests live in `scenarios/` and a helper script
+resets both:
+
+```bash
+./scripts/reset-demo.sh          # re-break both scenarios (also the initial setup)
+./scripts/reset-demo.sh --clean  # remove the demo resources entirely
+```
+
+Reset re-applies the on-demand-only NodePool (dropping any `spot` the agent
+added) and recreates the `payments-api` Deployment so all replicas come back
+freshly Pending. Run `--clean` when you're done so the pending-pods node
+consolidates away.
+
 ## Setup (one-time)
 
 ```bash
