@@ -1040,11 +1040,14 @@ async def n_triage(state: AgentState) -> dict:
     writer({"type": "step_start", "name": "Triage classifier \u00b7 ONNX Runtime (CPU)", "note": "classifying intent"})
     t = time.perf_counter()
     result = await loop.run_in_executor(None, classify, state["query"])
-    # Show the routing decision, not the raw confidence band: confidence no longer
-    # gates routing (it only widens retrieval), so surfacing "low confidence" reads
-    # as uncertainty when the category is what actually drives the agent.
-    detail = ("off-topic \u2192 reject" if result["category"] == "noise"
-              else f"{result['category'].replace('_', ' ')} \u2192 in-domain")
+    # Surface the full triage verdict: category, the classifier's confidence
+    # band, and the routing decision. Confidence doesn't gate routing (it only
+    # widens retrieval), but showing it makes the triage step's certainty
+    # visible now that the classifier is well-calibrated on the domain.
+    cat_label = result["category"].replace("_", " ")
+    detail = (f"off-topic \u00b7 {result['confidence']} confidence \u2192 reject"
+              if result["category"] == "noise"
+              else f"{cat_label} \u00b7 {result['confidence']} confidence \u2192 in-domain")
     writer({"type": "step_done", "name": "Triage classifier \u00b7 ONNX Runtime (CPU)", "ms": _ms(t),
             "detail": detail})
     return {"category": result["category"], "confidence": result["confidence"]}
