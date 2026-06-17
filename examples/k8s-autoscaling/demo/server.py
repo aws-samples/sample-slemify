@@ -1043,7 +1043,14 @@ async def n_rerank(state: AgentState) -> dict:
 
 async def n_generate(state: AgentState) -> dict:
     writer = get_stream_writer()
-    low_conf = state["confidence"] in ("low", "unknown")
+    # Route to the SLM whenever triage assigned a valid in-domain category, at
+    # any confidence level: an autoscaling question is exactly what the auditor
+    # SLM (+ RAG + tools) is the right tool for. Confidence reflects how the
+    # query is phrased, not whether we can answer it. The critic/groundedness
+    # loop is the real quality gate and escalates to the LLM only if the SLM
+    # answer comes back ungrounded. Reserve the upfront LLM for queries triage
+    # could not classify into the domain at all.
+    unclassified = state.get("category", "unknown") in (None, "unknown")
     context = _build_context(state)
     correction = state.get("correction")
     if correction:
@@ -1056,7 +1063,7 @@ async def n_generate(state: AgentState) -> dict:
         # UI to start a fresh answer block so drafts don't concatenate.
         writer({"type": "answer_reset", "reason": "refining"})
 
-    if low_conf:
+    if unclassified:
         gen_name, stream_fn, used_llm = "LLM API (Bedrock fallback)", stream_llm, True
         writer({"type": "model", "name": "Claude Sonnet 4.5 (Bedrock)"})
     else:
