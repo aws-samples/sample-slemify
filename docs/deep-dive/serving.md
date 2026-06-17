@@ -512,11 +512,17 @@ flowchart LR
     ORCH <-->|"k-NN search"| OS
     ORCH <-->|"rerank"| RERANK
     ORCH <-->|"generate · stream"| AUD
-    ORCH <-->|"Converse API"| BR["LLM fallback<br/>(managed, off-cluster)"]
+    ORCH <-->|"Converse API · LLM fallback"| BR["LLM fallback<br/>(managed, off-cluster)"]
 
-    ORCH ==>|"read-only get/list/watch<br/><b>+ gated patch</b>"| API["Kubernetes<br/>API server"]
-    API --> NP["NodePool / Deployment<br/>(bounded, whitelisted patches)"]
-    NP -.->|provisions| KARP["Karpenter → nodes"]
+    subgraph WP["cluster control plane · what the agent patches"]
+        API["Kubernetes<br/>API server"]
+        NP["NodePool / Deployment<br/>(bounded, whitelisted patches)"]
+        KARP["Karpenter → nodes"]
+    end
+
+    ORCH ==>|"read-only get/list/watch<br/><b>+ gated patch</b>"| API
+    API --> NP
+    NP -.->|provisions| KARP
 
     style ORCH stroke:#1f6feb,stroke-width:3px
     style API stroke:#d29922,stroke-width:2px

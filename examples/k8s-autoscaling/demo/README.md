@@ -92,18 +92,25 @@ flowchart LR
         OS[("opensearch<br/>vector DB · StatefulSet")]
     end
 
-    ORCH -.->|"re-plans · refines · retries<br/>(calls repeat per query)"| ORCH
+    ORCH -.->|"re-plans · refines · retries"| ORCH
     ORCH <-->|"classify"| TRIAGE
     ORCH <-->|"embed"| RETR
     ORCH <-->|"k-NN search"| OS
     ORCH <-->|"rerank"| RERANK
     ORCH <-->|"generate · stream"| AUD
-    ORCH <-->|"Converse API"| BR["Amazon Bedrock<br/>LLM fallback<br/>(managed, off-cluster)"]
+    ORCH <-->|"Converse API · LLM fallback"| BR["Amazon Bedrock<br/>(managed, off-cluster)"]
 
-    ORCH ==>|"read-only get/list/watch<br/><b>+ gated patch</b>"| API["Kubernetes<br/>API server"]
-    API --> NP["NodePool<br/>(add 'spot')"]
-    API --> DEP["Deployment<br/>(drop bad nodeSelector)"]
-    NP -.->|provisions| KARP["Karpenter<br/>→ nodes"]
+    subgraph WP["cluster control plane · what the agent patches"]
+        API["Kubernetes<br/>API server"]
+        NP["NodePool<br/>(add 'spot')"]
+        DEP["Deployment<br/>(drop bad nodeSelector)"]
+        KARP["Karpenter<br/>→ nodes"]
+    end
+
+    ORCH ==>|"read-only get/list/watch<br/><b>+ gated patch</b>"| API
+    API --> NP
+    API --> DEP
+    NP -.->|provisions| KARP
 
     style ORCH stroke:#1f6feb,stroke-width:3px
     style API stroke:#d29922,stroke-width:2px
