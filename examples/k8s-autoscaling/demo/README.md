@@ -19,7 +19,7 @@ its latency live.
 
 ```mermaid
 flowchart TD
-    U[User query] --> T["Triage SLM · CPU classify<br/>intent + confidence"]
+    U[User query] --> T["Triage · CPU classifier<br/>(ONNX) · intent + confidence"]
     T -->|noise| RJ[Reject]
     T -->|else| P{"Plan<br/>decide tool use"}
     P -->|names a live resource| TL["Read-only tools · CPU<br/>describe_resource · list_events"]
@@ -52,8 +52,8 @@ well grounded. Both decision points run on CPU.
 |-----------|---------|----------|------|-----------------|
 | Chat UI | Static web app | Any | Live step log + markdown answers | — |
 | Orchestrator | Python FastAPI + LangGraph | CPU pod | The agent graph: triage → plan/tools → retrieve → generate → critic | No — plain code |
-| Triage SLM | llama.cpp | c8g (Graviton4 CPU) | Intent classification + confidence, ~1.5s | Yes (classification head) |
-| Read-only tools | Kubernetes Python client | in orchestrator | `describe_resource`, `list_events`, `validate_config` — gather live evidence | No — code |
+| Triage classifier | Slemify classifier-serving (ONNX) | c8g (Graviton4 CPU) | Intent classification + confidence | Yes (classification head) |
+| Read-only tools | Kubernetes Python client | in orchestrator | `describe_resource`, `list_events`, `investigate_cluster`, `validate_config` — gather live evidence | No — code |
 | Retriever | Slemify retriever (`task: embedding`), ONNX | c8g (Graviton4 CPU) | Domain-tuned query/doc embeddings, 768d | **Yes** (fine-tuned encoder) |
 | Reranker | sentence-transformers cross-encoder | c8g (Graviton4 CPU) | Re-ranks candidates to the best few | No — stock |
 | OpenSearch | OpenSearch k-NN | CPU pod | Vector search over 3900+ doc chunks | — |
@@ -65,6 +65,52 @@ Routing (which tool to use), argument extraction (the resource name), and the
 critic are deliberately **plain code, not models** — they are control-loop glue,
 and a few rules do the job. See "Right tool for the right task" below.
 
+## Pods & How They Interact
+
+Every model runs in its own pod; the orchestrator holds no model and is a thin
+coordinator that calls each one over HTTP. The two ONNX models (triage and
+retriever) run the **same** `classifier-serving` image as separate Deployments,
+differentiated by `PROJECT`/`TASK`. All five demo pods land on CPU (Graviton4)
+nodes; OpenSearch runs as a StatefulSet.
+
+The key thing to notice: **only the orchestrator talks to the Kubernetes API.**
+It is the one component with cluster credentials — it runs the read-only tools
+(`get`/`list`/`watch`) and, when apply is enabled, the gated writes (`patch` a
+NodePool or Deployment). The model pods only serve inference and never touch the
+API; the reranker even runs with `automountServiceAccountToken: false`.
+
+```mermaid
+flowchart LR
+    UI["Chat UI<br/>(browser)"] -->|"HTTP /query · SSE"| ORCH
+
+    subgraph NS["slemify namespace · CPU (Graviton4) pods"]
+        ORCH["<b>orchestrator</b> pod<br/>LangGraph agent + tools<br/>(no model loaded)"]
+        TRIAGE["triage-inference pod<br/>classifier-serving · ONNX"]
+        RETR["retriever-inference pod<br/>classifier-serving · ONNX embed"]
+        RERANK["reranker pod<br/>cross-encoder · torch"]
+        AUD["auditor-inference pod<br/>llama.cpp · GGUF 8B"]
+        OS[("opensearch<br/>vector DB · StatefulSet")]
+    end
+
+    ORCH -->|"/v1/chat/completions"| TRIAGE
+    ORCH -->|"/embed"| RETR
+    ORCH -->|"k-NN search"| OS
+    ORCH -->|"/rerank"| RERANK
+    ORCH -->|"/v1/chat/completions · stream"| AUD
+    ORCH -->|"Converse API"| BR["Amazon Bedrock<br/>LLM fallback<br/>(managed, off-cluster)"]
+
+    ORCH ==>|"read-only get/list/watch<br/><b>+ gated patch</b>"| API["Kubernetes<br/>API server"]
+    API --> NP["NodePool<br/>(add 'spot')"]
+    API --> DEP["Deployment<br/>(drop bad nodeSelector)"]
+    NP -.->|provisions| KARP["Karpenter<br/>→ nodes"]
+
+    style ORCH stroke:#1f6feb,stroke-width:3px
+    style API stroke:#d29922,stroke-width:2px
+```
+
+The thick edge from the orchestrator to the API server is the only write path in
+the system, and it stays bounded: gated by `ALLOW_APPLY`, the opt-in write RBAC,
+and the whitelisted, dry-run-first remediations described under "Remediation".
 
 ## Read-Only Tools (gathering live evidence)
 
