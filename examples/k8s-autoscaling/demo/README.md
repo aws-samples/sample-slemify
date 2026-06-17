@@ -134,8 +134,10 @@ steps and the confirmed result.
   the agent physically cannot mutate the cluster — the default RBAC is
   read-only `get`/`list`/`watch`.
 - **Whitelisted, structured patches only.** The agent never executes free-form
-  changes. Each remediation is a coded `(apply, verify)` pair (currently: add
-  `spot` to one NodePool's capacity-type) that edits a single field.
+  changes. Each remediation is a coded `(apply, verify)` pair that edits a single
+  field. Two are wired up today: add `spot` to one NodePool's capacity-type, and
+  remove an impossible `nodeSelector` key (one no node satisfies) from a named
+  Deployment so its pods can schedule.
 - **Bounded blast radius.** A remediation is only offered for a resource the
   user **explicitly named** and that genuinely has the problem — never a blanket
   change across the cluster. Intentionally on-demand NodePools are left alone
@@ -402,12 +404,19 @@ With autopilot **off** you get a proposed fix plus an *Apply this fix* button an
 the manual command; with autopilot **on** the agent patches the NodePool's
 capacity-type and re-reads it to confirm Spot is now allowed.
 
-**Pending pods — diagnose and advise** (no auto-apply by design — fixing it would
-schedule real workloads):
+**Pending pods — a structured fix the agent can apply** (names the Deployment, so
+the fix is bounded to it; the agent removes the impossible `nodeSelector` key no
+node satisfies). Note this one has a real side effect: once the pods can
+schedule, Karpenter may launch a node, so it costs money in a way the Spot fix
+does not.
 
 ```
-All pods for the payments-api Deployment in namespace `slemify` are stuck in Pending. Why, and how do I fix it?
+All pods for the `payments-api` Deployment in namespace `slemify` are stuck in Pending. Why, and how do I fix it?
 ```
+
+With autopilot **off** you get the proposed fix plus the *Apply this fix* button
+and manual command; with autopilot **on** the agent patches out the bad
+`nodeSelector` key and re-reads the Deployment to confirm the pods can schedule.
 
 ## Setup (one-time)
 

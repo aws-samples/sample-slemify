@@ -547,36 +547,130 @@ def verify_nodepool_spot(name: str) -> dict:
     return {"ok": False, "message": f"Verification failed: capacity-type is {caps}."}
 
 
+def _all_node_label_keys() -> set:
+    """Every label key present on at least one node — the set a nodeSelector
+    key must be in to have any chance of being satisfied."""
+    keys = set()
+    for n in k8s_client.CoreV1Api().list_node().items:
+        keys |= set((n.metadata.labels or {}).keys())
+    return keys
+
+
+def _deployment_nodeselector(dep: dict) -> dict:
+    # to_dict() snake-cases keys: nodeSelector -> node_selector.
+    return (((dep.get("spec") or {}).get("template") or {}).get("spec") or {}).get("node_selector") or {}
+
+
+def _unschedulable_nodeselector_keys(dep: dict, node_keys: set) -> list:
+    """nodeSelector keys on the Deployment that NO node carries — an impossible
+    constraint (typo'd label, a zone/pool that doesn't exist) that pins pods to
+    Pending. Keys that exist on some node (even with another value) are left
+    alone, since Karpenter may still provision a matching node."""
+    return sorted(k for k in _deployment_nodeselector(dep) if k not in node_keys)
+
+
+def fix_unschedulable_nodeselector(target: str) -> dict:
+    """Remove the impossible nodeSelector key(s) from a Deployment so its pods
+    can schedule. target is 'namespace/name'. Deterministic: drops only keys no
+    node satisfies, dry-runs first, then re-reads to verify."""
+    if not ALLOW_APPLY:
+        return {"ok": False, "message": "Apply is disabled (set ALLOW_APPLY=true and grant write RBAC)."}
+    ns, _, name = target.partition("/")
+    if not (_valid_k8s_name(ns) and _valid_k8s_name(name)):
+        return {"ok": False, "message": "Invalid Deployment target."}
+    apps = k8s_client.AppsV1Api()
+    try:
+        dep = apps.read_namespaced_deployment(name, ns).to_dict()
+    except Exception as e:
+        return {"ok": False, "message": f"Could not fetch Deployment {ns}/{name}: {e}"}
+    if not _deployment_nodeselector(dep):
+        return {"ok": False, "message": f"Deployment {ns}/{name} has no nodeSelector to amend."}
+    try:
+        bad = _unschedulable_nodeselector_keys(dep, _all_node_label_keys())
+    except Exception as e:
+        return {"ok": False, "message": f"Could not list nodes: {e}"}
+    if not bad:
+        return {"ok": True, "message": f"Deployment {ns}/{name} nodeSelector is satisfiable; no change needed."}
+    # null value deletes a key under both strategic-merge and JSON-merge patch,
+    # so we drop ONLY the impossible keys and leave any valid ones intact.
+    patch = {"spec": {"template": {"spec": {"nodeSelector": {k: None for k in bad}}}}}
+    try:
+        apps.patch_namespaced_deployment(name, ns, body=patch, dry_run="All")
+        apps.patch_namespaced_deployment(name, ns, body=patch)
+    except Exception as e:
+        return {"ok": False, "message": f"Apply failed (dry-run or apply): {e}"}
+    return {"ok": True, "message": f"Removed unschedulable nodeSelector key(s) {bad} from {ns}/{name}; pods can now schedule."}
+
+
+def verify_deployment_schedulable(target: str) -> dict:
+    """Re-read the Deployment to confirm no impossible nodeSelector key remains."""
+    ns, _, name = target.partition("/")
+    apps = k8s_client.AppsV1Api()
+    try:
+        dep = apps.read_namespaced_deployment(name, ns).to_dict()
+    except Exception as e:
+        return {"ok": False, "message": f"Could not re-read Deployment {ns}/{name}: {e}"}
+    try:
+        bad = _unschedulable_nodeselector_keys(dep, _all_node_label_keys())
+    except Exception as e:
+        return {"ok": False, "message": f"Could not list nodes: {e}"}
+    if bad:
+        return {"ok": False, "message": f"Verification failed: unsatisfiable nodeSelector key(s) still present: {bad}."}
+    selector = _deployment_nodeselector(dep)
+    return {"ok": True, "message": f"Verified: {ns}/{name} nodeSelector is now satisfiable (keys: {sorted(selector) or 'none'}). Pods will reschedule."}
+
+
 # Whitelist of structured remediations the agent may apply. Each entry maps to an
 # (apply, verify) pair operating on a single named target.
 _REMEDIATIONS = {
     "enable_spot_on_nodepool": (enable_spot_on_nodepool, verify_nodepool_spot),
+    "fix_unschedulable_nodeselector": (fix_unschedulable_nodeselector, verify_deployment_schedulable),
 }
 
 
 def detect_remediation(query: str) -> dict | None:
     """Map a query to a safe, applicable remediation on an EXPLICITLY NAMED
-    target. Returns None unless the user named a NodePool that genuinely lacks
-    Spot — so apply is always bounded to a resource the user pointed at, never a
-    blanket change across the cluster."""
+    target. Returns None unless the user named a resource that genuinely has the
+    problem — so apply is always bounded to a resource the user pointed at, never
+    a blanket change across the cluster."""
     if not ALLOW_APPLY:
         return None
     ref = _resource_ref(query)
     name = _extract_name(query)
-    if not (ref and ref.get("kind") == "NodePool" and name):
+    if not (ref and name):
         return None
-    try:
-        np = k8s_client.CustomObjectsApi().get_cluster_custom_object(
-            "karpenter.sh", "v1", "nodepools", name)
-    except Exception:
+    kind = ref.get("kind")
+    if kind == "NodePool":
+        try:
+            np = k8s_client.CustomObjectsApi().get_cluster_custom_object(
+                "karpenter.sh", "v1", "nodepools", name)
+        except Exception:
+            return None
+        caps = _nodepool_capacity_types(np)
+        if caps is not None and "spot" not in caps:
+            return {"action": "enable_spot_on_nodepool", "target": name,
+                    "summary": f"add 'spot' to NodePool {name} capacity-type",
+                    "manual": (f"kubectl edit nodepool {name}\n"
+                               f"# under spec.template.spec.requirements, add \"spot\" to the\n"
+                               f"# values of the karpenter.sh/capacity-type requirement")}
         return None
-    caps = _nodepool_capacity_types(np)
-    if caps is not None and "spot" not in caps:
-        return {"action": "enable_spot_on_nodepool", "target": name,
-                "summary": f"add 'spot' to NodePool {name} capacity-type",
-                "manual": (f"kubectl edit nodepool {name}\n"
-                           f"# under spec.template.spec.requirements, add \"spot\" to the\n"
-                           f"# values of the karpenter.sh/capacity-type requirement")}
+    if kind == "Deployment":
+        ns = _extract_namespace(query) or "default"
+        if not _valid_k8s_name(ns):
+            return None
+        try:
+            dep = k8s_client.AppsV1Api().read_namespaced_deployment(name, ns).to_dict()
+            bad = _unschedulable_nodeselector_keys(dep, _all_node_label_keys())
+        except Exception:
+            return None
+        if bad:
+            keys = ", ".join(bad)
+            return {"action": "fix_unschedulable_nodeselector", "target": f"{ns}/{name}",
+                    "summary": f"remove impossible nodeSelector key(s) [{keys}] from Deployment {ns}/{name}",
+                    "manual": (f"kubectl edit deployment {name} -n {ns}\n"
+                               f"# remove the unschedulable nodeSelector key(s) [{keys}]\n"
+                               f"# from spec.template.spec.nodeSelector")}
+        return None
     return None
 
 
@@ -1194,8 +1288,8 @@ async def n_remediate(state: AgentState) -> dict:
     # Autopilot: tell the user what's about to happen before mutating anything.
     writer({"type": "response", "text": (
         f"**Autopilot is on \u2014 I'll apply this fix automatically now.** "
-        f"This is a bounded, whitelisted change to `{target}` (it dry-runs first, "
-        f"touches only the capacity-type field, then I re-read to verify).")})
+        f"This is a bounded, whitelisted change ({rem['summary']}); it dry-runs "
+        f"first, then I re-read `{target}` to verify it took effect.")})
     writer({"type": "step_start", "name": "Apply fix (autopilot)", "note": rem["summary"]})
     t = time.perf_counter()
     result = await loop.run_in_executor(None, apply_fn, target)
@@ -1564,7 +1658,7 @@ function clearAll(){
 
 const SCENARIOS=[
   {label:'\\uD83D\\uDD27 Live tool use', text:'Why is NodePool `default` not launching nodes?'},
-  {label:'\\uD83D\\uDEE0\\uFE0F Fix pending pods', text:'All pods for the payments-api Deployment in namespace `slemify` are stuck in Pending. Why, and how do I fix it?'},
+  {label:'\\uD83D\\uDEE0\\uFE0F Fix pending pods', text:'All pods for the `payments-api` Deployment in namespace `slemify` are stuck in Pending. Why, and how do I fix it?'},
   {label:'\\uD83D\\uDCB0 Fix Spot cost', text:'NodePool `demo-spot-misconfigured` is only using expensive on-demand instances. Why, and how do I fix it to use Spot?'},
   {label:'\\uD83D\\uDCD8 Concept question', text:'Explain how HPA stabilization windows work'},
   {label:'\\u26A0\\uFE0F Deprecated config', text:'apiVersion: karpenter.sh/v1beta1\\nkind: NodePool\\nmetadata:\\n  name: demo\\nspec:\\n  template:\\n    spec:\\n      requirements:\\n        - key: karpenter.k8s.aws/instance-category\\n          operator: In\\n          values: ["c","m"]'},
