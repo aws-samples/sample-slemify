@@ -30,13 +30,14 @@ flowchart TD
     EM["Retriever · CPU<br/>embed query 768d"] --> OS["OpenSearch<br/>vector search"]
     OS --> RR["Reranker · CPU<br/>cross-encoder top-k"]
     RR --> GEN{Generate}
-    GEN -->|high confidence| AUD["Auditor SLM · CPU<br/>grounded answer"]
-    GEN -->|low confidence| LLM["LLM API · Bedrock<br/>open-ended fallback"]
-    AUD --> CR{"Critic · CPU<br/>groundedness score"}
-    CR -->|pass| OUT[Answer streamed to user]
+    GEN -->|in-domain question| AUD["Auditor SLM · CPU<br/>grounded answer"]
+    GEN -->|unclassifiable| LLM["LLM API · Bedrock<br/>open-ended fallback"]
+    AUD --> CR{"Critic · CPU<br/>groundedness + fix lint"}
+    LLM --> CR
+    CR -->|pass| RM["Remediate · CPU<br/>propose fix · apply+verify if autopilot"]
     CR -->|weak, attempts left| RF["Refine query"] --> EM
-    CR -->|still weak| LLM
-    LLM --> OUT
+    CR -->|still weak| ESC["LLM escalation · Bedrock"] --> OUT
+    RM --> OUT[Answer streamed to user]
     RJ --> OUT
 ```
 
@@ -109,6 +110,41 @@ sources?), calibrated on live answers. It is intentionally **not** a trained
 model — see below. At the default threshold normal answers pass and stay on CPU;
 raise `GROUNDEDNESS_THRESHOLD` (env) to force the loop for a live demo.
 
+## Remediation (read-only → approve → autopilot)
+
+Diagnosing is the default; the agent can also **fix** a problem it diagnosed.
+Remediation is layered so you can demo three escalating levels of autonomy with
+the same agent, and the safety boundary is enforced server-side — the UI toggle
+is just UX, not the gate.
+
+| Mode | How it's enabled | What the agent does |
+|------|------------------|---------------------|
+| **Read-only** (default) | `ALLOW_APPLY` unset; no write RBAC | Diagnoses only. Never proposes a structured apply. |
+| **Approve** | `ALLOW_APPLY=true` + `kubectl apply -f k8s-rbac-apply.yaml` | Diagnoses, then surfaces a **proposed fix** with an *Apply this fix* button and a copy-pasteable manual command. Nothing changes until you click. |
+| **Autopilot** | Approve mode **+** the per-request autopilot toggle | Diagnoses, announces what it's about to do, applies the fix, and re-reads to verify — all in one turn. |
+
+When a fix is detected, the chat narrates the mode: in **approve** mode the agent
+says it won't change anything and offers the button or the manual command; in
+**autopilot** it says it's applying the fix now, then shows the apply + verify
+steps and the confirmed result.
+
+**Safety — apply is deliberately narrow:**
+- **Disabled by default.** Without `ALLOW_APPLY=true` *and* the opt-in write
+  ClusterRole (`k8s-rbac-apply.yaml`, `get`/`patch`/`update` on NodePools only),
+  the agent physically cannot mutate the cluster — the default RBAC is
+  read-only `get`/`list`/`watch`.
+- **Whitelisted, structured patches only.** The agent never executes free-form
+  changes. Each remediation is a coded `(apply, verify)` pair (currently: add
+  `spot` to one NodePool's capacity-type) that edits a single field.
+- **Bounded blast radius.** A remediation is only offered for a resource the
+  user **explicitly named** and that genuinely has the problem — never a blanket
+  change across the cluster. Intentionally on-demand NodePools are left alone
+  unless you name them.
+- **Dry-run then verify.** The apply server-side dry-runs first, then patches,
+  then re-reads the resource to confirm the change took effect.
+- **Human in the loop by default.** Autopilot is opt-in per request; absent it,
+  every fix waits for an explicit click.
+
 ## Right Tool for the Right Task
 
 The demo's guiding principle is matching the tool to the task, not training a
@@ -119,8 +155,10 @@ model for every step:
   corpus — that's where a custom model measurably beats a generic one (see the
   retriever numbers below).
 - **Train a cheap head for a learned closed-set decision.** **Triage** is a
-  logistic head on a frozen encoder — CPU-trained in seconds, deterministic, and
-  its confidence score is what routes between the SLM and the LLM.
+  logistic head on a frozen encoder — CPU-trained in seconds and deterministic.
+  Its category rejects clear noise up front and sends in-domain questions to the
+  auditor SLM; only input it genuinely can't classify falls straight through to
+  the LLM.
 - **Use a stock model where it already wins.** The **reranker** is an
   off-the-shelf cross-encoder; we measured that *fine-tuning* one on synthetic
   data made it worse (see "Why Keep the Reranker").
@@ -213,7 +251,7 @@ In the step log you'll see: Triage → Plan (decide tool use) → `describe_reso
 + `list_events` against the live object → Retriever/OpenSearch/Reranker →
 Auditor SLM → Critic. The answer is grounded in the real resource, not just docs.
 
-### 1. High confidence (Auditor SLM responds)
+### 1. Config analysis (Auditor SLM responds)
 
 **NodePool limits:**
 ```
@@ -318,20 +356,57 @@ spec:
 our NodePool disruption budget is set to nodes: "50%" but it doesn't seem to be limiting the drift replacements. is drift not subject to disruption budgets?
 ```
 
-### 2. Low confidence (LLM fallback)
+### 2. Escalation to the LLM
+
+The LLM is the open-ended tail, not the default. A question reaches Bedrock two
+ways: triage can't classify it into the domain at all, or the auditor SLM drafts
+an answer the critic can't ground in the retrieved docs (after a refine retry).
+The second path is the common one. To force it in a live demo, raise the critic
+bar so a partially-grounded draft fails:
 
 ```
-I forwarded this from my manager, can you take a look?
+GROUNDEDNESS_THRESHOLD=0.4 python3 server.py
 ```
 
-```
-hey can someone help me with my cluster
-```
+Then ask an in-domain question the corpus only partially covers — the auditor
+draft fails the groundedness check, the agent refines and retries, and on a
+second miss escalates to Bedrock with everything it gathered.
 
 ### 3. Noise (rejected immediately)
 
 ```
 what is the weather like today in Seattle?
+```
+
+Vague, non-actionable messages are treated as noise too (so they don't waste an
+SLM/LLM turn):
+
+```
+I forwarded this from my manager, can you take a look?
+```
+
+### 4. Remediation (approve / autopilot)
+
+These need apply enabled (`ALLOW_APPLY=true` + `kubectl apply -f k8s-rbac-apply.yaml`)
+and a cluster with the matching broken resources. The agent diagnoses, then
+either proposes the fix (autopilot off) or applies and verifies it (autopilot on).
+
+**Spot cost — a structured fix the agent can apply** (names the NodePool, so the
+remediation is bounded to it):
+
+```
+NodePool `demo-spot-misconfigured` is only using expensive on-demand instances. Why, and how do I fix it to use Spot?
+```
+
+With autopilot **off** you get a proposed fix plus an *Apply this fix* button and
+the manual command; with autopilot **on** the agent patches the NodePool's
+capacity-type and re-reads it to confirm Spot is now allowed.
+
+**Pending pods — diagnose and advise** (no auto-apply by design — fixing it would
+schedule real workloads):
+
+```
+All pods for the payments-api Deployment in namespace `slemify` are stuck in Pending. Why, and how do I fix it?
 ```
 
 ## Setup (one-time)
@@ -377,6 +452,17 @@ python3 server.py
 > (in-cluster it uses the read-only ServiceAccount). Set `TOOLS_ENABLED=false`
 > to skip cluster access and answer from documentation only.
 
+To demo remediation locally, start the server with apply enabled:
+
+```bash
+ALLOW_APPLY=true python3 server.py
+```
+
+This surfaces the autopilot toggle in the UI and lets the *Apply this fix*
+button / autopilot patch run. Your kubeconfig must allow `patch` on NodePools
+(the in-cluster path uses the opt-in `k8s-rbac-apply.yaml` ClusterRole). With
+`ALLOW_APPLY` unset the agent stays strictly read-only.
+
 ## Deploying to Cluster
 
 ```bash
@@ -393,6 +479,14 @@ The deploy script:
 2. Creates the ServiceAccount, Deployments, and Services
 3. Sets up an IAM role with Bedrock access (LLM fallback) via EKS Pod Identity
 4. Waits for the rollout to complete
+
+The deployed agent is read-only by default. To enable in-cluster remediation
+(approve + autopilot), grant the opt-in write RBAC and turn apply on:
+
+```bash
+kubectl apply -f k8s-rbac-apply.yaml
+kubectl set env deployment/k8s-autoscaling-orchestrator -n slemify ALLOW_APPLY=true
+```
 
 ## Live Demo
 
@@ -437,4 +531,5 @@ python3 scripts/index-knowledge.py --append --source=karpenter
 5. Fine-tuned SLMs are more accurate than general LLMs on domain-specific tasks
 6. A domain-tuned retriever roughly doubles RAG retrieval quality (see "Why a Domain-Tuned Retriever")
 7. Read-only tools make the agent useful on real clusters without the risk of mutating them
-8. Kubernetes-native: Karpenter provisions nodes, KEDA scales, OpenSearch runs in-cluster — everything on Spot with consolidation
+8. When you do want it to act, remediation is layered — read-only, approve-to-apply, then autopilot — with the write path gated, whitelisted, bounded to a named resource, and dry-run + verified
+9. Kubernetes-native: Karpenter provisions nodes, KEDA scales, OpenSearch runs in-cluster — everything on Spot with consolidation
