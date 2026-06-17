@@ -4,11 +4,10 @@ project:
   name: k8s-autoscaling-triage
   task: classification
   domain: >
-    Classify Kubernetes autoscaling support queries into a routing
-    category and confidence level. Each message should be classified
-    into exactly one routing category: karpenter_config for Karpenter
-    NodePool or EC2NodeClass questions, keda_config for KEDA ScaledObject
-    or TriggerAuthentication questions, hpa_config for HorizontalPodAutoscaler
+    Classify Kubernetes autoscaling support queries into exactly one
+    routing category: karpenter_config for Karpenter NodePool or
+    EC2NodeClass questions, keda_config for KEDA ScaledObject or
+    TriggerAuthentication questions, hpa_config for HorizontalPodAutoscaler
     questions, pdb_disruption for PodDisruptionBudget questions,
     spot_interruption for Spot instance handling questions,
     multi_resource for questions spanning multiple resource types,
@@ -16,14 +15,15 @@ project:
     unrelated Kubernetes topics. Inputs are noisy Slack-style messages
     that may include YAML snippets and conversational tangents.
     A query that names a specific resource and states a concrete symptom
-    and asks how to fix it is well-specified and should be classified
-    confidently into the category of the named resource (for example, a
-    named NodePool stuck on on-demand or not launching nodes is
-    karpenter_config). Pods stuck Pending because of a Deployment
-    nodeSelector or affinity that no node satisfies span the Deployment
-    and node provisioning, so classify them as multi_resource. Reserve
-    low confidence for genuinely vague or under-specified messages that
-    name no resource and could plausibly belong to several categories.
+    and asks how to fix it should be classified into the category of the
+    named resource (for example, a named NodePool stuck on on-demand or
+    not launching nodes is karpenter_config). Pods stuck Pending — whether
+    because of a Deployment nodeSelector, affinity, topology constraint,
+    or resource request that no node satisfies, or simply because no node
+    is available — span the Deployment workload and node provisioning, so
+    classify them as multi_resource. Treat any "pods are Pending, how do I
+    fix it" question as multi_resource unless it clearly names a single
+    autoscaler resource as the cause.
   labels:
     routing:
       - karpenter_config

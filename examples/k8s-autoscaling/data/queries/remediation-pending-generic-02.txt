@@ -1,0 +1,1 @@
+my Deployment's replicas have been Pending for ten minutes and never get a node. what's the right way to diagnose and fix Pending pods that won't schedule, looking across the workload spec and node provisioning?

@@ -1,0 +1,1 @@
+our HPA scaled the web Deployment up to 20 replicas but half the new pods are Pending because Karpenter isn't adding nodes fast enough. the problem spans the HPA target and the NodePool capacity. how do I get the whole path to scale together?

@@ -1,0 +1,1 @@
+the analytics-worker Deployment has 5 replicas all stuck Pending. the pod events say node affinity/selector mismatch and no node is available. this seems to span both the Deployment spec and what the NodePool can provision. why are they not scheduling and how do I fix it?

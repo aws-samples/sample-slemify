@@ -1,0 +1,1 @@
+KEDA scaled our consumer Deployment out on queue depth, but the extra pods sit Pending because no node has room and the NodePool limits may be capped. this involves both the ScaledObject and node provisioning. how do I fix the whole chain?

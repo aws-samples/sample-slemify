@@ -1,0 +1,1 @@
+our batch-jobs Deployment requests 32Gi memory per pod and every replica is Pending. no current node is large enough and it's unclear whether the NodePool is allowed to launch a bigger instance. this touches both the workload resource requests and node provisioning. how do I get these scheduled?

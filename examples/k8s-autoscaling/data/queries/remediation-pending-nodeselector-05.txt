@@ -1,0 +1,1 @@
+the checkout Deployment pins pods to topology.kubernetes.io/zone=eu-west-1c with a required nodeSelector, but no node and no NodePool subnet covers that zone, so all pods are Pending. this spans the Deployment placement and the node provisioning side. how do I fix it?

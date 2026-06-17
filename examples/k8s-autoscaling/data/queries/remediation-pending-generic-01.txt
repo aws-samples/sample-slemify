@@ -1,0 +1,1 @@
+all pods for the orders-api Deployment in namespace prod are stuck in Pending and not coming up. why is this happening and how do I fix it so they schedule? figuring this out means looking at both the Deployment and whether nodes can be provisioned for it.
