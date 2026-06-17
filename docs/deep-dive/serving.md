@@ -475,6 +475,59 @@ curl http://<service>:8080/v1/chat/completions \
 
 This means agents, orchestrators, and applications can call the SLM endpoint without any Slemify-specific client code. It's a standard HTTP API that returns JSON.
 
+## Composing models into an application
+
+Each section above covers serving a *single* model per task. A real application
+usually composes several, each in its own pod, behind a coordinator. The
+k8s-autoscaling demo (`examples/k8s-autoscaling`) is a worked example: a
+generation SLM (llama.cpp), two ONNX encoder pods (a classifier for triage and
+an embedding retriever — the same `classifier-serving` image, different
+`PROJECT`/`TASK`), a stock cross-encoder reranker, and an OpenSearch vector DB,
+all on CPU, coordinated by a small orchestrator that holds no model.
+
+The pattern worth copying: **the orchestrator is the only component with cluster
+credentials.** It calls each model over the OpenAI-compatible / TEI HTTP
+contracts described above, and it is the single place that talks to the
+Kubernetes API — running read-only tools (`get`/`list`/`watch`) and, when
+explicitly enabled, gated `patch` writes. The model-serving pods only do
+inference and never touch the API (the reranker even runs with
+`automountServiceAccountToken: false`).
+
+```mermaid
+flowchart LR
+    UI["client / UI"] -->|"HTTP · SSE"| ORCH
+
+    subgraph NS["application namespace · CPU pods"]
+        ORCH["<b>orchestrator</b><br/>agent + tools<br/>(no model loaded)"]
+        TRIAGE["triage<br/>classifier-serving · ONNX"]
+        RETR["retriever<br/>classifier-serving · ONNX embed"]
+        RERANK["reranker<br/>cross-encoder · torch"]
+        AUD["generation SLM<br/>llama.cpp · GGUF"]
+        OS[("vector DB<br/>OpenSearch")]
+    end
+
+    ORCH -->|"/v1/chat/completions"| TRIAGE
+    ORCH -->|"/embed (TEI)"| RETR
+    ORCH -->|"k-NN search"| OS
+    ORCH -->|"/rerank"| RERANK
+    ORCH -->|"/v1/chat/completions · stream"| AUD
+    ORCH -->|"Converse API"| BR["LLM fallback<br/>(managed, off-cluster)"]
+
+    ORCH ==>|"read-only get/list/watch<br/><b>+ gated patch</b>"| API["Kubernetes<br/>API server"]
+    API --> NP["NodePool / Deployment<br/>(bounded, whitelisted patches)"]
+    NP -.->|provisions| KARP["Karpenter → nodes"]
+
+    style ORCH stroke:#1f6feb,stroke-width:3px
+    style API stroke:#d29922,stroke-width:2px
+```
+
+Because every model speaks the same standard HTTP contract, the orchestrator
+needs no model-specific client code — and you can swap any pod (e.g. a
+generative router for the ONNX classifier) without touching the coordinator. See
+the [k8s-autoscaling demo README](../../examples/k8s-autoscaling/demo/README.md)
+for the full agent graph and the remediation safety model behind that gated write
+path.
+
 ## References
 
 - [llama.cpp](https://github.com/ggerganov/llama.cpp). The inference engine Slemify uses for CPU deployment. Supports GGUF models with quantization.
