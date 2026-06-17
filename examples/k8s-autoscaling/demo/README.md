@@ -81,7 +81,7 @@ API; the reranker even runs with `automountServiceAccountToken: false`.
 
 ```mermaid
 flowchart LR
-    UI["Chat UI<br/>(browser)"] -->|"HTTP /query · SSE"| ORCH
+    UI["Chat UI<br/>(browser)"] <-->|"/query · SSE stream"| ORCH
 
     subgraph NS["slemify namespace · CPU (Graviton4) pods"]
         ORCH["<b>orchestrator</b> pod<br/>LangGraph agent + tools<br/>(no model loaded)"]
@@ -92,12 +92,13 @@ flowchart LR
         OS[("opensearch<br/>vector DB · StatefulSet")]
     end
 
-    ORCH -->|"/v1/chat/completions"| TRIAGE
-    ORCH -->|"/embed"| RETR
-    ORCH -->|"k-NN search"| OS
-    ORCH -->|"/rerank"| RERANK
-    ORCH -->|"/v1/chat/completions · stream"| AUD
-    ORCH -->|"Converse API"| BR["Amazon Bedrock<br/>LLM fallback<br/>(managed, off-cluster)"]
+    ORCH -.->|"re-plans · refines · retries<br/>(calls repeat per query)"| ORCH
+    ORCH <-->|"classify"| TRIAGE
+    ORCH <-->|"embed"| RETR
+    ORCH <-->|"k-NN search"| OS
+    ORCH <-->|"rerank"| RERANK
+    ORCH <-->|"generate · stream"| AUD
+    ORCH <-->|"Converse API"| BR["Amazon Bedrock<br/>LLM fallback<br/>(managed, off-cluster)"]
 
     ORCH ==>|"read-only get/list/watch<br/><b>+ gated patch</b>"| API["Kubernetes<br/>API server"]
     API --> NP["NodePool<br/>(add 'spot')"]
@@ -111,6 +112,55 @@ flowchart LR
 The thick edge from the orchestrator to the API server is the only write path in
 the system, and it stays bounded: gated by `ALLOW_APPLY`, the opt-in write RBAC,
 and the whitelisted, dry-run-first remediations described under "Remediation".
+
+That view is the **topology** — who calls whom. A single query is not one pass
+through it: the orchestrator coordinates these pods back and forth and re-runs
+whole stretches. It may hit the read-only tools several times while planning, and
+if the critic finds the draft weakly grounded it refines the query and runs the
+retrieve → rerank → generate → critic loop again before answering. The sequence
+for one query:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant O as Orchestrator
+    participant T as Triage (ONNX)
+    participant K as K8s API
+    participant R as Retriever (ONNX)
+    participant S as OpenSearch
+    participant X as Reranker
+    participant A as Auditor SLM
+    participant B as Bedrock LLM
+    U->>O: query (opens SSE stream)
+    O->>T: classify
+    T-->>O: category + confidence
+    loop plan → tool · 0..N (capped)
+        O->>K: get/list/watch (describe · events · investigate)
+        K-->>O: live cluster state
+    end
+    loop retrieve → generate → critic · repeats while ungrounded
+        O->>R: embed query
+        R-->>O: 768-d vector
+        O->>S: k-NN search
+        S-->>O: candidate docs
+        O->>X: rerank
+        X-->>O: top-k docs
+        alt in-domain
+            O->>A: generate (token stream)
+            A-->>O: draft (streamed to user)
+        else unclassifiable / escalation
+            O->>B: generate (token stream)
+            B-->>O: draft (streamed to user)
+        end
+        Note over O: critic scores groundedness —<br/>weak → refine query, loop again
+    end
+    opt fix detected · approve (on click) or autopilot (now)
+        O->>K: dry-run, then patch NodePool / Deployment
+        K-->>O: re-read → verified
+    end
+    O-->>U: final answer streamed
+```
 
 ## Read-Only Tools (gathering live evidence)
 

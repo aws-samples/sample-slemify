@@ -506,12 +506,13 @@ flowchart LR
         OS[("vector DB<br/>OpenSearch")]
     end
 
-    ORCH -->|"/v1/chat/completions"| TRIAGE
-    ORCH -->|"/embed (TEI)"| RETR
-    ORCH -->|"k-NN search"| OS
-    ORCH -->|"/rerank"| RERANK
-    ORCH -->|"/v1/chat/completions · stream"| AUD
-    ORCH -->|"Converse API"| BR["LLM fallback<br/>(managed, off-cluster)"]
+    ORCH -.->|"re-plans · refines · retries"| ORCH
+    ORCH <-->|"classify"| TRIAGE
+    ORCH <-->|"embed (TEI)"| RETR
+    ORCH <-->|"k-NN search"| OS
+    ORCH <-->|"rerank"| RERANK
+    ORCH <-->|"generate · stream"| AUD
+    ORCH <-->|"Converse API"| BR["LLM fallback<br/>(managed, off-cluster)"]
 
     ORCH ==>|"read-only get/list/watch<br/><b>+ gated patch</b>"| API["Kubernetes<br/>API server"]
     API --> NP["NodePool / Deployment<br/>(bounded, whitelisted patches)"]
@@ -520,6 +521,13 @@ flowchart LR
     style ORCH stroke:#1f6feb,stroke-width:3px
     style API stroke:#d29922,stroke-width:2px
 ```
+
+This is the topology (who calls whom), not a one-pass pipeline: the orchestrator
+drives these calls back and forth and re-runs whole stretches per query (it may
+hit the read-only tools repeatedly, and re-retrieve + regenerate when its own
+critic finds a draft weakly grounded). The
+[demo README](../../examples/k8s-autoscaling/demo/README.md) has a sequence
+diagram of that iterative flow.
 
 Because every model speaks the same standard HTTP contract, the orchestrator
 needs no model-specific client code — and you can swap any pod (e.g. a
