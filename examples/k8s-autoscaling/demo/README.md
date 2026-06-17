@@ -92,7 +92,6 @@ flowchart LR
         OS[("opensearch<br/>vector DB · StatefulSet")]
     end
 
-    ORCH -.->|"re-plans · refines · retries"| ORCH
     ORCH <-->|"classify"| TRIAGE
     ORCH <-->|"embed"| RETR
     ORCH <-->|"k-NN search"| OS

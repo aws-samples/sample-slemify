@@ -506,7 +506,6 @@ flowchart LR
         OS[("vector DB<br/>OpenSearch")]
     end
 
-    ORCH -.->|"re-plans · refines · retries"| ORCH
     ORCH <-->|"classify"| TRIAGE
     ORCH <-->|"embed (TEI)"| RETR
     ORCH <-->|"k-NN search"| OS
