@@ -1037,11 +1037,16 @@ def _ms(t0: float) -> int:
 async def n_triage(state: AgentState) -> dict:
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
-    writer({"type": "step_start", "name": "Triage SLM (4B, CPU)", "note": "classifying intent"})
+    writer({"type": "step_start", "name": "Triage classifier \u00b7 ONNX Runtime (CPU)", "note": "classifying intent"})
     t = time.perf_counter()
     result = await loop.run_in_executor(None, classify, state["query"])
-    writer({"type": "step_done", "name": "Triage SLM (4B, CPU)", "ms": _ms(t),
-            "detail": f"{result['category'].replace('_', ' ')} · {result['confidence']} confidence"})
+    # Show the routing decision, not the raw confidence band: confidence no longer
+    # gates routing (it only widens retrieval), so surfacing "low confidence" reads
+    # as uncertainty when the category is what actually drives the agent.
+    detail = ("off-topic \u2192 reject" if result["category"] == "noise"
+              else f"{result['category'].replace('_', ' ')} \u2192 in-domain")
+    writer({"type": "step_done", "name": "Triage classifier \u00b7 ONNX Runtime (CPU)", "ms": _ms(t),
+            "detail": detail})
     return {"category": result["category"], "confidence": result["confidence"]}
 
 
