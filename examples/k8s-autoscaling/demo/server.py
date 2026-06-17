@@ -573,7 +573,10 @@ def detect_remediation(query: str) -> dict | None:
     caps = _nodepool_capacity_types(np)
     if caps is not None and "spot" not in caps:
         return {"action": "enable_spot_on_nodepool", "target": name,
-                "summary": f"add 'spot' to NodePool {name} capacity-type"}
+                "summary": f"add 'spot' to NodePool {name} capacity-type",
+                "manual": (f"kubectl edit nodepool {name}\n"
+                           f"# under spec.template.spec.requirements, add \"spot\" to the\n"
+                           f"# values of the karpenter.sh/capacity-type requirement")}
     return None
 
 
@@ -1178,12 +1181,21 @@ async def n_remediate(state: AgentState) -> dict:
         return {}
     if not state.get("autopilot"):
         # Approve mode: surface the fix so the UI can offer an "Apply" button.
-        # No mutation happens here.
+        # No mutation happens here — the human stays in the loop.
+        writer({"type": "response", "text": (
+            "**Autopilot is off, so I won't change anything in the cluster.** "
+            "Here's the fix I'd apply \u2014 click **Apply this fix** to let me run it "
+            "for you, or apply it yourself with the command below.")})
         writer({"type": "proposal", "action": rem["action"], "target": rem["target"],
-                "summary": rem["summary"]})
+                "summary": rem["summary"], "manual": rem.get("manual", "")})
         return {}
     action, target = rem["action"], rem["target"]
     apply_fn, verify_fn = _REMEDIATIONS[action]
+    # Autopilot: tell the user what's about to happen before mutating anything.
+    writer({"type": "response", "text": (
+        f"**Autopilot is on \u2014 I'll apply this fix automatically now.** "
+        f"This is a bounded, whitelisted change to `{target}` (it dry-runs first, "
+        f"touches only the capacity-type field, then I re-read to verify).")})
     writer({"type": "step_start", "name": "Apply fix (autopilot)", "note": rem["summary"]})
     t = time.perf_counter()
     result = await loop.run_in_executor(None, apply_fn, target)
@@ -1384,6 +1396,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .proposal{align-self:flex-start;max-width:88%;background:var(--surface);border:1px solid var(--accent);border-radius:12px;padding:12px 15px;font-size:13px}
 .proposal .ptitle{font-weight:600;color:var(--strong);margin-bottom:4px}
 .proposal .psum{color:var(--muted);margin-bottom:8px}
+.proposal .pmanual{color:var(--muted);font-size:12px;margin:6px 0 4px}
+.proposal .pcmd{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin:0 0 10px;overflow-x:auto}
+.proposal .pcmd code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--fg);white-space:pre}
 .proposal button{background:var(--accent);color:#fff;border:none;padding:7px 14px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600}
 .proposal button:hover{background:var(--accent-hover)}
 .proposal button:disabled{opacity:.5;cursor:not-allowed}
@@ -1614,7 +1629,9 @@ async function send(){
 function addProposal(msg){
   const e=document.getElementById('empty'); if(e) e.remove();
   const div=document.createElement('div'); div.className='proposal';
-  div.innerHTML='<div class="ptitle">\\uD83D\\uDD27 Proposed fix</div><div class="psum">'+esc(msg.summary)+'</div>';
+  let html='<div class="ptitle">\\uD83D\\uDD27 Proposed fix (not applied)</div><div class="psum">'+esc(msg.summary)+'</div>';
+  if(msg.manual){ html+='<div class="pmanual">Run it yourself:</div><pre class="pcmd"><code>'+esc(msg.manual)+'</code></pre>'; }
+  div.innerHTML=html;
   const btn=document.createElement('button'); btn.textContent='Apply this fix';
   btn.onclick=()=>applyFix(msg.action, msg.target, btn);
   div.appendChild(btn);
