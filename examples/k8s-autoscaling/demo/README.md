@@ -516,12 +516,24 @@ kubectl set env deployment/k8s-autoscaling-orchestrator -n slemify ALLOW_APPLY=t
 ## Live Demo
 
 ```bash
-# Show infrastructure (CPU-only nodes, pods, architecture) in a separate terminal
-./scripts/show-infra.sh
+# One command: reset the scenarios to broken, port-forward the orchestrator,
+# open the browser, and launch the tmux log dashboard
+make demo
 
-# Launch full demo: port-forward + browser + tmux log dashboard
-./scripts/demo-terminal.sh
+# Show infrastructure (CPU-only nodes, pods, architecture) in a separate terminal
+make infra        # or: ./scripts/show-infra.sh
 ```
+
+Other handy targets:
+
+```bash
+make reset   # re-break both remediation scenarios between runs
+make clean   # remove the demo scenario resources entirely
+```
+
+`make demo` is the full launcher (`reset-demo.sh` + `demo-terminal.sh`). To skip
+the reset and just attach to a running demo, call `./scripts/demo-terminal.sh`
+directly.
 
 ## Indexing the Knowledge Base
 
