@@ -39,6 +39,13 @@ if EPOCHS < 1:
 
 s3 = boto3.client("s3")
 
+# Configured label taxonomy (project.labels, flattened), passed by the Go
+# launcher. When set, the trainer trains only on these classes and drops any
+# output value outside the set — this keeps the trained classes aligned with
+# the config and prevents leaked dimensions (e.g. a "low"/"medium"/"high"
+# confidence band appended to the category) from becoming spurious classes.
+VALID_LABELS = {l.strip() for l in os.environ.get("VALID_LABELS", "").split(",") if l.strip()}
+
 
 def log(msg):
     print(msg, flush=True)
@@ -50,18 +57,41 @@ def load_jsonl_s3(key):
 
 
 def to_xy(rows):
-    """Extract input text and the single classification label."""
+    """Extract input text and the single classification label.
+
+    Output may carry extra pipe-separated dimensions: the synthetic generator
+    or a generative model can append a secondary value (e.g. a confidence band)
+    after the primary category. Per the primary-label-first convention, select
+    the primary label — the first segment that matches the configured taxonomy
+    — and drop rows whose label falls outside it. When no taxonomy is
+    configured, fall back to the first segment. This keeps the trained classes
+    aligned with project.labels and prevents leaked values (e.g. "low" /
+    "medium" / "high") from becoming spurious classes.
+    """
     X, y = [], []
+    dropped = 0
     for r in rows:
         text = r.get("input", "")
         instruction = r.get("instruction", "")
         if instruction:
             text = f"{instruction}\n\n{text}"
         out = r.get("output", "").strip()
-        label = out.split("|")[-1].strip() if "|" in out else out
-        if text and label:
-            X.append(text)
-            y.append(label)
+        if not (text and out):
+            continue
+        segments = [s.strip() for s in out.split("|") if s.strip()]
+        if not segments:
+            continue
+        if VALID_LABELS:
+            label = next((s for s in segments if s in VALID_LABELS), None)
+            if label is None:
+                dropped += 1
+                continue
+        else:
+            label = segments[0]
+        X.append(text)
+        y.append(label)
+    if dropped:
+        log(f"  Dropped {dropped} row(s) with labels outside the configured taxonomy")
     return X, y
 
 

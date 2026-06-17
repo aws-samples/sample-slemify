@@ -65,7 +65,53 @@ func TestClassifierJobIsCPUOnly(t *testing.T) {
 	}
 }
 
+func TestClassifierJobPassesValidLabels(t *testing.T) {
+	// The trainer must receive the configured taxonomy so it can select the
+	// primary in-taxonomy label and drop leaked values (e.g. a confidence band).
+	cfg := classifierExpertConfig()
+	cfg.Project.Labels = map[string][]string{"routing": {"karpenter_config", "noise"}}
+
+	job := ClassifierJobManifest(cfg, "slemify", pipeline.NewPipelineContext())
+	c := job.Spec.Template.Spec.Containers[0]
+
+	var val string
+	var found bool
+	for _, e := range c.Env {
+		if e.Name == "VALID_LABELS" {
+			val, found = e.Value, true
+		}
+	}
+	if !found {
+		t.Fatal("classifier job missing VALID_LABELS env")
+	}
+	if val != "karpenter_config,noise" {
+		t.Errorf("VALID_LABELS = %q, want %q", val, "karpenter_config,noise")
+	}
+}
+
+func TestFlattenLabels(t *testing.T) {
+	cases := []struct {
+		name string
+		in   map[string][]string
+		want string
+	}{
+		{"empty", nil, ""},
+		{"single field", map[string][]string{"routing": {"a", "b"}}, "a,b"},
+		{"dedupe and trim", map[string][]string{"routing": {" a ", "a", "b"}}, "a,b"},
+		{"drops blanks", map[string][]string{"routing": {"a", "", "  "}}, "a"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := flattenLabels(tc.in); got != tc.want {
+				t.Errorf("flattenLabels(%v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestExtractionJobPassesTaskEnv(t *testing.T) {
+	// Extraction rides the same CPU classifier-trainer job; the Python trainer
+	// branches on the TASK env to fit a feature-based token tagger.
 	// Extraction rides the same CPU classifier-trainer job; the Python trainer
 	// branches on the TASK env to fit a feature-based token tagger.
 	cfg := classifierExpertConfig()

@@ -6,6 +6,7 @@ package training
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -70,6 +71,12 @@ func ClassifierJobManifest(cfg *config.ExpertConfig, ns string, pc *pipeline.Pip
 	backoffLimit := int32(2)
 	automountSA := pc.ServiceAccount != ""
 
+	// Pass the configured label taxonomy so the trainer selects the primary
+	// in-taxonomy label and drops any out-of-taxonomy value (e.g. a confidence
+	// band that leaked into synthetic output). This keeps the trained classes
+	// aligned with project.labels across regenerations/retrains.
+	validLabels := flattenLabels(cfg.Project.Labels)
+
 	// Encoder-head tasks (classification, scoring) only fit a small head on
 	// frozen embeddings — 6Gi is plenty. Embedding (contrastive) backprops
 	// through the encoder via the HF Trainer (model + optimizer state +
@@ -127,6 +134,7 @@ func ClassifierJobManifest(cfg *config.ExpertConfig, ns string, pc *pipeline.Pip
 								{Name: "HEAD", Value: cfg.Model.HeadType()},
 								{Name: "TASK", Value: cfg.Project.Task},
 								{Name: "EPOCHS", Value: fmt.Sprintf("%d", cfg.Training.Epochs)},
+								{Name: "VALID_LABELS", Value: validLabels},
 								{Name: "HF_HOME", Value: "/tmp/hf-cache"},
 							},
 							Resources: corev1.ResourceRequirements{
@@ -157,4 +165,28 @@ func ClassifierJobManifest(cfg *config.ExpertConfig, ns string, pc *pipeline.Pip
 			},
 		},
 	}
+}
+
+// flattenLabels collapses the configured label taxonomy into a comma-separated,
+// de-duplicated, order-preserving list for the trainer's VALID_LABELS env. The
+// encoder head is single-label, so all configured values across fields form the
+// allowed class set. Returns "" when no taxonomy is configured (e.g. scoring,
+// embedding), which disables filtering in the trainer.
+func flattenLabels(labels map[string][]string) string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, values := range labels {
+		for _, v := range values {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				continue
+			}
+			if _, ok := seen[v]; ok {
+				continue
+			}
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return strings.Join(out, ",")
 }
