@@ -1,0 +1,1 @@
+the HorizontalPodAutoscaler `checkout-hpa` is pinned at minReplicas and never scales up under load. the target CPU utilization looks wrong. how do I fix the HPA so it scales on real demand?

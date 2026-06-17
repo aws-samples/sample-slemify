@@ -1,0 +1,1 @@
+NodePool `default` isn't launching any nodes even though we have pods Pending. the NodePool requirements look very narrow. how do I figure out what's blocking provisioning and fix it?

@@ -1,0 +1,1 @@
+my web-frontend Deployment has 3 replicas all Pending. it has a nodeSelector for a zone label that none of our nodes carry and no NodePool provides. how do I get these pods scheduled again?

@@ -1,0 +1,1 @@
+our NodePool `demo-spot-misconfigured` is only launching expensive on-demand instances and our bill is way higher than it should be. why is it not using Spot, and how do I fix it so Karpenter can pick Spot capacity?

@@ -1,0 +1,1 @@
+our ScaledObject `orders-consumer` isn't scaling the deployment up even though the SQS queue is deep. the trigger metadata looks off. how do I fix the ScaledObject so it scales on queue depth?

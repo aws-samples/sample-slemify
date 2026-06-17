@@ -15,6 +15,15 @@ project:
     or noise for off-topic messages like meetings, social chat, or
     unrelated Kubernetes topics. Inputs are noisy Slack-style messages
     that may include YAML snippets and conversational tangents.
+    A query that names a specific resource and states a concrete symptom
+    and asks how to fix it is well-specified and should be classified
+    confidently into the category of the named resource (for example, a
+    named NodePool stuck on on-demand or not launching nodes is
+    karpenter_config). Pods stuck Pending because of a Deployment
+    nodeSelector or affinity that no node satisfies span the Deployment
+    and node provisioning, so classify them as multi_resource. Reserve
+    low confidence for genuinely vague or under-specified messages that
+    name no resource and could plausibly belong to several categories.
   labels:
     routing:
       - karpenter_config

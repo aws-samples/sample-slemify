@@ -1,0 +1,1 @@
+our PodDisruptionBudget `api-pdb` is blocking Karpenter consolidation. it has maxUnavailable 0 so nodes never drain. how do I fix the PDB so consolidation can proceed without taking the service down?

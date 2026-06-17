@@ -1,0 +1,1 @@
+all pods for the payments-api Deployment in namespace slemify are stuck in Pending. the events say no nodes match the nodeSelector. why is this happening and how do I fix it so the pods schedule?

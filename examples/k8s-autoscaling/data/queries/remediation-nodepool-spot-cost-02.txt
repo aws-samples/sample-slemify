@@ -1,0 +1,1 @@
+the production NodePool named batch-workers has capacity-type set to on-demand only. we want it to use Spot to cut costs. what change do I make to the NodePool requirements and is it safe?
