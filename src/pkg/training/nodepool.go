@@ -51,7 +51,7 @@ spec:
           values: [%s]
         - key: karpenter.k8s.aws/instance-generation
           operator: Gt
-          values: ["4"]
+          values: ["3"]  # gen 4+ (g4dn, g5, g6, p4, p5) — wider GPU pool for Spot/capacity resilience
         - key: kubernetes.io/arch
           operator: In
           values: ["amd64"]
