@@ -1,0 +1,60 @@
+# Dependabot configuration.
+#
+# Takes explicit control of dependency PRs (previously there was no config, so
+# updates arrived as uncoordinated single-package PRs — which is how a
+# transformers-only bump to 5.x landed and broke the classifier-trainer image,
+# since it conflicts with the pinned sentence-transformers/optimum).
+#
+# Two deliberate choices below:
+#   1. Group the ML/training libraries so they are proposed together in one
+#      coordinated, testable PR instead of conflicting single-package PRs.
+#   2. Defer the transformers 5.x major. Our ONNX export path is anchored by
+#      optimum[exporters,onnxruntime]==1.23.3 (caps transformers <4.47.0) and
+#      sentence-transformers==3.3.1 (caps <5.0.0). Adopting transformers 5.x
+#      requires a coordinated optimum 2.x (which moves the ONNX exporter into
+#      the separate optimum-onnx package) + sentence-transformers 5.x upgrade
+#      and a train.py migration. Until that is done deliberately and tested,
+#      ignore transformers >=5.0.0 so the unresolvable PR is not recreated.
+#      Note: this pipeline only loads trusted, pinned models (BAAI/bge-* and
+#      its own trained artifacts), so the deferred transformers RCEs — which
+#      require loading an untrusted model checkpoint — are low exposure here.
+version: 2
+updates:
+  # Encoder-head trainer (exact pins; the sensitive one).
+  - package-ecosystem: "pip"
+    directory: "/src/containers/classifier-trainer"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      ml-training-stack:
+        patterns:
+          - "torch"
+          - "transformers"
+          - "sentence-transformers"
+          - "optimum*"
+          - "accelerate"
+          - "scikit-learn"
+          - "numpy"
+          - "onnx*"
+    ignore:
+      - dependency-name: "transformers"
+        versions: [">=5.0.0"]
+
+  # Data pipeline (range pins).
+  - package-ecosystem: "pip"
+    directory: "/src/containers/data-pipeline"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      data-pipeline-deps:
+        patterns:
+          - "*"
+
+  # Keep CI actions current (low volume, low risk).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
