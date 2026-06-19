@@ -42,6 +42,11 @@ updates:
     ignore:
       - dependency-name: "transformers"
         versions: [">=5.0.0"]
+      # optimum-onnx 0.1.0 (the ONNX exporter) pins optimum~=2.1.0, so optimum
+      # 2.2.0 is unresolvable and breaks the build. Hold optimum at 2.1.x until
+      # optimum-onnx supports 2.2.0; lift alongside the transformers 5.x ignore.
+      - dependency-name: "optimum"
+        versions: [">=2.2.0"]
 
   # Data pipeline (range pins).
   - package-ecosystem: "pip"
