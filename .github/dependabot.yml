@@ -8,16 +8,18 @@
 # Two deliberate choices below:
 #   1. Group the ML/training libraries so they are proposed together in one
 #      coordinated, testable PR instead of conflicting single-package PRs.
-#   2. Defer the transformers 5.x major. Our ONNX export path is anchored by
-#      optimum[exporters,onnxruntime]==1.23.3 (caps transformers <4.47.0) and
-#      sentence-transformers==3.3.1 (caps <5.0.0). Adopting transformers 5.x
-#      requires a coordinated optimum 2.x (which moves the ONNX exporter into
-#      the separate optimum-onnx package) + sentence-transformers 5.x upgrade
-#      and a train.py migration. Until that is done deliberately and tested,
-#      ignore transformers >=5.0.0 so the unresolvable PR is not recreated.
-#      Note: this pipeline only loads trusted, pinned models (BAAI/bge-* and
-#      its own trained artifacts), so the deferred transformers RCEs — which
-#      require loading an untrusted model checkpoint — are low exposure here.
+#   2. Defer the transformers 5.x major. The ONNX exporter (optimum-onnx — the
+#      package optimum 2.x split the exporters into) is at 0.1.0 and still caps
+#      transformers <4.58.0; it has not caught up to transformers 5.x. We run
+#      the maximum compatible set (transformers 4.57.x, which already carries
+#      the 4.x ReDoS fixes; optimum 2.1.0 + optimum-onnx; torch 2.8 for the
+#      torch.load guard / CVE-2025-32434). The transformers 5.x RCE fixes
+#      (CVE-2026-1839 v5.0, CVE-2026-4372 v5.3 — both require loading an
+#      UNTRUSTED model checkpoint) are blocked upstream until optimum-onnx
+#      supports 5.x, so ignore transformers >=5.0.0 to stop recreated
+#      unresolvable PRs. This pipeline only loads trusted, pinned models
+#      (BAAI/bge-* + its own artifacts), so that exposure is low. Lift this
+#      ignore once optimum-onnx supports transformers 5.x.
 version: 2
 updates:
   # Encoder-head trainer (exact pins; the sensitive one).
