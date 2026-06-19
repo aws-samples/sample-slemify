@@ -14,8 +14,14 @@ RUN TORCH_VERSION="$(sed -n 's/^torch==//p' requirements.txt)" \
 COPY extract_common.py .
 COPY train.py .
 
-# Models are downloaded at run time; cache to a writable dir.
-ENV HF_HOME=/tmp/hf-cache
+# Models are downloaded at run time; cache to a writable dir. USER/HOME are set
+# so libraries that resolve the current user (e.g. torch 2.12's dynamo/inductor
+# cache via getpass.getuser()) don't fail on the numeric uid 1000, which has no
+# /etc/passwd entry; all caches stay under the writable /tmp.
+ENV HF_HOME=/tmp/hf-cache \
+    HOME=/tmp \
+    USER=slemify \
+    TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor
 
 USER 1000:1000
 
