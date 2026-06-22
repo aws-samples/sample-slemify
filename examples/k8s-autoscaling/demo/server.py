@@ -233,21 +233,38 @@ def _valid_k8s_name(name: str) -> bool:
     return bool(name) and bool(_K8S_NAME_RE.match(name))
 
 
+def _prune(v):
+    """Drop null/empty fields so the trimmed view is signal-dense.
+
+    The Kubernetes Python client's to_dict() emits *every* model attribute,
+    including hundreds of nulls. Unpruned, that both bloats the view past the
+    size cap and buries the fields that actually explain behavior (e.g. a
+    Deployment's nodeSelector ends up past the truncation, so the auditor never
+    sees it). Pruning yields a compact, kubectl-like view.
+    """
+    if isinstance(v, dict):
+        return {k: pv for k, pv in ((k, _prune(val)) for k, val in v.items())
+                if pv not in (None, {}, [], "")}
+    if isinstance(v, list):
+        return [pv for pv in (_prune(x) for x in v) if pv not in (None, {}, [], "")]
+    return v
+
+
 def _trim_k8s_object(obj: dict) -> str:
     """Keep the fields that explain a resource's behavior; drop server noise."""
     meta = obj.get("metadata", {}) or {}
     trimmed = {
         "kind": obj.get("kind"),
         "metadata": {"name": meta.get("name"), "namespace": meta.get("namespace")},
-        "spec": obj.get("spec"),
+        "spec": _prune(obj.get("spec") or {}),
     }
     status = obj.get("status") or {}
     if isinstance(status, dict):
-        keep = {k: status[k] for k in ("conditions", "phase", "reason", "message", "resources") if k in status}
+        keep = _prune({k: status.get(k) for k in ("conditions", "phase", "reason", "message", "resources")})
         if keep:
             trimmed["status"] = keep
     text = yaml.safe_dump(trimmed, default_flow_style=False, sort_keys=False)
-    return text[:2000]
+    return text[:4000]
 
 
 def describe_resource(args: dict) -> str:
@@ -685,6 +702,34 @@ def _looks_like_yaml(text: str) -> bool:
         bool(re.search(r"^\s*kind:\s*\S", text, re.MULTILINE))
 
 
+def _extract_manifest(text: str) -> str:
+    """Isolate the YAML manifest from a message that wraps it in prose.
+
+    validate_config parses this with yaml.safe_load_all, so a question before
+    or after the manifest (the normal way users paste one) would otherwise make
+    the parse fail with a misleading "Invalid YAML" and starve the deprecation/
+    structure lint. Prefer a fenced ```yaml block; else take the contiguous
+    block from the first apiVersion: line and drop trailing prose lines that
+    aren't part of the document.
+    """
+    for block in re.findall(r"```(?:ya?ml)?\s*\n(.*?)```", text, re.DOTALL):
+        if "apiVersion" in block and "kind" in block:
+            return block.strip()
+    lines = text.splitlines()
+    start = next((i for i, l in enumerate(lines) if re.match(r"\s*apiVersion:\s*\S", l)), None)
+    if start is None:
+        return text.strip()
+    block = lines[start:]
+    # A YAML line is blank, indented, a list item, or "key:" — anything else at
+    # the tail is trailing prose (e.g. "should we increase the limits?").
+    while block:
+        s = block[-1].strip()
+        if s == "" or block[-1][:1] in (" ", "\t") or s.startswith("- ") or re.match(r"[\w.\-/]+:(\s|$)", s):
+            break
+        block.pop()
+    return "\n".join(block).strip()
+
+
 def _resource_ref(text: str) -> dict | None:
     low = text.lower()
     for keyword, meta in RESOURCE_KEYWORDS:
@@ -716,8 +761,12 @@ def _extract_namespace(text: str) -> str | None:
 def _select_tools(query: str) -> list:
     """Heuristic tool router: pick read-only tools to gather evidence.
 
-    A pasted manifest is linted; an operational/cost question triggers a live
-    cluster investigation; a specific named resource is described directly.
+    A pasted manifest is linted. A specifically named resource is described
+    directly (with its events when there's a symptom) so the answer is grounded
+    in that object's real spec — even when the question also carries an
+    operational signal ("NodePool `x` only uses on-demand", "pods for the `y`
+    Deployment are Pending"). Only an operational question with NO named
+    resource falls back to a broad live investigation.
     """
     if _looks_like_yaml(query):
         # A pasted manifest: lint it deterministically (no API, no RBAC needed).
@@ -725,20 +774,21 @@ def _select_tools(query: str) -> list:
     if not _k8s_available:
         return []
     low = query.lower()
-    if any(sig in low for sig in _OPERATIONAL_SIGNALS):
-        # An operational symptom or cost/provisioning concern: investigate live state.
-        return ["investigate_cluster"]
+    operational = any(sig in low for sig in _OPERATIONAL_SIGNALS)
     ref = _resource_ref(query)
     name = _extract_name(query)
     if ref and name:
-        # A specific resource named without a symptom: inspect it directly.
-        return ["describe_resource"]
+        # Inspect the named object directly; add its events when there's a symptom.
+        return ["describe_resource", "list_events"] if operational else ["describe_resource"]
+    if operational:
+        # Operational symptom with no specific resource named: investigate live state.
+        return ["investigate_cluster"]
     return []
 
 
 def _extract_args(query: str, tool: str) -> dict:
     if tool == "validate_config":
-        return {"yaml": query}
+        return {"yaml": _extract_manifest(query)}
     if tool == "investigate_cluster":
         return {"namespace": _extract_namespace(query), "query": query}
     ref = _resource_ref(query) or {}
@@ -1665,7 +1715,7 @@ function clearAll(){
 }
 
 const SCENARIOS=[
-  {label:'\\uD83D\\uDD27 Live tool use', text:'Why is NodePool `default` not launching nodes?'},
+  {label:'\\uD83D\\uDCD0 minValues check', text:'my NodePool has this requirement but pods are still pending:\\n\\napiVersion: karpenter.sh/v1\\nkind: NodePool\\nmetadata:\\n  name: default\\nspec:\\n  template:\\n    spec:\\n      requirements:\\n        - key: karpenter.k8s.aws/instance-family\\n          operator: In\\n          values: ["c5", "c6i", "c7g", "m5", "m6i", "m7g"]\\n          minValues: 3\\n\\nwhat does minValues do and is my config correct?'},
   {label:'\\uD83D\\uDEE0\\uFE0F Fix pending pods', text:'All pods for the `payments-api` Deployment in namespace `slemify` are stuck in Pending. Why, and how do I fix it?'},
   {label:'\\uD83D\\uDCB0 Fix Spot cost', text:'NodePool `demo-spot-misconfigured` is only using expensive on-demand instances. Why, and how do I fix it to use Spot?'},
   {label:'\\uD83D\\uDCD8 Concept question', text:'Explain how HPA stabilization windows work'},

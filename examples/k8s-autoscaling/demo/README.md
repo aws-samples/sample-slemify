@@ -342,18 +342,37 @@ do serve it — both backed by measurement.
 
 ## Demo Prompts (Tested)
 
-### 0. Live tool use (agent inspects the cluster)
+### 0. Config analysis — minValues (Auditor SLM reads a pasted manifest)
 
-When the question names a real object, the agent calls read-only tools before
-answering. Use a NodePool that exists in your cluster:
+The headline demo: paste a real Karpenter manifest and ask the agent to analyze
+it. The agent lints it client-side (`validate_config`), grounds itself in the
+Karpenter docs via RAG, and the Auditor SLM explains it — here, what `minValues`
+does and whether the config is valid (it is; `minValues: 3` requires at least 3
+of the listed instance families to be available before Karpenter launches):
 
 ```
-Why is NodePool `default` not launching nodes?
+my NodePool has this requirement but pods are still pending:
+
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: ["c5", "c6i", "c7g", "m5", "m6i", "m7g"]
+          minValues: 3
+
+what does minValues do and is my config correct?
 ```
 
-In the step log you'll see: Triage → Plan (decide tool use) → `describe_resource`
-+ `list_events` against the live object → Retriever/OpenSearch/Reranker →
-Auditor SLM → Critic. The answer is grounded in the real resource, not just docs.
+In the step log you'll see: Triage → Plan → `validate_config` (manifest lint) →
+Retriever/OpenSearch/Reranker → Auditor SLM → Critic. Live cluster tool use
+(`describe_resource`/`list_events` against real objects) is demonstrated by the
+remediation scenarios in §4, which name actual broken resources.
 
 ### 1. Config analysis (Auditor SLM responds)
 
@@ -416,26 +435,6 @@ spec:
       karpenter.sh/discovery: ml-cluster
     securityGroupSelector:
       karpenter.sh/discovery: ml-cluster
-```
-
-**minValues (compare with ChatGPT):**
-```
-my NodePool has this requirement but pods are still pending:
-
-apiVersion: karpenter.sh/v1
-kind: NodePool
-metadata:
-  name: default
-spec:
-  template:
-    spec:
-      requirements:
-        - key: karpenter.k8s.aws/instance-family
-          operator: In
-          values: ["c5", "c6i", "c7g", "m5", "m6i", "m7g"]
-          minValues: 3
-
-what does minValues do and is my config correct?
 ```
 
 **Drift issue (AMI rollout replacing all nodes at once):**
