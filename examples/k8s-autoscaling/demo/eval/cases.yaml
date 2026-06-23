@@ -1,0 +1,291 @@
+# Golden evaluation set for the k8s-autoscaling agent.
+#
+# Each case is scored end-to-end through the orchestrator's /query endpoint
+# (real triage -> retrieval -> auditor), so it measures what a user experiences.
+#
+# Fields:
+#   id                : stable identifier (used to diff against a baseline)
+#   topic             : grouping label
+#   query             : the exact user input
+#   expected_category : substring expected in the triage detail, OR "reject"
+#   should_reject     : true if triage should reject as noise/off-topic
+#   should_abstain    : true if the docs/evidence do not cover the question and
+#                       the agent should say so rather than answer
+#   config_is_valid   : true if the pasted config is actually correct — used to
+#                       catch the "invent a problem on a valid config" failure
+#   leading_premise   : true if the query asserts a wrong premise the agent must
+#                       resist rather than agree with (sycophancy check)
+#   must_include      : authoritative points the answer should make (judged
+#                       semantically, not by string match)
+#   must_not_say      : known-wrong claims; any occurrence is a hard failure
+#                       (matched case-insensitively as substrings)
+
+- id: minvalues-valid
+  topic: minValues
+  query: |
+    my NodePool has this requirement but pods are still pending:
+
+    apiVersion: karpenter.sh/v1
+    kind: NodePool
+    metadata:
+      name: default
+    spec:
+      template:
+        spec:
+          requirements:
+            - key: karpenter.k8s.aws/instance-family
+              operator: In
+              values: ["c5", "c6i", "c7g", "m5", "m6i", "m7g"]
+              minValues: 3
+
+    what does minValues do and is my config correct?
+  expected_category: karpenter
+  should_reject: false
+  should_abstain: false
+  config_is_valid: true
+  leading_premise: false
+  must_include:
+    - "minValues requires at least that many distinct values from the listed family/values to be usable before Karpenter launches"
+    - "the configuration is valid (6 families listed satisfies minValues: 3)"
+  must_not_say:
+    - "remove the In operator"
+    - "In operator conflicts with minValues"
+    - "minValues is invalid"
+
+- id: nodepool-limits-reached
+  topic: limits
+  query: |
+    pods are stuck Pending but karpenter isn't launching nodes; it says "can't create any more capacity". kubectl get nodepool shows 48 CPU used of a 50 limit. should we increase the limits?
+  expected_category: karpenter
+  should_reject: false
+  should_abstain: false
+  config_is_valid: true
+  leading_premise: false
+  must_include:
+    - "Karpenter stops provisioning once the NodePool cpu/memory limit is reached"
+    - "raising the NodePool limits (or reducing requests) is the fix"
+  must_not_say: []
+
+- id: v1alpha5-provisioner-deprecated
+  topic: deprecated-api
+  query: |
+    i asked ChatGPT for a karpenter config and got this for our current EKS 1.31 cluster:
+
+    apiVersion: karpenter.sh/v1alpha5
+    kind: Provisioner
+    metadata:
+      name: gpu-provisioner
+    spec:
+      requirements:
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["p3.2xlarge", "g4dn.xlarge"]
+      provider:
+        instanceProfile: KarpenterNodeInstanceProfile
+
+    is this correct?
+  expected_category: karpenter
+  should_reject: false
+  should_abstain: false
+  config_is_valid: false
+  leading_premise: false
+  must_include:
+    - "v1alpha5 Provisioner is obsolete/removed on current Karpenter"
+    - "the replacement is the v1 NodePool plus EC2NodeClass resources (Provisioner no longer exists), not just an apiVersion bump"
+  must_not_say:
+    - "this is valid"
+    - "valid_config"
+
+- id: drift-disruption-budget-premise
+  topic: drift
+  query: |
+    we changed our EC2NodeClass AMI and karpenter marked nodes Drifted, then replaced all 15 at once causing downtime. our NodePool disruption budget is nodes: "50%" but it didn't limit the drift. is drift not subject to disruption budgets?
+  expected_category: karpenter
+  should_reject: false
+  should_abstain: false
+  config_is_valid: false
+  leading_premise: true
+  must_include:
+    - "drift IS a voluntary disruption and IS governed by NodePool disruption budgets"
+    - "a 50% budget should cap how many drifted nodes are replaced at once; investigate why the budget isn't applying"
+  must_not_say:
+    - "drift is not subject to disruption budgets"
+    - "drift is involuntary"
+    - "the budget is irrelevant to drift"
+
+- id: hpa-v2beta2-deprecated
+  topic: deprecated-api
+  query: |
+    our HPA uses apiVersion: autoscaling/v2beta2 and it stopped working after a cluster upgrade. what's wrong?
+
+    apiVersion: autoscaling/v2beta2
+    kind: HorizontalPodAutoscaler
+    metadata:
+      name: web
+  expected_category: hpa
+  should_reject: false
+  should_abstain: false
+  config_is_valid: false
+  leading_premise: false
+  must_include:
+    - "autoscaling/v2beta2 is removed in modern Kubernetes; use autoscaling/v2"
+  must_not_say:
+    - "v2beta2 is the current version"
+
+- id: consolidation-policy-values
+  topic: consolidation
+  query: |
+    for a karpenter v1 NodePool, what are the valid values for spec.disruption.consolidationPolicy and what does each mean?
+  expected_category: karpenter
+  should_reject: false
+  should_abstain: false
+  config_is_valid: true
+  leading_premise: false
+  must_include:
+    - "valid values are WhenEmpty and WhenEmptyOrUnderutilized"
+  must_not_say:
+    - "WhenUnderutilized"
+
+- id: spot-misconfigured-named
+  topic: remediation
+  query: |
+    NodePool `demo-spot-misconfigured` is only using expensive on-demand instances. Why, and how do I fix it to use Spot?
+  expected_category: karpenter
+  should_reject: false
+  should_abstain: false
+  config_is_valid: false
+  leading_premise: false
+  must_include:
+    - "the NodePool restricts karpenter.sh/capacity-type to on-demand only"
+    - "add spot to the capacity-type values so Karpenter can use Spot"
+  must_not_say: []
+
+- id: impossible-nodeselector
+  topic: scheduling
+  query: |
+    my deployment pods are Pending. the template has:
+
+    spec:
+      template:
+        spec:
+          nodeSelector:
+            topology.kubernetes.io/zone: imaginary-zone-99
+
+    why are they pending and how do I fix it?
+  expected_category: deployment
+  should_reject: false
+  should_abstain: false
+  config_is_valid: false
+  leading_premise: false
+  must_include:
+    - "no node satisfies the nodeSelector (the zone value does not exist), so pods cannot schedule"
+    - "fix or remove the nodeSelector so it matches real node labels"
+  must_not_say: []
+
+- id: valid-nodepool-confirm
+  topic: valid-config
+  query: |
+    is this NodePool valid? anything wrong with it?
+
+    apiVersion: karpenter.sh/v1
+    kind: NodePool
+    metadata:
+      name: default
+    spec:
+      template:
+        spec:
+          requirements:
+            - key: karpenter.sh/capacity-type
+              operator: In
+              values: ["spot", "on-demand"]
+          nodeClassRef:
+            group: karpenter.k8s.aws
+            kind: EC2NodeClass
+            name: default
+      disruption:
+        consolidationPolicy: WhenEmptyOrUnderutilized
+        consolidateAfter: 1m
+  expected_category: karpenter
+  should_reject: false
+  should_abstain: false
+  config_is_valid: true
+  leading_premise: false
+  must_include:
+    - "the configuration is valid / no problems"
+  must_not_say:
+    - "WhenUnderutilized is"
+    - "deprecated"
+
+- id: abstain-out-of-scope
+  topic: abstention
+  query: |
+    what's the maximum number of NodePools AWS officially recommends for a single 5000-node EKS cluster, with exact numbers?
+  expected_category: karpenter
+  should_reject: false
+  should_abstain: true
+  config_is_valid: false
+  leading_premise: false
+  must_include:
+    - "the documentation does not specify an exact recommended maximum; says so rather than inventing a number"
+  must_not_say: []
+
+- id: noise-weather
+  topic: noise
+  query: "what is the weather like today in Seattle?"
+  expected_category: reject
+  should_reject: true
+  should_abstain: false
+  config_is_valid: false
+  leading_premise: false
+  must_include: []
+  must_not_say: []
+
+- id: noise-vague-forward
+  topic: noise
+  query: "I forwarded this from my manager, can you take a look?"
+  expected_category: reject
+  should_reject: true
+  should_abstain: false
+  config_is_valid: false
+  leading_premise: false
+  must_include: []
+  must_not_say: []
+
+- id: keda-scaledobject-basic
+  topic: keda
+  query: |
+    in KEDA, what is the difference between minReplicaCount and the HPA minReplicas, and what happens to my workload when there are no events?
+  expected_category: keda
+  should_reject: false
+  should_abstain: false
+  config_is_valid: true
+  leading_premise: false
+  must_include:
+    - "KEDA can scale the workload to zero (minReplicaCount: 0) when there are no events"
+  must_not_say: []
+
+- id: karpenter-spot-interruption
+  topic: spot
+  query: |
+    does karpenter handle EC2 Spot interruption notices automatically, or do I need to install Node Termination Handler separately on a current version?
+  expected_category: karpenter
+  should_reject: false
+  should_abstain: false
+  config_is_valid: true
+  leading_premise: false
+  must_include:
+    - "current Karpenter handles Spot interruption natively via interruption queue; a separate Node Termination Handler is not required"
+  must_not_say: []
+
+- id: ec2nodeclass-amifamily
+  topic: karpenter
+  query: |
+    on karpenter v1 EC2NodeClass, my amiSelectorTerms only has a role and subnets but no AMI selection and nodes won't come up. what's required?
+  expected_category: karpenter
+  should_reject: false
+  should_abstain: false
+  config_is_valid: false
+  leading_premise: false
+  must_include:
+    - "v1 EC2NodeClass requires amiSelectorTerms (e.g., an alias like al2023@latest) to be set explicitly"
+  must_not_say: []

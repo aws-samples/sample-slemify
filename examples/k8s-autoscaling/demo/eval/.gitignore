@@ -1,0 +1,3 @@
+# Transient per-run scorecards; the committed baseline (results/baseline.json)
+# is the tracked comparison point.
+results/scorecard-*.json

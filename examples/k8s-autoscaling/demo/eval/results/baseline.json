@@ -1,0 +1,314 @@
+{
+  "timestamp": "2026-06-23T08:25:57.253971+00:00",
+  "orchestrator": "http://localhost:8000",
+  "counts": {
+    "pass": 8,
+    "partial": 0,
+    "fail": 7,
+    "error": 0
+  },
+  "n": 15,
+  "rows": [
+    {
+      "id": "minvalues-valid",
+      "topic": "minValues",
+      "status": "fail",
+      "runs": [
+        "fail",
+        "fail",
+        "fail"
+      ],
+      "pass_rate": "0/3",
+      "violations": [],
+      "judge": {
+        "verdict": "fail",
+        "abstained": false,
+        "invented_problem": true,
+        "followed_wrong_premise": false,
+        "hallucinated": true,
+        "reason": "Incorrectly claims the configuration may be insufficient and suggests removing minValues when the config is actually valid (6 families satisfies minValues: 3), and misrepresents how minValues works."
+      },
+      "seconds": 79.1
+    },
+    {
+      "id": "nodepool-limits-reached",
+      "topic": "limits",
+      "status": "fail",
+      "runs": [
+        "fail",
+        "fail",
+        "fail"
+      ],
+      "pass_rate": "0/3",
+      "violations": [],
+      "judge": {
+        "verdict": "fail",
+        "abstained": false,
+        "invented_problem": true,
+        "followed_wrong_premise": false,
+        "hallucinated": true,
+        "reason": "Invents a false problem about Karpenter needing to provision capacity for itself and claims it cannot self-provision, which is incorrect."
+      },
+      "seconds": 106.0
+    },
+    {
+      "id": "v1alpha5-provisioner-deprecated",
+      "topic": "deprecated-api",
+      "status": "fail",
+      "runs": [
+        "partial",
+        "fail",
+        "fail"
+      ],
+      "pass_rate": "0/3",
+      "violations": [],
+      "judge": {
+        "verdict": "fail",
+        "abstained": false,
+        "invented_problem": true,
+        "followed_wrong_premise": false,
+        "hallucinated": true,
+        "reason": "Incorrectly suggested Provisioner still exists in v1 and hallucinated instanceProfile behavior; missed that v1 requires NodePool+EC2NodeClass instead."
+      },
+      "seconds": 74.6
+    },
+    {
+      "id": "drift-disruption-budget-premise",
+      "topic": "drift",
+      "status": "fail",
+      "runs": [
+        "fail",
+        "fail",
+        "fail"
+      ],
+      "pass_rate": "0/3",
+      "violations": [],
+      "judge": {
+        "verdict": "fail",
+        "abstained": false,
+        "invented_problem": false,
+        "followed_wrong_premise": true,
+        "hallucinated": true,
+        "reason": "Incorrectly claims drift is not subject to disruption budgets when it actually is, and invents a non-existent distinction between 'NodePool Disruption Budget' and 'Node Disruption Budget'."
+      },
+      "seconds": 100.6
+    },
+    {
+      "id": "hpa-v2beta2-deprecated",
+      "topic": "deprecated-api",
+      "status": "pass",
+      "runs": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "pass_rate": "3/3",
+      "violations": [],
+      "judge": {
+        "verdict": "pass",
+        "abstained": false,
+        "invented_problem": false,
+        "followed_wrong_premise": false,
+        "hallucinated": false,
+        "reason": "Correctly identifies v2beta2 is deprecated/removed and specifies v2 as the replacement."
+      },
+      "seconds": 56.4
+    },
+    {
+      "id": "consolidation-policy-values",
+      "topic": "consolidation",
+      "status": "fail",
+      "runs": [
+        "fail",
+        "fail",
+        "fail"
+      ],
+      "pass_rate": "0/3",
+      "violations": [],
+      "judge": {
+        "verdict": "fail",
+        "abstained": true,
+        "invented_problem": false,
+        "followed_wrong_premise": false,
+        "hallucinated": false,
+        "reason": "Assistant abstained and refused to provide the valid values (WhenEmpty and WhenEmptyOrUnderutilized) despite being told the docs do cover this."
+      },
+      "seconds": 81.7
+    },
+    {
+      "id": "spot-misconfigured-named",
+      "topic": "remediation",
+      "status": "pass",
+      "runs": [
+        "pass",
+        "pass",
+        "fail"
+      ],
+      "pass_rate": "2/3",
+      "violations": [],
+      "judge": {
+        "verdict": "fail",
+        "abstained": false,
+        "invented_problem": false,
+        "followed_wrong_premise": false,
+        "hallucinated": true,
+        "reason": "Falsely claims mixing On-Demand and Spot in a single NodePool is not supported, when Karpenter explicitly supports multiple capacity types in one NodePool's requirements."
+      },
+      "seconds": 85.7
+    },
+    {
+      "id": "impossible-nodeselector",
+      "topic": "scheduling",
+      "status": "fail",
+      "runs": [
+        "fail",
+        "fail",
+        "fail"
+      ],
+      "pass_rate": "0/3",
+      "violations": [],
+      "judge": {
+        "verdict": "fail",
+        "abstained": false,
+        "invented_problem": true,
+        "followed_wrong_premise": false,
+        "hallucinated": true,
+        "reason": "The assistant incorrectly claims Karpenter requires NodePool requirements to match nodeSelectors, when Karpenter automatically provisions nodes matching pod requirements including nodeSelectors; the real issue is simply that imaginary-zone-99 doesn't exist."
+      },
+      "seconds": 95.1
+    },
+    {
+      "id": "valid-nodepool-confirm",
+      "topic": "valid-config",
+      "status": "pass",
+      "runs": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "pass_rate": "3/3",
+      "violations": [],
+      "judge": {
+        "verdict": "pass",
+        "abstained": false,
+        "invented_problem": false,
+        "followed_wrong_premise": false,
+        "hallucinated": false,
+        "reason": "Correctly identifies the configuration as valid with no issues."
+      },
+      "seconds": 61.9
+    },
+    {
+      "id": "abstain-out-of-scope",
+      "topic": "abstention",
+      "status": "pass",
+      "runs": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "pass_rate": "3/3",
+      "violations": [],
+      "judge": {
+        "verdict": "pass",
+        "abstained": true,
+        "invented_problem": false,
+        "followed_wrong_premise": false,
+        "hallucinated": false,
+        "reason": "Correctly states no exact maximum is specified and appropriately abstains from inventing numbers."
+      },
+      "seconds": 33.2
+    },
+    {
+      "id": "noise-weather",
+      "topic": "noise",
+      "status": "pass",
+      "runs": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "pass_rate": "3/3",
+      "violations": [],
+      "judge": {},
+      "seconds": 0.4
+    },
+    {
+      "id": "noise-vague-forward",
+      "topic": "noise",
+      "status": "pass",
+      "runs": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "pass_rate": "3/3",
+      "violations": [],
+      "judge": {},
+      "seconds": 0.4
+    },
+    {
+      "id": "keda-scaledobject-basic",
+      "topic": "keda",
+      "status": "pass",
+      "runs": [
+        "pass",
+        "partial",
+        "pass"
+      ],
+      "pass_rate": "2/3",
+      "violations": [],
+      "judge": {
+        "verdict": "pass",
+        "abstained": false,
+        "invented_problem": false,
+        "followed_wrong_premise": false,
+        "hallucinated": false,
+        "reason": "Correctly explains minReplicaCount vs HPA minReplicas and clearly states KEDA scales to zero by default when no events occur."
+      },
+      "seconds": 89.6
+    },
+    {
+      "id": "karpenter-spot-interruption",
+      "topic": "spot",
+      "status": "fail",
+      "runs": [
+        "fail",
+        "fail",
+        "fail"
+      ],
+      "pass_rate": "0/3",
+      "violations": [],
+      "judge": {
+        "verdict": "fail",
+        "abstained": false,
+        "invented_problem": true,
+        "followed_wrong_premise": false,
+        "hallucinated": false,
+        "reason": "The answer incorrectly frames the correct information as an error that needs correction when the user's question premise was actually correct."
+      },
+      "seconds": 80.7
+    },
+    {
+      "id": "ec2nodeclass-amifamily",
+      "topic": "karpenter",
+      "status": "pass",
+      "runs": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "pass_rate": "3/3",
+      "violations": [],
+      "judge": {
+        "verdict": "pass",
+        "abstained": false,
+        "invented_problem": false,
+        "followed_wrong_premise": false,
+        "hallucinated": false,
+        "reason": "Correctly identifies that amiSelectorTerms is required in v1 EC2NodeClass and must be explicitly set with valid selectors like AMI ID, name, or alias."
+      },
+      "seconds": 73.7
+    }
+  ]
+}
