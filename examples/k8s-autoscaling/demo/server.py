@@ -110,16 +110,23 @@ _EVENT_SIGNALS = (
 # before any are used against the API server.
 _K8S_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$")
 
-# --- Critic config ---
+# --- Groundedness gate config ---
 #
-# After a draft answer, a CPU critic scores how well the answer is grounded in
-# the retrieved docs + tool evidence. Below the threshold, the agent refines its
-# query and retrieves again (up to MAX_CRITIC_RETRIES extra drafts); if it still
-# fails, it escalates to the LLM. The Phase C critic is a lexical-overlap
-# heuristic standing in for the trained CPU groundedness scorer added later.
-# Calibrated on live answers: well-grounded auditor replies score ~0.20-0.25 and
-# ungrounded/generic ones near 0, so the default passes normal answers (keeping
-# them on CPU) while still catching weak ones. Raise it (env) to demo the loop.
+# After a draft answer, a cheap CPU check decides whether to accept it, retry, or
+# escalate. It does TWO things, and it is important to be honest about what each
+# can and cannot do:
+#   1. Groundedness: a lexical term-overlap heuristic (_groundedness). It only
+#      detects answers that ignore the retrieved evidence (generic/off-topic) —
+#      it CANNOT judge factual correctness (a confidently-wrong answer that reuses
+#      the right words scores high). Treat it as a retry/escalation trigger, not a
+#      quality seal of approval.
+#   2. Fix lint (_validate_draft_fix): a deterministic check that any YAML the
+#      draft proposes does not use a deprecated apiVersion. This one is a real
+#      guardrail because it is exact, not a heuristic.
+# Below the threshold (and with retries left) the agent refines and retries; if it
+# still looks ungrounded it escalates to the LLM. Calibrated on live answers:
+# grounded auditor replies score ~0.20-0.25, generic ones near 0. Raise it (env)
+# to force the loop for a live demo.
 GROUNDEDNESS_THRESHOLD = float(os.environ.get("GROUNDEDNESS_THRESHOLD", "0.15"))
 MAX_CRITIC_RETRIES = 1
 # Extra candidates/kept-docs pulled when a refine widens the search on retry.
@@ -843,9 +850,11 @@ def _content_terms(text: str) -> set:
 def _groundedness(draft: str, context: str) -> float:
     """Fraction of the answer's substantive terms that appear in the context.
 
-    A cheap CPU proxy for groundedness: an answer that reuses the documentation
-    and live evidence scores high; a generic or off-topic answer scores low.
-    Stands in for the trained groundedness scorer trained in a later phase.
+    A cheap CPU heuristic: an answer that reuses the documentation and live
+    evidence scores high; a generic or off-topic answer scores low. It is a
+    retry/escalation trigger ONLY — it detects answers that ignore the evidence,
+    not answers that are factually wrong (a confidently-wrong answer that echoes
+    the source terms still scores high). Do not read it as a correctness signal.
     """
     answer_terms = _content_terms(draft)
     if not answer_terms:
@@ -1182,7 +1191,12 @@ async def n_search(state: AgentState) -> dict:
 async def n_rerank(state: AgentState) -> dict:
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
-    keep_k = 5 if state["confidence"] in ("low", "unknown") else 2
+    # Keep the top-5 reranked docs for the auditor on every path. The old cap of
+    # 2 (for high/medium confidence) only existed to fit the auditor's tiny
+    # ~1.3k-token serving window, which starved grounding and made answers
+    # depend on which 2 chunks survived. The auditor is now served with an 8k
+    # window, so we pass the full top-5 (broaden adds 2 more on a refine retry).
+    keep_k = 5
     if state.get("broaden"):
         keep_k += 2
     candidates = state["candidates"]
@@ -1241,12 +1255,18 @@ async def n_generate(state: AgentState) -> dict:
 
 
 async def n_critic(state: AgentState) -> dict:
-    """Check the draft: groundedness (CPU) + validate the proposed fix vs the KB.
+    """Groundedness gate: decide whether to accept the draft, retry, or escalate.
 
-    Runs for both SLM and LLM answers. Groundedness only gates the SLM path (the
-    LLM is the top of the escalation ladder); the fix-validation gates both, so a
-    deprecated/invalid fix is caught and corrected regardless of which model
-    wrote it.
+    Two independent checks (see GROUNDEDNESS_THRESHOLD notes):
+      - groundedness: a lexical-overlap heuristic that flags answers ignoring the
+        evidence (a retry/escalation trigger, NOT a correctness check); only gates
+        the SLM path since the LLM is the top of the escalation ladder.
+      - fix lint: a deterministic deprecated-apiVersion check on any YAML the
+        draft proposes — a real guardrail that gates both SLM and LLM answers.
+
+    This node does not and cannot certify that an answer is factually correct;
+    naming it accordingly avoids the false confidence a "critic that passed it"
+    label would imply.
     """
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
@@ -1254,7 +1274,8 @@ async def n_critic(state: AgentState) -> dict:
     context = _build_context(state)
     used_llm = state.get("used_llm", False)
     attempts = state.get("attempts", 0)
-    writer({"type": "step_start", "name": "Critic (CPU)", "note": "scoring groundedness + validating fix"})
+    writer({"type": "step_start", "name": "Groundedness gate (CPU)",
+            "note": "overlap heuristic + deprecated-API lint (not a correctness check)"})
     t = time.perf_counter()
     score = await loop.run_in_executor(None, _groundedness, draft, context)
     fix_issues = await loop.run_in_executor(None, _validate_draft_fix, draft)
@@ -1264,17 +1285,17 @@ async def n_critic(state: AgentState) -> dict:
     passed = grounded_ok and fix_ok
     can_retry = attempts <= MAX_CRITIC_RETRIES
     if passed:
-        verdict = "pass"
+        verdict = "accepted"
     elif can_retry:
         verdict = "refining"
     else:
         verdict = "accepting" if used_llm else "escalating"
 
-    detail = f"groundedness {score:.2f}"
+    detail = f"overlap {score:.2f} ({'grounded' if grounded_ok else 'weak'})"
     if fix_issues:
         detail += " · fix uses deprecated/invalid config"
     detail += f" · {verdict}"
-    writer({"type": "step_done", "name": "Critic (CPU)", "ms": _ms(t), "detail": detail})
+    writer({"type": "step_done", "name": "Groundedness gate (CPU)", "ms": _ms(t), "detail": detail})
 
     correction = ""
     if fix_issues and verdict == "refining":

@@ -129,7 +129,7 @@ func inferenceDeployment(cfg *config.ExpertConfig, sized config.SizedConfig, ns 
 				Spec: corev1.PodSpec{
 					AutomountServiceAccountToken: &automountSA,
 					ServiceAccountName:           pc.ServiceAccount,
-					NodeSelector: map[string]string{"slemify.io/workload": "slm"},
+					NodeSelector:                 map[string]string{"slemify.io/workload": "slm"},
 					Tolerations: []corev1.Toleration{
 						{
 							Key:      "slemify.io/slm",
@@ -246,7 +246,6 @@ func inferencePDB(cfg *config.ExpertConfig, ns string, labels, selectorLabels ma
 	}
 }
 
-
 // warmupCommand returns the postStart lifecycle hook command that sends a dummy
 // completion request to the llama.cpp server after it starts. This forces the
 // model weights into memory and primes the KV cache, eliminating the cold-start
@@ -266,21 +265,9 @@ func warmupCommand() []string {
 }
 
 // llamaCppArgs builds the llama.cpp server arguments based on the model config.
-// Context size and reasoning budget are derived from training data output stats.
+// Context size is sized for the model's actual prompt shape, not output length.
 func llamaCppArgs(cfg *config.ExpertConfig, modelPath string, sized config.SizedConfig) []string {
-	// Context size: use data-driven max_tokens if available, otherwise defaults
-	ctxSize := "512"
-	if cfg.Project.IsFreeForm() {
-		ctxSize = "4096"
-	}
-	// If we have output stats, set context to accommodate max output + input + headroom
-	if sized.MaxOutputTokens > 0 {
-		ctx := sized.MaxOutputTokens * 3 // output + input + headroom
-		if ctx < 512 {
-			ctx = 512
-		}
-		ctxSize = fmt.Sprintf("%d", ctx)
-	}
+	ctxSize := contextSize(cfg, sized)
 
 	args := []string{
 		"--model", modelPath,
@@ -305,4 +292,38 @@ func llamaCppArgs(cfg *config.ExpertConfig, modelPath string, sized config.Sized
 	return args
 }
 
-
+// contextSize picks the llama.cpp --ctx-size for the served model.
+//
+// Free-form auditors are RAG models: the prompt is dominated by retrieved
+// REFERENCE DOCUMENTATION (top-k doc chunks) + any live tool evidence + the
+// user's pasted manifest — all INPUT that far exceeds the generated output.
+// Sizing the window from output statistics (the old max_output*3 heuristic)
+// produced a ~1.3k-token window that could not hold more than ~2 doc chunks and
+// returned context-overflow errors on anything larger, silently starving the
+// model of the very grounding RAG retrieved. So free-form gets a window sized
+// for that input budget; only genuinely long outputs push it higher.
+//
+// Non-free-form generation (short, structured outputs) keeps the lean
+// output-driven sizing.
+func contextSize(cfg *config.ExpertConfig, sized config.SizedConfig) string {
+	if cfg.Project.IsFreeForm() {
+		// Input budget: top-k reference chunks (~500 tok each) + tool evidence +
+		// a pasted manifest, plus output headroom. 8192 comfortably fits the
+		// high-confidence (5-doc) and broaden (7-doc) retrieval paths; Qwen3-8B
+		// supports far larger, so this is conservative.
+		const freeFormFloor = 8192
+		ctx := freeFormFloor
+		if hi := sized.MaxOutputTokens * 4; hi > ctx {
+			ctx = hi // unusually long outputs (rare) get even more room
+		}
+		return fmt.Sprintf("%d", ctx)
+	}
+	if sized.MaxOutputTokens > 0 {
+		ctx := sized.MaxOutputTokens * 3 // short structured output + input + headroom
+		if ctx < 512 {
+			ctx = 512
+		}
+		return fmt.Sprintf("%d", ctx)
+	}
+	return "512"
+}
