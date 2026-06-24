@@ -261,7 +261,8 @@
   config_is_valid: true
   leading_premise: false
   must_include:
-    - "KEDA can scale the workload to zero (minReplicaCount: 0) when there are no events"
+    - "minReplicaCount is KEDA's managed floor and can be 0, enabling scale-to-zero when there are no events; HPA's minReplicas cannot be 0"
+    - "idleReplicaCount is a valid optional KEDA field (replica count while idle); it is real, not fabricated"
   must_not_say: []
 
 - id: karpenter-spot-interruption

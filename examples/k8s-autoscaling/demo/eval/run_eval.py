@@ -43,10 +43,47 @@ import yaml
 
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:8000")
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0")
+# The judge grounds its grading in the same knowledge base the agent uses, so it
+# verifies the answer's claims against the authoritative docs instead of its own
+# (possibly stale) memory. Retrieved broadly on the question AND the answer's own
+# wording, so claim-specific facts (e.g. a policy the answer names) are surfaced
+# even when the question doesn't mention them.
+EMBED_URL = os.environ.get("EMBEDDING_URL", "http://localhost:8083")
+KNOWLEDGE_URL = os.environ.get("KNOWLEDGE_URL", "http://localhost:9200/k8s-autoscaling-knowledge")
 HERE = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(HERE, "results")
 
 _bedrock = boto3.client("bedrock-runtime")
+
+
+def fetch_reference(query: str, answer: str) -> str:
+    """Pull authoritative docs from the knowledge base to ground the judge.
+
+    Unions dense (semantic) hits on the question with lexical hits on both the
+    question and the answer, so a fact the answer asserts (a field/policy name)
+    is retrievable for verification even if the question never mentioned it.
+    Returns "" if the retrieval endpoints are unavailable (judge degrades to
+    grading on the authoritative points alone)."""
+    def _hits(body):
+        r = httpx.post(f"{KNOWLEDGE_URL}/_search", json=body, timeout=30)
+        r.raise_for_status()
+        return [h["_source"]["text"] for h in r.json()["hits"]["hits"]]
+
+    try:
+        vec = httpx.post(f"{EMBED_URL}/embed", json={"inputs": query[:8000]}, timeout=30).json()[0]
+        dense = _hits({"size": 15, "query": {"knn": {"embedding": {"vector": vec, "k": 15}}},
+                       "_source": ["text"]})
+        lex_q = _hits({"size": 10, "query": {"match": {"text": query[:1000]}}, "_source": ["text"]})
+        lex_a = _hits({"size": 15, "query": {"match": {"text": answer[:2000]}}, "_source": ["text"]}) if answer else []
+        seen, chunks = set(), []
+        for c in dense + lex_q + lex_a:
+            if c not in seen:
+                seen.add(c)
+                chunks.append(c)
+        return "\n\n---\n\n".join(chunks[:14])
+    except Exception as e:
+        print(f"  (reference lookup unavailable: {e}; judging on authoritative points only)")
+        return ""
 
 
 # --- Orchestrator I/O ---
@@ -87,7 +124,19 @@ def query_agent(text: str) -> dict:
 
 # --- Judge ---
 
-JUDGE_PROMPT = """You are grading a Kubernetes-autoscaling assistant's answer for factual correctness. Be strict and base your grade on Karpenter v1 / KEDA / HPA v2 reality.
+JUDGE_PROMPT = """You are grading a Kubernetes-autoscaling assistant's answer.
+
+You are given two sources of truth, in priority order:
+1. AUTHORITATIVE POINTS — verified facts the answer should make.
+2. REFERENCE DOCUMENTATION — passages retrieved from the same knowledge base the
+   assistant uses. Treat this as the source of record for whether a specific
+   claim (a field, value, policy name, behavior) is real.
+
+Grade against these two sources and the user question. Do NOT use your own
+outside knowledge to overrule them. In particular, if the answer states a field
+or behavior that appears in the REFERENCE DOCUMENTATION, it is real — do not call
+it fabricated just because it is not in the authoritative points or because you
+do not recall it.
 
 USER QUESTION:
 {query}
@@ -95,13 +144,31 @@ USER QUESTION:
 ASSISTANT ANSWER:
 {answer}
 
-AUTHORITATIVE POINTS the answer should make (judge semantically, not verbatim):
+AUTHORITATIVE POINTS (ground truth; judge semantically, not verbatim):
 {must_include}
 
-CONTEXT FLAGS:
-- The pasted config is actually VALID: {config_is_valid}
-- The question's premise is FALSE and must be corrected, not agreed with: {leading_premise}
-- The docs do not cover this; the assistant SHOULD abstain / say it cannot confirm: {should_abstain}
+REFERENCE DOCUMENTATION (authoritative source of record):
+{reference}
+
+HOW TO APPLY THE CASE FLAGS (these describe the verified reality of this case):
+- config_is_valid = {config_is_valid}
+    If true: the pasted config is correct. An answer that invents a problem or
+    tells the user to "fix" it is a FAIL (set invented_problem=true).
+    If false: the config genuinely has the problem described by the authoritative
+    points. An answer that calls it valid/fine is a FAIL.
+- leading_premise = {leading_premise}
+    If true: the question contains a FALSE premise. A correct answer corrects it
+    and reaches the authoritative points above. Judge premise-handling BY THE
+    AUTHORITATIVE POINTS, not by parsing the question's wording: if the answer
+    asserts what the authoritative points say, it correctly rejected the false
+    premise (this axis PASSES). Only set followed_wrong_premise=true if the answer
+    asserts the OPPOSITE of the authoritative points (i.e. it agrees with the
+    false premise). Phrases like "that premise is incorrect" followed by the
+    authoritative points are a CORRECT rejection, not a failure.
+- should_abstain = {should_abstain}
+    If true: the docs do not cover this. The answer must decline or say it cannot
+    confirm an exact answer. Answering with invented specifics is a FAIL
+    (set abstained=false). Abstaining correctly is a PASS.
 
 Return ONLY a JSON object, no prose:
 {{"verdict": "pass|partial|fail",
@@ -112,18 +179,23 @@ Return ONLY a JSON object, no prose:
   "reason": "one short sentence"}}
 
 Where:
-- verdict "pass" = factually correct AND makes the authoritative points; "partial" = mostly right but missing or hedged; "fail" = wrong, misleading, or misses the point.
-- invented_problem = claimed something is wrong/needs fixing in a config that is actually valid.
-- followed_wrong_premise = accepted a false premise instead of correcting it.
-- hallucinated = stated an API field/value/behavior that does not exist or is incorrect."""
+- verdict "pass" = makes the authoritative points and is consistent with them, the
+  reference documentation, and the flags above; "partial" = mostly right but
+  missing a point or overly hedged; "fail" = contradicts an authoritative point or
+  the reference, violates a flag rule above, or misses the point of the question.
+- hallucinated = stated an API field/value/behavior that CONTRADICTS the reference
+  documentation or authoritative points, or that appears in neither and is not a
+  basic, well-established fact. Do NOT flag a claim that the reference supports."""
 
 
 def judge(case: dict, answer: str) -> dict:
     must = case.get("must_include") or []
+    reference = fetch_reference(case["query"], answer or "")
     prompt = JUDGE_PROMPT.format(
         query=case["query"].strip(),
         answer=answer or "(empty)",
         must_include="\n".join(f"- {m}" for m in must) or "(none)",
+        reference=reference or "(reference lookup unavailable)",
         config_is_valid=case.get("config_is_valid", False),
         leading_premise=case.get("leading_premise", False),
         should_abstain=case.get("should_abstain", False),
