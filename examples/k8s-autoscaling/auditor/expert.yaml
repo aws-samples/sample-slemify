@@ -48,6 +48,14 @@ data:
   sources:
     - path: queries/
       type: raw
+  # RAG-faithful training: generate synthetic data against the same retrieval
+  # corpus served at inference (exported by index-knowledge.py --export-s3), so
+  # the auditor learns to ground answers in the supplied REFERENCE DOCUMENTATION
+  # instead of parametric memory. abstention_ratio reserves a slice of examples
+  # that teach the model to say "not in the docs" rather than hallucinate.
+  grounding:
+    path: knowledge/
+    abstention_ratio: 0.15
   synthetic:
     model: eu.anthropic.claude-sonnet-4-6
     pairs: 2500

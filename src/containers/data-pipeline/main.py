@@ -15,6 +15,7 @@ Supports three output shapes:
 import json
 import logging
 import random
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -112,6 +113,18 @@ Each example is a JSON object on its own line (JSONL format) with three fields:
 
 Spread the scores across the full 0.0–1.0 range: include clearly low cases (near 0.0), clearly high cases (near 1.0), and ambiguous middle cases (around 0.4–0.6). Do not cluster every example near the same value.
 
+CRITICAL — adversarial / hard examples (make at least HALF of every batch these):
+Surface similarity must NOT be a reliable predictor of the score, or the model
+will just learn to match keywords. Deliberately include both directions:
+- inputs that LOOK high-scoring on the surface but are actually LOW per the rubric
+  — e.g. they reuse, echo, or quote the correct terminology yet draw a wrong or
+  contradictory conclusion, or flip a single value/identifier while sounding right;
+- inputs that LOOK low-scoring on the surface but are actually HIGH — e.g. they
+  state the right judgement using different words (no term overlap), or correctly
+  decline/abstain when that is exactly the right response per the rubric.
+A model must not be able to score these by lexical overlap alone. Keep the
+remaining examples clear-cut so the full range is covered.
+
 Output one JSON object per line. No array brackets, no markdown, no explanation:
 {{"instruction": "...", "input": "...", "output": "0.12"}}
 {{"instruction": "...", "input": "...", "output": "0.87"}}"""
@@ -143,6 +156,91 @@ Use realistic, DIVERSE entity surfaces — vary names, casing, and phrasing so t
 Output one JSON object per line. No array brackets, no markdown, no explanation:
 {{"instruction": "...", "input": "...", "output": "TYPE :: surface || TYPE :: surface"}}
 {{"instruction": "...", "input": "...", "output": "TYPE :: surface"}}"""
+
+
+# The auditor is a RAG-grounded model: at serving time it receives retrieved
+# REFERENCE DOCUMENTATION plus a USER QUERY and must answer strictly from the
+# reference. The synthetic training data must reproduce that exact contract so
+# the model learns to ground its answer in the supplied evidence instead of
+# answering from parametric memory (the root cause of hallucinated API
+# identifiers). This default instruction MUST stay in sync with
+# AUDITOR_INSTRUCTION in the demo orchestrator (server.py); override per-project
+# via project.instruction in expert.yaml.
+DEFAULT_AUDITOR_INSTRUCTION = (
+    "You are a Kubernetes autoscaling auditor. "
+    "Answer ONLY based on the reference documentation below. "
+    "Do NOT invent fields, behaviors, or modes not in the docs. "
+    "If the docs don't cover something, say so. "
+    "State what is correct, why, and provide a fix if needed."
+)
+
+# Exact block markers the orchestrator wraps around the retrieved context and
+# the user query at serving time. Training inputs reuse these verbatim so the
+# fine-tuned model sees the same structure in training and in production.
+REFERENCE_OPEN = "--- REFERENCE DOCUMENTATION (do NOT treat as user config) ---"
+REFERENCE_CLOSE = "--- END REFERENCE ---"
+QUERY_OPEN = "--- USER QUERY ---"
+QUERY_CLOSE = "--- END USER QUERY ---"
+
+GROUNDED_FREEFORM_PROMPT = """You are generating synthetic training data for a Small Language Model (the "auditor") that reviews Kubernetes autoscaling configurations.
+
+At serving time the auditor is handed REFERENCE DOCUMENTATION (passages retrieved from authoritative docs) plus a USER QUERY, and it must answer STRICTLY from that reference — it must never invent API fields, label keys, label values, apiVersions, or behavior modes that are not present in the reference. You must reproduce that exact contract in every training example.
+
+DOMAIN CONTEXT:
+{domain}
+
+OUTPUT STRUCTURE GUIDELINES:
+{output_guidelines}
+
+REFERENCE DOCUMENTATION (this is the ONLY source of truth for the outputs you write):
+{reference}
+
+TASK:
+Generate exactly {batch_size} training examples grounded in the reference documentation above. Each example is a JSON object on its own line (JSONL) with three fields:
+- "instruction": Use EXACTLY this text, unchanged: "{auditor_instruction}"
+- "input": The reference block followed by a user-query block, formatted EXACTLY like this (keep the marker lines verbatim):
+{ref_open}
+<paste the reference documentation above, optionally trimmed to the passages relevant to this example>
+{ref_close}
+
+{query_open}
+<a realistic practitioner question — often pasting a YAML config that may be subtly wrong — that the reference documentation above is sufficient to audit>
+{query_close}
+- "output": A structured correction report. EVERY API field name, label key, label value, apiVersion, kind, and behavior mode you mention MUST appear verbatim in the reference documentation above. Do NOT introduce any identifier that is absent from the reference. If the user's config uses an identifier not in the reference, treat it as suspect rather than confirming it. Follow the output structure guidelines. Keep outputs between 100-300 words.
+
+Vary scenarios and error types. Some queries have one issue, some several, and some are valid configs (the output should confirm validity, citing the reference). Include realistic conversational noise ("an LLM told me...", Slack-style messages).
+
+Output one JSON object per line. No array brackets, no markdown, no explanation:
+{{"instruction": "...", "input": "...", "output": "..."}}
+{{"instruction": "...", "input": "...", "output": "..."}}"""
+
+
+GROUNDED_ABSTENTION_PROMPT = """You are generating synthetic training data for a Small Language Model (the "auditor") that reviews Kubernetes autoscaling configurations.
+
+The auditor must ABSTAIN when the reference documentation it is given does not actually cover the user's question — it must say so plainly instead of guessing or inventing an answer. These abstention examples teach that behavior and are the strongest defense against hallucination.
+
+DOMAIN CONTEXT:
+{domain}
+
+REFERENCE DOCUMENTATION (the ONLY source of truth; note it does NOT cover everything a user might ask):
+{reference}
+
+TASK:
+Generate exactly {batch_size} training examples in which the USER QUERY asks about something the REFERENCE DOCUMENTATION above does NOT answer (a different resource, a field or behavior not described in this reference, a version-specific detail not present, etc.). Each example is a JSON object on its own line (JSONL) with three fields:
+- "instruction": Use EXACTLY this text, unchanged: "{auditor_instruction}"
+- "input": The reference block followed by a user-query block, formatted EXACTLY like this (keep the marker lines verbatim):
+{ref_open}
+<paste the reference documentation above, optionally trimmed>
+{ref_close}
+
+{query_open}
+<a realistic question whose answer is NOT contained in the reference above>
+{query_close}
+- "output": A short, honest response that states the provided documentation does not cover the specific field/behavior/resource asked about, and that you cannot verify the exact details from the reference given — so the user should consult the authoritative docs for that topic. Do NOT guess at API identifiers. Do NOT fabricate fields. 40-120 words.
+
+Output one JSON object per line. No array brackets, no markdown, no explanation:
+{{"instruction": "...", "input": "...", "output": "..."}}
+{{"instruction": "...", "input": "...", "output": "..."}}"""
 
 
 EMBEDDING_QUERY_PROMPT = """You are generating training data for a domain-tuned text embedding model used in retrieval (RAG).
@@ -184,6 +282,15 @@ def main():
     task = config.get("project", {}).get("task", "generation")
     output_format = config.get("project", {}).get("output_format", "")
 
+    # Grounding (RAG-faithful) config: when present on a free-form expert, the
+    # synthetic data is generated against the real retrieval corpus so the
+    # training contract matches the serving contract (REFERENCE + USER QUERY ->
+    # report supported by the reference). Absent => legacy parametric generation.
+    grounding_cfg = data_cfg.get("grounding") or {}
+    auditor_instruction = (
+        config.get("project", {}).get("instruction") or DEFAULT_AUDITOR_INSTRUCTION)
+    abstention_ratio = float(grounding_cfg.get("abstention_ratio", 0.15))
+
     # Determine the data shape for synthetic generation and validation:
     #   - free_form: prose/reasoning output (only task=generation + output_format=free_form)
     #   - scoring:   a single numeric target in [0,1] (task=scoring, regression head)
@@ -223,16 +330,45 @@ def main():
         logger.error("synthetic.model and synthetic.pairs are required")
         sys.exit(1)
 
-    records = generate_synthetic(
-        records=raw_content,
-        model=synthetic_cfg["model"],
-        endpoint=synthetic_cfg.get("endpoint", ""),
-        target_pairs=synthetic_cfg["pairs"],
-        domain=domain,
-        tools=config.get("project", {}).get("domain", ""),
-        labels=labels_config,
-        output_format=gen_format,
-    )
+    # Grounded free-form generation reproduces the serving RAG contract by
+    # drawing on the real retrieval corpus. Only engages for free-form experts
+    # that declare data.grounding; everything else uses parametric generation.
+    is_grounded = is_free_form and bool(grounding_cfg)
+    grounding_chunks = []
+    if is_grounded:
+        grounding_chunks = read_grounding_corpus(
+            data_cfg["bucket"], data_cfg["path"], grounding_cfg)
+        if not grounding_chunks:
+            logger.error(
+                "data.grounding is set but no corpus found under %s/%s — run "
+                "index-knowledge.py --export-s3 to populate it first",
+                data_cfg["path"], grounding_cfg.get("path", "knowledge/"))
+            sys.exit(1)
+        logger.info("Loaded %d grounding chunks for RAG-faithful generation",
+                    len(grounding_chunks))
+
+    if is_grounded:
+        records = generate_grounded_freeform(
+            grounding_chunks=grounding_chunks,
+            model=synthetic_cfg["model"],
+            endpoint=synthetic_cfg.get("endpoint", ""),
+            target_pairs=synthetic_cfg["pairs"],
+            domain=domain,
+            labels=labels_config,
+            auditor_instruction=auditor_instruction,
+            abstention_ratio=abstention_ratio,
+        )
+    else:
+        records = generate_synthetic(
+            records=raw_content,
+            model=synthetic_cfg["model"],
+            endpoint=synthetic_cfg.get("endpoint", ""),
+            target_pairs=synthetic_cfg["pairs"],
+            domain=domain,
+            tools=config.get("project", {}).get("domain", ""),
+            labels=labels_config,
+            output_format=gen_format,
+        )
     logger.info("Generated %d training records", len(records))
 
     if not records:
@@ -240,7 +376,21 @@ def main():
         sys.exit(1)
 
     # Validate output format
-    if is_free_form:
+    if is_grounded:
+        # Grounded path: drop empty outputs, then run the hallucination filter
+        # (every API identifier the output asserts must appear in its reference).
+        nonempty = [r for r in records if r.get("output", "").strip()]
+        before = _hallucination_rate(nonempty)
+        valid = _validate_grounded(nonempty)
+        after = _hallucination_rate(valid)
+        dropped = len(records) - len(valid)
+        logger.info(
+            "Grounded validation: %d/%d kept; ungrounded-identifier rate "
+            "%.1f%% -> %.1f%% after filtering",
+            len(valid), len(records), before * 100, after * 100)
+        if dropped:
+            logger.warning("Dropped %d records (empty or ungrounded)", dropped)
+    elif is_free_form:
         # For free-form, only drop empty outputs
         valid = [r for r in records if r.get("output", "").strip()]
         dropped = len(records) - len(valid)
@@ -291,34 +441,52 @@ def main():
         logger.info("Generating independent eval data with %s (%d pairs)...",
                      eval_cfg["model"], eval_cfg["pairs"])
 
-        # Read eval-specific source data if configured, otherwise reuse training sources
-        eval_sources = eval_cfg.get("sources", data_cfg.get("sources", []))
-        eval_raw = read_raw_sources(data_cfg["bucket"], data_cfg["path"], eval_sources)
-        if not eval_raw:
-            eval_raw = raw_content  # fallback to training sources
-        logger.info("Eval source files: %d", len(eval_raw))
-
-        eval_records = generate_synthetic(
-            records=eval_raw,
-            model=eval_cfg["model"],
-            endpoint="",
-            target_pairs=eval_cfg["pairs"],
-            domain=domain,
-            tools=config.get("project", {}).get("domain", ""),
-            labels=labels_config,
-            output_format=gen_format,
-        )
-        # Both free-form and label output are valid when non-empty.
-        if is_scoring:
-            eval_valid = _validate_scoring(eval_records)
-        elif is_extraction:
-            eval_valid = _validate_extraction(eval_records, _extract_entity_types(labels_config))
+        if is_grounded:
+            # Mirror the training contract for eval, then measure the
+            # hallucination rate on held-out data without filtering it away
+            # (the metric is the signal we report).
+            eval_records = generate_grounded_freeform(
+                grounding_chunks=grounding_chunks,
+                model=eval_cfg["model"],
+                endpoint="",
+                target_pairs=eval_cfg["pairs"],
+                domain=domain,
+                labels=labels_config,
+                auditor_instruction=auditor_instruction,
+                abstention_ratio=abstention_ratio,
+            )
+            eval_records = [r for r in eval_records if r.get("output", "").strip()]
+            logger.info("Eval ungrounded-identifier rate: %.1f%% (%d records)",
+                        _hallucination_rate(eval_records) * 100, len(eval_records))
         else:
-            eval_valid = [r for r in eval_records if r.get("output", "").strip()]
-        eval_dropped = len(eval_records) - len(eval_valid)
-        if eval_dropped:
-            logger.warning("Dropped %d eval records with empty output", eval_dropped)
-        eval_records = eval_valid
+            # Read eval-specific source data if configured, otherwise reuse training sources
+            eval_sources = eval_cfg.get("sources", data_cfg.get("sources", []))
+            eval_raw = read_raw_sources(data_cfg["bucket"], data_cfg["path"], eval_sources)
+            if not eval_raw:
+                eval_raw = raw_content  # fallback to training sources
+            logger.info("Eval source files: %d", len(eval_raw))
+
+            eval_records = generate_synthetic(
+                records=eval_raw,
+                model=eval_cfg["model"],
+                endpoint="",
+                target_pairs=eval_cfg["pairs"],
+                domain=domain,
+                tools=config.get("project", {}).get("domain", ""),
+                labels=labels_config,
+                output_format=gen_format,
+            )
+            # Both free-form and label output are valid when non-empty.
+            if is_scoring:
+                eval_valid = _validate_scoring(eval_records)
+            elif is_extraction:
+                eval_valid = _validate_extraction(eval_records, _extract_entity_types(labels_config))
+            else:
+                eval_valid = [r for r in eval_records if r.get("output", "").strip()]
+            eval_dropped = len(eval_records) - len(eval_valid)
+            if eval_dropped:
+                logger.warning("Dropped %d eval records with empty output", eval_dropped)
+            eval_records = eval_valid
         logger.info("Generated %d independent eval records", len(eval_records))
     else:
         # Fallback: split training data into train/eval
@@ -623,6 +791,202 @@ def generate_synthetic(records, model, endpoint, target_pairs, domain, tools=Non
 
     logger.info("Done: %d valid, %d batches failed", len(all_records), failed)
     return all_records[:target_pairs]
+
+
+# === Grounded free-form generation (RAG-faithful auditor) ===
+
+def read_grounding_corpus(bucket, path, grounding_cfg):
+    """Load the retrieval corpus used at serving time so training can ground in it.
+
+    The corpus is the same chunked, authoritative documentation that
+    index-knowledge.py indexes into OpenSearch for RAG, exported to S3 as JSONL
+    ({"text", "source", "section"} per line). Training on these exact chunks is
+    what aligns the auditor's training contract with its serving contract.
+    """
+    corpus_path = grounding_cfg.get("path", "knowledge/")
+    prefix = f"{path.rstrip('/')}/{corpus_path.lstrip('/')}"
+    s3 = boto3.client("s3")
+    chunks = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if not key.endswith(".jsonl"):
+                continue
+            try:
+                body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+                for line in body.decode("utf-8", errors="replace").splitlines():
+                    line = line.strip()
+                    if not line.startswith("{"):
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    text = str(rec.get("text", "")).strip()
+                    if len(text) >= 80:
+                        chunks.append({
+                            "text": text,
+                            "source": str(rec.get("source", "")),
+                            "section": str(rec.get("section", "")),
+                        })
+            except Exception as e:
+                logger.warning("Failed to read grounding corpus %s: %s", key, e)
+    return chunks
+
+
+def _format_reference(chunks):
+    """Render selected corpus chunks into a single reference block body."""
+    parts = []
+    for c in chunks:
+        header = " / ".join(p for p in (c.get("source", ""), c.get("section", "")) if p)
+        body = c.get("text", "").strip()
+        parts.append(f"[{header}]\n{body}" if header else body)
+    return "\n\n---\n\n".join(parts)
+
+
+def generate_grounded_freeform(
+    grounding_chunks, model, endpoint, target_pairs, domain, labels,
+    auditor_instruction, abstention_ratio=0.15, chunks_per_example=2,
+):
+    """Generate RAG-grounded {instruction, input, output} pairs for the auditor.
+
+    Each pair embeds a REFERENCE DOCUMENTATION block (real corpus chunks) and a
+    USER QUERY block in the input — matching the serving prompt exactly — and an
+    output that must be supported by that reference. A fraction of examples are
+    abstention cases (reference does not cover the question) to teach the model
+    to say "not in the docs" instead of hallucinating.
+    """
+    if not grounding_chunks:
+        logger.error("Grounded generation requires a non-empty grounding corpus")
+        return []
+
+    backend = _select_backend(model, endpoint)
+    concurrency = _calculate_concurrency(model) if not endpoint else 20
+    guidelines = _extract_output_guidelines(domain, labels)
+
+    n_batches = (target_pairs + BATCH_SIZE - 1) // BATCH_SIZE
+    n_abstain = int(round(n_batches * abstention_ratio))
+    logger.info(
+        "Grounded generation: %d pairs in %d batches (%d abstention), "
+        "corpus=%d chunks, concurrency=%d",
+        target_pairs, n_batches, n_abstain, len(grounding_chunks), concurrency)
+
+    def _build_prompt(batch_idx, batch_size):
+        k = min(chunks_per_example, len(grounding_chunks))
+        selected = random.sample(grounding_chunks, k)
+        reference = _format_reference(selected)
+        is_abstain = batch_idx < n_abstain
+        template = GROUNDED_ABSTENTION_PROMPT if is_abstain else GROUNDED_FREEFORM_PROMPT
+        kwargs = dict(
+            domain=domain,
+            reference=reference[:8000],
+            batch_size=batch_size,
+            auditor_instruction=auditor_instruction,
+            ref_open=REFERENCE_OPEN, ref_close=REFERENCE_CLOSE,
+            query_open=QUERY_OPEN, query_close=QUERY_CLOSE,
+        )
+        if not is_abstain:
+            kwargs["output_guidelines"] = guidelines
+        return template.format(**kwargs)
+
+    all_records = []
+    failed = 0
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {}
+        for i in range(n_batches):
+            batch_size = min(BATCH_SIZE, target_pairs - (i * BATCH_SIZE))
+            future = pool.submit(_call_with_retry, backend, _build_prompt(i, batch_size))
+            futures[future] = (i, batch_size)
+        for future in as_completed(futures):
+            batch_idx, expected = futures[future]
+            try:
+                response = future.result()
+                if not response:
+                    failed += 1
+                    continue
+                batch_records = _parse_jsonl(response)
+                all_records.extend(batch_records)
+                logger.info("Grounded batch %d/%d: %d/%d valid",
+                            batch_idx + 1, n_batches, len(batch_records), expected)
+            except Exception as e:
+                failed += 1
+                logger.warning("Grounded batch %d failed: %s", batch_idx, e)
+
+    logger.info("Grounded generation done: %d valid, %d batches failed",
+                len(all_records), failed)
+    return all_records[:target_pairs]
+
+
+# Identifiers that carry domain-specific meaning and are the usual vectors for
+# hallucination: namespaced label/annotation keys and apiVersions (anything with
+# a "/"), e.g. karpenter.sh/capacity-type, karpenter.k8s.aws/instance-category,
+# topology.kubernetes.io/zone, karpenter.sh/v1, keda.sh/v1alpha1, autoscaling/v2.
+_IDENTIFIER_RE = re.compile(r"\b[a-z0-9][a-z0-9.]*\.[a-z]{2,}/[A-Za-z0-9][A-Za-z0-9._-]*\b")
+# Generic identifiers that are always valid even if a given reference chunk does
+# not happen to mention them. Kept deliberately tiny — the point is to force the
+# output to stay within the supplied evidence.
+_IDENTIFIER_ALLOWLIST = {"apps/v1", "v1", "batch/v1"}
+
+
+def _extract_domain_identifiers(text):
+    """Pull namespaced API identifiers (label keys, apiVersions) from text."""
+    return {m.group(0) for m in _IDENTIFIER_RE.finditer(text or "")}
+
+
+def _reference_text(record):
+    """Return the reference-block body of a grounded training input."""
+    inp = record.get("input", "")
+    start = inp.find(REFERENCE_OPEN)
+    end = inp.find(REFERENCE_CLOSE)
+    if start != -1 and end != -1 and end > start:
+        return inp[start + len(REFERENCE_OPEN):end]
+    # Fall back to the whole input (the user query may legitimately contain the
+    # identifier being audited).
+    return inp
+
+
+def _validate_grounded(records):
+    """Drop records whose output asserts API identifiers absent from their input.
+
+    This is the anti-hallucination filter: every namespaced identifier the
+    output mentions must appear in the record's own reference block (or the small
+    allowlist). The user query is included as valid grounding too, so the auditor
+    can correctly name a wrong identifier the user pasted while flagging it.
+    """
+    valid, dropped = [], []
+    for r in records:
+        out = r.get("output", "").strip()
+        if not out:
+            dropped.append(r)
+            continue
+        grounding = _reference_text(r) + "\n" + r.get("input", "")
+        grounded_ids = _extract_domain_identifiers(grounding) | _IDENTIFIER_ALLOWLIST
+        out_ids = _extract_domain_identifiers(out)
+        ungrounded = {i for i in out_ids if i not in grounded_ids}
+        if ungrounded:
+            dropped.append(r)
+        else:
+            valid.append(r)
+    if dropped:
+        logger.warning(
+            "Hallucination filter dropped %d/%d records asserting ungrounded "
+            "identifiers", len(dropped), len(records))
+    return valid
+
+
+def _hallucination_rate(records):
+    """Fraction of records whose output introduces ungrounded identifiers."""
+    if not records:
+        return 0.0
+    bad = 0
+    for r in records:
+        grounding = _reference_text(r) + "\n" + r.get("input", "")
+        grounded_ids = _extract_domain_identifiers(grounding) | _IDENTIFIER_ALLOWLIST
+        out_ids = _extract_domain_identifiers(r.get("output", ""))
+        if any(i not in grounded_ids for i in out_ids):
+            bad += 1
+    return bad / len(records)
 
 
 # === Parsing & Helpers ===

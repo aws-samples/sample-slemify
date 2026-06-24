@@ -14,12 +14,14 @@ Usage:
 Requires: pip install opensearch-py httpx gitpython requests beautifulsoup4
 """
 
+import json
 import os
 import re
 import shutil
 import sys
 import tempfile
 
+import boto3
 import httpx
 from git import Repo
 from opensearchpy import OpenSearch
@@ -37,6 +39,15 @@ EMBEDDING_URL = os.environ.get("EMBEDDING_URL", "http://localhost:8083")
 EMBEDDING_DIM = 768
 CHUNK_SIZE = 2000  # chars (~500 tokens)
 CHUNK_OVERLAP = 200
+
+# When set, the same chunked corpus that gets indexed into OpenSearch is also
+# exported to S3 as JSONL so the data pipeline can ground the auditor's
+# synthetic training data on the exact passages served at inference time
+# (train/serve alignment). Defaults match the auditor expert.yaml grounding path
+# (data.path + data.grounding.path => k8s-autoscaling/data/knowledge/).
+S3_GROUNDING_BUCKET = os.environ.get("S3_GROUNDING_BUCKET", "slemify-data")
+S3_GROUNDING_KEY = os.environ.get(
+    "S3_GROUNDING_KEY", "k8s-autoscaling/data/knowledge/corpus.jsonl")
 
 SOURCES = [
     {
@@ -203,6 +214,27 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
         return resp.json()
 
 
+def export_corpus_to_s3(chunks: list[dict], bucket: str, key: str) -> int:
+    """Write the chunked corpus to S3 as JSONL for grounded training data.
+
+    Each line is {"text", "source", "section"} — the same fields the data
+    pipeline's grounded generator reads. This guarantees the auditor trains on
+    the exact passages it will be given at serving time.
+    """
+    body = "\n".join(
+        json.dumps({
+            "text": c.get("text", ""),
+            "source": c.get("source", ""),
+            "section": c.get("section", ""),
+        }, ensure_ascii=False)
+        for c in chunks if c.get("text", "").strip()
+    )
+    boto3.client("s3").put_object(
+        Bucket=bucket, Key=key, Body=body.encode("utf-8"))
+    print(f"  Exported {len(chunks)} chunks to s3://{bucket}/{key}")
+    return len(chunks)
+
+
 def index_chunks(client: OpenSearch, chunks: list[dict]) -> int:
     """Embed and index all chunks into OpenSearch in batches."""
     print(f"  Embedding and indexing {len(chunks)} chunks...")
@@ -259,21 +291,38 @@ def main():
     global INDEX_NAME
 
     append = "--append" in sys.argv
+    # --export-s3:   also write the chunked corpus to S3 for grounded training.
+    # --export-only: only chunk + export to S3 (skip OpenSearch entirely), so the
+    #                auditor's training grounding can be refreshed without a
+    #                running cluster or embedding service.
+    export_s3 = "--export-s3" in sys.argv or "--export-only" in sys.argv
+    export_only = "--export-only" in sys.argv
+    s3_bucket = S3_GROUNDING_BUCKET
+    s3_key = S3_GROUNDING_KEY
     source_filter = None
     for arg in sys.argv[1:]:
         if arg.startswith("--source="):
             source_filter = arg.split("=", 1)[1]
         elif arg.startswith("--index-name="):
             INDEX_NAME = arg.split("=", 1)[1]
+        elif arg.startswith("--s3-bucket="):
+            s3_bucket = arg.split("=", 1)[1]
+        elif arg.startswith("--s3-key="):
+            s3_key = arg.split("=", 1)[1]
 
     print(f"  Index: {INDEX_NAME}")
+    if export_s3:
+        print(f"  S3 grounding export: s3://{s3_bucket}/{s3_key}")
+    if export_only:
+        print("  Mode: export-only (skipping OpenSearch indexing)")
 
-    client = get_opensearch_client()
-
-    if not append:
-        create_index(client)
-    else:
-        print("  Appending to existing index")
+    client = None
+    if not export_only:
+        client = get_opensearch_client()
+        if not append:
+            create_index(client)
+        else:
+            print("  Appending to existing index")
 
     # Determine which git sources to process
     sources = SOURCES
@@ -303,10 +352,17 @@ def main():
             all_chunks.extend(blog_chunks)
             print(f"  {len(blog_chunks)} chunks from blogs")
 
-        print(f"\n--- Indexing ---")
-        print(f"  Total chunks: {len(all_chunks)}")
-        n = index_chunks(client, all_chunks)
-        print(f"\n=== Done: {n} chunks indexed ===")
+        print(f"\n  Total chunks: {len(all_chunks)}")
+
+        if not export_only:
+            print("\n--- Indexing ---")
+            n = index_chunks(client, all_chunks)
+            print(f"=== Done: {n} chunks indexed ===")
+
+        if export_s3:
+            print("\n--- Exporting grounding corpus ---")
+            export_corpus_to_s3(all_chunks, s3_bucket, s3_key)
+            print("=== Grounding corpus export complete ===")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
