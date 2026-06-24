@@ -1,7 +1,7 @@
-boto3>=1.43.34
-pypdf>=6.13.3
+boto3>=1.43.36
+pypdf>=6.14.2
 openai>=2.43.0
 tiktoken>=0.13.0
 pyyaml>=6.0.3
 scikit-learn>=1.9.0
-numpy>=2.4.6
+numpy>=2.5.0
