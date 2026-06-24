@@ -24,6 +24,8 @@ type trainParams struct {
 	WarmupRatio        float64
 	Scheduler          string
 	CheckpointInterval int
+	PerDeviceBatchSize int
+	GradAccumSteps     int
 	Resume             string
 	Quantize           string
 }
@@ -35,6 +37,16 @@ func UnslothTrainingScript(cfg *config.ExpertConfig, sized config.SizedConfig) s
 		resume = "True"
 	}
 
+	// Memory-safe defaults if the sizer didn't set them (older callers/tests).
+	batchSize := sized.TrainBatchSize
+	if batchSize <= 0 {
+		batchSize = 2
+	}
+	gradAccum := sized.GradAccumSteps
+	if gradAccum <= 0 {
+		gradAccum = 4
+	}
+
 	params := trainParams{
 		BaseModel:          cfg.Model.Base,
 		Epochs:             sized.Epochs,
@@ -42,6 +54,8 @@ func UnslothTrainingScript(cfg *config.ExpertConfig, sized config.SizedConfig) s
 		WarmupRatio:        sized.WarmupRatio,
 		Scheduler:          sized.Scheduler,
 		CheckpointInterval: sized.CheckpointInterval,
+		PerDeviceBatchSize: batchSize,
+		GradAccumSteps:     gradAccum,
 		Resume:             resume,
 		Quantize:           cfg.Model.QuantizeType(),
 	}

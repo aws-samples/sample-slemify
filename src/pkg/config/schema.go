@@ -173,7 +173,20 @@ type DataConfig struct {
 	Path       string           `json:"path" yaml:"path" validate:"required"`
 	Sources    []SourceConfig   `json:"sources,omitempty" yaml:"sources,omitempty" validate:"omitempty,dive"`
 	Synthetic  SyntheticConfig  `json:"synthetic" yaml:"synthetic" validate:"required"`
+	Grounding  *GroundingConfig `json:"grounding,omitempty" yaml:"grounding,omitempty"`
 	Evaluation *EvalDataConfig  `json:"evaluation,omitempty" yaml:"evaluation,omitempty"`
+}
+
+// GroundingConfig enables RAG-faithful synthetic data generation for free-form
+// experts. When set, the data pipeline generates training pairs against the
+// retrieval corpus exported to S3 (Path, under data.path), embedding the same
+// REFERENCE DOCUMENTATION + USER QUERY structure the model sees at serving time
+// so it learns to ground answers in the evidence instead of parametric memory.
+// AbstentionRatio reserves a fraction of examples that teach the model to say
+// "not in the docs" rather than hallucinate.
+type GroundingConfig struct {
+	Path            string  `json:"path,omitempty" yaml:"path,omitempty"`
+	AbstentionRatio float64 `json:"abstention_ratio,omitempty" yaml:"abstention_ratio,omitempty"`
 }
 
 type SourceConfig struct {
@@ -205,8 +218,8 @@ type EvalDataConfig struct {
 
 type TrainingConfig struct {
 	Spot        bool `json:"spot" yaml:"spot"`
-	Epochs      int  `json:"epochs,omitempty" yaml:"epochs,omitempty" validate:"omitempty,min=1,max=20"`      // override auto-sized epochs
-	Incremental bool `json:"incremental,omitempty" yaml:"incremental,omitempty"` // resume from last checkpoint with fewer epochs
+	Epochs      int  `json:"epochs,omitempty" yaml:"epochs,omitempty" validate:"omitempty,min=1,max=20"` // override auto-sized epochs
+	Incremental bool `json:"incremental,omitempty" yaml:"incremental,omitempty"`                         // resume from last checkpoint with fewer epochs
 }
 
 // EvaluationConfig holds optional test prompts for inference benchmarking.
@@ -219,21 +232,24 @@ type EvaluationConfig struct {
 
 // SizedConfig holds the auto-computed infrastructure values produced by AutoSize.
 type SizedConfig struct {
-	TrainingGPU        string
-	TrainingInstance   string // display only — Karpenter selects actual instance
-	InferenceInstance  string // display only — Karpenter selects actual instance
-	InferenceCPU       string // CPU request for inference pod (e.g., "4")
-	InferenceMemory    string // Memory request for inference pod (e.g., "8Gi")
-	InferenceThreads   string // llama.cpp --threads flag
-	CheckpointInterval int    // steps
-	Epochs             int
-	LearningRate       float64
-	WarmupRatio        float64
-	Scheduler          string
-	EarlyStopPatience  int
-	KEDAMaxReplicas    int
-	MaxOutputTokens    int // from output_stats.json (p95 + 20% headroom), 0 = use defaults
-	ReasoningBudget    int // avg_output_tokens / 2 for free-form, 0 for classification
+	TrainingGPU            string
+	TrainingGPUMemoryFloor int    // min instance-gpu-memory (MiB) for training node affinity
+	TrainBatchSize         int    // per_device_train_batch_size
+	GradAccumSteps         int    // gradient_accumulation_steps
+	TrainingInstance       string // display only — Karpenter selects actual instance
+	InferenceInstance      string // display only — Karpenter selects actual instance
+	InferenceCPU           string // CPU request for inference pod (e.g., "4")
+	InferenceMemory        string // Memory request for inference pod (e.g., "8Gi")
+	InferenceThreads       string // llama.cpp --threads flag
+	CheckpointInterval     int    // steps
+	Epochs                 int
+	LearningRate           float64
+	WarmupRatio            float64
+	Scheduler              string
+	EarlyStopPatience      int
+	KEDAMaxReplicas        int
+	MaxOutputTokens        int // from output_stats.json (p95 + 20% headroom), 0 = use defaults
+	ReasoningBudget        int // avg_output_tokens / 2 for free-form, 0 for classification
 }
 
 // ValidationError represents a single config validation failure.

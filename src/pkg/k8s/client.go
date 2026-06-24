@@ -375,15 +375,15 @@ func gvrFromUnstructured(obj *unstructured.Unstructured) schema.GroupVersionReso
 // pluralize converts a Kind to its plural resource name (lowercase).
 func pluralize(kind string) string {
 	known := map[string]string{
-		"Namespace":          "namespaces",
-		"ConfigMap":          "configmaps",
-		"Job":                "jobs",
-		"Deployment":         "deployments",
-		"Service":            "services",
+		"Namespace":           "namespaces",
+		"ConfigMap":           "configmaps",
+		"Job":                 "jobs",
+		"Deployment":          "deployments",
+		"Service":             "services",
 		"PodDisruptionBudget": "poddisruptionbudgets",
-		"NodePool":           "nodepools",
-		"ScaledObject":       "scaledobjects",
-		"EC2NodeClass":       "ec2nodeclasses",
+		"NodePool":            "nodepools",
+		"ScaledObject":        "scaledobjects",
+		"EC2NodeClass":        "ec2nodeclasses",
 	}
 	if p, ok := known[kind]; ok {
 		return p
@@ -558,6 +558,39 @@ func (c *Client) DownloadFromS3(ctx context.Context, bucket, key string) (string
 	return string(data), nil
 }
 
+// DeleteS3Prefix deletes every object under the given prefix and returns the
+// number of objects removed. Used to clear stale training checkpoints before a
+// fresh (non-incremental) run so the trainer does not resume from a checkpoint
+// produced by a previous run on different data.
+func (c *Client) DeleteS3Prefix(ctx context.Context, bucket, prefix string) (int, error) {
+	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("loading AWS config: %w", err)
+	}
+	s3Client := s3.NewFromConfig(cfg)
+	paginator := s3.NewListObjectsV2Paginator(s3Client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(bucket),
+		Prefix: aws.String(prefix),
+	})
+	deleted := 0
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return deleted, fmt.Errorf("listing s3://%s/%s: %w", bucket, prefix, err)
+		}
+		for _, obj := range page.Contents {
+			if _, err := s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    obj.Key,
+			}); err != nil {
+				return deleted, fmt.Errorf("deleting %s: %w", aws.ToString(obj.Key), err)
+			}
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
 // EnsureBucketEncryption verifies that the S3 bucket has server-side encryption
 // enabled. If encryption is not configured, it enables SSE-S3 as a baseline.
 // For higher data classifications (Highly Confidential+), customers should
@@ -702,7 +735,7 @@ func (c *Client) RunEphemeralPod(ctx context.Context, name, image string, comman
 			Namespace: c.namespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "slemify",
-				"slemify.io/ephemeral":       "true",
+				"slemify.io/ephemeral":         "true",
 			},
 		},
 		Spec: corev1.PodSpec{

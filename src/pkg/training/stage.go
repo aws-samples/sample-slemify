@@ -6,6 +6,7 @@ package training
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -32,6 +33,19 @@ func Stage(client *k8s.Client, cfg *config.ExpertConfig, sized config.SizedConfi
 			}
 			trainScript = UnslothTrainingScript(cfg, sized)
 			fmt.Println("  Incremental mode: will resume from checkpoint if available")
+		} else {
+			// Fresh (non-incremental) run: clear stale checkpoints from prior
+			// runs so the trainer's Spot-recovery logic doesn't resume from a
+			// checkpoint produced on different data (which would skip training
+			// entirely if the old run had >= the new step count). Checkpoints
+			// written during THIS run are re-uploaded by the in-pod callback, so
+			// within-run Spot interruptions still recover correctly.
+			prefix := fmt.Sprintf("models/%s/checkpoint-", cfg.Project.Name)
+			if n, err := client.DeleteS3Prefix(ctx, cfg.Data.Bucket, prefix); err != nil {
+				fmt.Printf("  ⚠ Could not clear stale checkpoints under %s: %v\n", prefix, err)
+			} else if n > 0 {
+				fmt.Printf("  Cleared %d stale checkpoint object(s) for a fresh training run\n", n)
+			}
 		}
 
 		// Create ConfigMap with training script
@@ -114,7 +128,10 @@ func TrainingJobManifest(cfg *config.ExpertConfig, sized config.SizedConfig, ns,
 		"slemify.io/workload": "gpu",
 	}
 
-	minGPUMemory := "8192" // >8Gi allows T4/A10G/L4/A100
+	minGPUMemory := "8192" // default: >8Gi allows T4/A10G/L4/A100
+	if sized.TrainingGPUMemoryFloor > 0 {
+		minGPUMemory = strconv.Itoa(sized.TrainingGPUMemoryFloor)
+	}
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -290,7 +307,7 @@ echo "Training complete"
 `, cfg.Data.Bucket, cfg.Project.Name, cfg.Data.Bucket, cfg.Project.Name, cfg.Model.GGUFFilename())},
 							SecurityContext: &corev1.SecurityContext{
 								AllowPrivilegeEscalation: &noEscalation,
-								RunAsUser: func() *int64 { u := int64(0); return &u }(),
+								RunAsUser:                func() *int64 { u := int64(0); return &u }(),
 							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
@@ -345,7 +362,7 @@ echo "Training complete"
 							},
 						},
 						{
-							Name: "workspace",
+							Name:         "workspace",
 							VolumeSource: WorkspaceVolumeSource(),
 						},
 						{

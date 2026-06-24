@@ -81,6 +81,9 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 	switch {
 	case modelSize <= 3:
 		sized.TrainingGPU = "NVIDIA GPU (≥16GB)"
+		sized.TrainingGPUMemoryFloor = 8192 // T4 (16GB) and up
+		sized.TrainBatchSize = 2
+		sized.GradAccumSteps = 4
 		sized.TrainingInstance = "Karpenter selects (g/p family)"
 		sized.InferenceInstance = "Spot (Karpenter selects)"
 		sized.InferenceCPU = "4"
@@ -89,6 +92,9 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 		sized.CheckpointInterval = 500 // steps
 	case modelSize <= 5:
 		sized.TrainingGPU = "NVIDIA GPU (≥16GB)"
+		sized.TrainingGPUMemoryFloor = 8192 // T4 (16GB) and up
+		sized.TrainBatchSize = 2
+		sized.GradAccumSteps = 4
 		sized.TrainingInstance = "Karpenter selects (g/p family)"
 		sized.InferenceInstance = "Spot (Karpenter selects)"
 		sized.InferenceCPU = "4"
@@ -97,6 +103,14 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 		sized.CheckpointInterval = 250
 	case modelSize <= 8:
 		sized.TrainingGPU = "NVIDIA GPU (≥16GB)"
+		sized.TrainingGPUMemoryFloor = 8192 // T4 (16GB) and up — fits via batch=1
+		// 8B QLoRA with packed 2048-token sequences OOMs a 16GB GPU at batch
+		// size 2; use batch size 1 with more gradient accumulation to keep the
+		// effective batch size at 8 while halving activation memory. This keeps
+		// training on the abundant 16GB GPU pool instead of requiring scarce
+		// 24GB instances.
+		sized.TrainBatchSize = 1
+		sized.GradAccumSteps = 8
 		sized.TrainingInstance = "Karpenter selects (g/p family)"
 		sized.InferenceInstance = "Spot (Karpenter selects)"
 		sized.InferenceCPU = "8"
@@ -104,7 +118,11 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 		sized.InferenceThreads = "8"
 		sized.CheckpointInterval = 100
 	default: // 8B-13B (tool targets ≤10B models)
-		sized.TrainingGPU = "NVIDIA GPU (≥16GB)"
+		sized.TrainingGPU = "NVIDIA GPU (≥24GB)"
+		// >8B does not fit a 16GB GPU even at batch size 1; require a 24GB GPU.
+		sized.TrainingGPUMemoryFloor = 23000
+		sized.TrainBatchSize = 1
+		sized.GradAccumSteps = 8
 		sized.TrainingInstance = "Karpenter selects (g/p family)"
 		sized.InferenceInstance = "Spot (Karpenter selects)"
 		sized.InferenceCPU = "16"
