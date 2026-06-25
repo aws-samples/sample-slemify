@@ -68,67 +68,54 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 	sampleCount := estimateSampleCount(data)
 
 	sized := SizedConfig{
+		TrainingGPU:       "none (CPU)",
+		TrainingInstance:  "Spot CPU (Karpenter selects)",
 		WarmupRatio:       0.1,
 		Scheduler:         "cosine",
 		EarlyStopPatience: 2,
 		KEDAMaxReplicas:   10,
 	}
 
-	// Model size -> resource requirements for inference.
-	// The pod expresses CPU/memory needs; Karpenter picks the cheapest instance.
-	// Training GPU description is for display/reporting only — actual scheduling
-	// uses node affinity on instance-gpu-memory.
+	// Model size -> resource requirements. Inference sizing drives the serving
+	// pod (CPU/memory/threads). Convert sizing drives the CPU GGUF conversion
+	// Job: it holds the downloaded weights, the intermediate f16 GGUF, and the
+	// quantized output on the node's ephemeral disk, and loads the model into
+	// memory during conversion. Ephemeral is kept within the slm pool's node
+	// volume (the convert runs on the standard CPU pool, no dedicated infra).
+	// There is no GPU and no fine-tuning in this path.
 	switch {
 	case modelSize <= 3:
-		sized.TrainingGPU = "NVIDIA GPU (≥16GB)"
-		sized.TrainingGPUMemoryFloor = 8192 // T4 (16GB) and up
-		sized.TrainBatchSize = 2
-		sized.GradAccumSteps = 4
-		sized.TrainingInstance = "Karpenter selects (g/p family)"
 		sized.InferenceInstance = "Spot (Karpenter selects)"
 		sized.InferenceCPU = "4"
 		sized.InferenceMemory = "6Gi"
 		sized.InferenceThreads = "4"
 		sized.CheckpointInterval = 500 // steps
+		sized.ConvertMemory = "16Gi"
+		sized.ConvertEphemeralStorage = "40Gi"
 	case modelSize <= 5:
-		sized.TrainingGPU = "NVIDIA GPU (≥16GB)"
-		sized.TrainingGPUMemoryFloor = 8192 // T4 (16GB) and up
-		sized.TrainBatchSize = 2
-		sized.GradAccumSteps = 4
-		sized.TrainingInstance = "Karpenter selects (g/p family)"
 		sized.InferenceInstance = "Spot (Karpenter selects)"
 		sized.InferenceCPU = "4"
 		sized.InferenceMemory = "8Gi"
 		sized.InferenceThreads = "4"
 		sized.CheckpointInterval = 250
+		sized.ConvertMemory = "24Gi"
+		sized.ConvertEphemeralStorage = "48Gi"
 	case modelSize <= 8:
-		sized.TrainingGPU = "NVIDIA GPU (≥16GB)"
-		sized.TrainingGPUMemoryFloor = 8192 // T4 (16GB) and up — fits via batch=1
-		// 8B QLoRA with packed 2048-token sequences OOMs a 16GB GPU at batch
-		// size 2; use batch size 1 with more gradient accumulation to keep the
-		// effective batch size at 8 while halving activation memory. This keeps
-		// training on the abundant 16GB GPU pool instead of requiring scarce
-		// 24GB instances.
-		sized.TrainBatchSize = 1
-		sized.GradAccumSteps = 8
-		sized.TrainingInstance = "Karpenter selects (g/p family)"
 		sized.InferenceInstance = "Spot (Karpenter selects)"
 		sized.InferenceCPU = "8"
 		sized.InferenceMemory = "16Gi"
 		sized.InferenceThreads = "8"
 		sized.CheckpointInterval = 100
+		sized.ConvertMemory = "40Gi"
+		sized.ConvertEphemeralStorage = "64Gi"
 	default: // 8B-13B (tool targets ≤10B models)
-		sized.TrainingGPU = "NVIDIA GPU (≥24GB)"
-		// >8B does not fit a 16GB GPU even at batch size 1; require a 24GB GPU.
-		sized.TrainingGPUMemoryFloor = 23000
-		sized.TrainBatchSize = 1
-		sized.GradAccumSteps = 8
-		sized.TrainingInstance = "Karpenter selects (g/p family)"
 		sized.InferenceInstance = "Spot (Karpenter selects)"
 		sized.InferenceCPU = "16"
 		sized.InferenceMemory = "24Gi"
 		sized.InferenceThreads = "16"
 		sized.CheckpointInterval = 50
+		sized.ConvertMemory = "56Gi"
+		sized.ConvertEphemeralStorage = "72Gi"
 	}
 
 	// No quantization (F16) needs ~3x more memory than Q4_K_M

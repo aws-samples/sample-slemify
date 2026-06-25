@@ -14,10 +14,19 @@ type ExpertConfig struct {
 }
 
 // Task values. Each maps onto one of three implementation families:
-//   - generation:     causal LM, GPU fine-tune, CPU serve (llama.cpp/GGUF)
+//   - generation:     causal LM, served stock (no fine-tuning): download base ->
+//     convert to GGUF -> quantize -> CPU serve (llama.cpp).
 //   - classification, scoring, extraction: frozen encoder + trained head,
 //     CPU train, CPU serve (encoder-head family)
 //   - embedding:       contrastive encoder, CPU serve (embedding family)
+//
+// Why generation is served stock (rationale): fine-tune the discriminative
+// models (classification/scoring/extraction/embedding) where labels and
+// embeddings actually move the needle. For generative knowledge tasks, serve the
+// stock model + RAG instead — RAG supplies the knowledge and prompting plus
+// constrained decoding supply the format, so a fine-tune buys little. Generative
+// fine-tuning for tool-calling and distillation is a deliberate future task, not
+// shipped in this version.
 //
 // reranking is a valid schema value but is intentionally NOT a Slemify task:
 // fine-tuning a strong cross-encoder on synthetic data degrades it (it needs
@@ -172,7 +181,7 @@ type DataConfig struct {
 	Bucket     string           `json:"bucket" yaml:"bucket" validate:"required"`
 	Path       string           `json:"path" yaml:"path" validate:"required"`
 	Sources    []SourceConfig   `json:"sources,omitempty" yaml:"sources,omitempty" validate:"omitempty,dive"`
-	Synthetic  SyntheticConfig  `json:"synthetic" yaml:"synthetic" validate:"required"`
+	Synthetic  SyntheticConfig  `json:"synthetic" yaml:"synthetic" validate:"omitempty"`
 	Grounding  *GroundingConfig `json:"grounding,omitempty" yaml:"grounding,omitempty"`
 	Evaluation *EvalDataConfig  `json:"evaluation,omitempty" yaml:"evaluation,omitempty"`
 }
@@ -216,6 +225,10 @@ type EvalDataConfig struct {
 	Sources []SourceConfig `json:"sources,omitempty" yaml:"sources,omitempty"`
 }
 
+// TrainingConfig holds knobs for the model training Jobs. These now apply ONLY
+// to the encoder-head/embedding families (the discriminative models that are
+// actually fine-tuned). Generation is served stock and has no fine-tuning, so
+// these fields are ignored for task=generation.
 type TrainingConfig struct {
 	Spot        bool `json:"spot" yaml:"spot"`
 	Epochs      int  `json:"epochs,omitempty" yaml:"epochs,omitempty" validate:"omitempty,min=1,max=20"` // override auto-sized epochs
@@ -232,11 +245,10 @@ type EvaluationConfig struct {
 
 // SizedConfig holds the auto-computed infrastructure values produced by AutoSize.
 type SizedConfig struct {
-	TrainingGPU            string
-	TrainingGPUMemoryFloor int    // min instance-gpu-memory (MiB) for training node affinity
-	TrainBatchSize         int    // per_device_train_batch_size
-	GradAccumSteps         int    // gradient_accumulation_steps
-	TrainingInstance       string // display only — Karpenter selects actual instance
+	TrainingGPU             string
+	ConvertMemory           string // memory request/limit for the generation GGUF convert Job
+	ConvertEphemeralStorage string // ephemeral-storage request/limit for the convert Job (weights + f16 + quantized output)
+	TrainingInstance        string // display only — Karpenter selects actual instance
 	InferenceInstance      string // display only — Karpenter selects actual instance
 	InferenceCPU           string // CPU request for inference pod (e.g., "4")
 	InferenceMemory        string // Memory request for inference pod (e.g., "8Gi")

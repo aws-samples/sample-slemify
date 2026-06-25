@@ -21,6 +21,7 @@ func AllContainers() []ContainerDef {
 		{Name: "data-pipeline", ContextDir: "containers/data-pipeline"},
 		{Name: "classifier-trainer", ContextDir: "containers/classifier-trainer"},
 		{Name: "classifier-serving", ContextDir: "containers/classifier-serving"},
+		{Name: "gguf-convert", ContextDir: "containers/gguf-convert"},
 	}
 }
 

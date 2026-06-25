@@ -4,67 +4,26 @@ project:
   name: k8s-autoscaling-auditor
   task: generation
   output_format: free_form
+  # Description of the expert's scope. The model is served stock and grounded in
+  # retrieved documentation at serving time (RAG), so this is metadata, not a
+  # training objective: it documents what the expert is for, not a learned schema.
   domain: >
-    Expert auditor for Kubernetes autoscaling configurations on EKS.
-    Receives technical queries that have passed triage (Tier 1) and
-    produces structured reasoning about what is wrong, why it is
-    dangerous, and how to fix it. Covers Karpenter v1 NodePool and
-    EC2NodeClass, KEDA v2.14+ ScaledObject and TriggerAuthentication,
-    HPA v2, and PodDisruptionBudgets. The model compares user-submitted
-    YAML (often LLM-generated and subtly wrong) against correct API
-    syntax and produces a correction report with severity, affected
-    resource, root cause analysis, and remediation steps.
-  labels:
-    error_type:
-      - deprecated_api
-      - field_mismatch
-      - resource_conflict
-      - logic_error
-      - security_gap
-      - valid_config
-    severity:
-      - critical
-      - high
-      - medium
-      - low
-      - info
-    resource:
-      - karpenter_nodepool
-      - karpenter_ec2nodeclass
-      - keda_scaledobject
-      - keda_triggerauthentication
-      - hpa
-      - pdb
-      - deployment
-      - multi_resource
+    Kubernetes autoscaling auditor for Amazon EKS. Answers technical
+    questions about Karpenter v1 (NodePool, EC2NodeClass), KEDA v2
+    (ScaledObject, TriggerAuthentication), HPA v2, and PodDisruptionBudgets,
+    grounding its answers in retrieved documentation. Reviews user-submitted
+    YAML for misconfigurations and explains what is wrong, why it is risky,
+    and how to fix it.
 
 model:
-  base: ""  # HuggingFace model ID (8B recommended for structured reasoning)
+  base: ""  # HuggingFace model ID (8B recommended for this reasoning task)
   quantize: q4_k_m
 
 data:
+  # Generation is served stock (no fine-tuning): the pipeline downloads the base
+  # model, converts it to GGUF, quantizes it, and uploads it to
+  # s3://<bucket>/models/<project>/. bucket locates that model in S3. Knowledge
+  # comes from RAG at serving time, not from training, so there is no synthetic
+  # data, grounding, or evaluation generation here.
   bucket: slemify-data
   path: k8s-autoscaling/data/
-  sources:
-    - path: queries/
-      type: raw
-  # RAG-faithful training: generate synthetic data against the same retrieval
-  # corpus served at inference (exported by index-knowledge.py --export-s3), so
-  # the auditor learns to ground answers in the supplied REFERENCE DOCUMENTATION
-  # instead of parametric memory. abstention_ratio reserves a slice of examples
-  # that teach the model to say "not in the docs" rather than hallucinate.
-  grounding:
-    path: knowledge/
-    abstention_ratio: 0.15
-  synthetic:
-    model: eu.anthropic.claude-sonnet-4-6
-    pairs: 2500
-  evaluation:
-    model: eu.anthropic.claude-sonnet-4-6
-    pairs: 250
-    sources:
-      - path: eval-queries/
-        type: raw
-
-training:
-  spot: true

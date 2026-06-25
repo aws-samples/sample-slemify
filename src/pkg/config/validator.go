@@ -67,6 +67,14 @@ func Validate(cfg *ExpertConfig) []ValidationError {
 		})
 	}
 	if cfg.Project.IsEncoderHead() {
+		// Encoder-head families generate synthetic training data (the head is fit
+		// on synthesized examples), so synthetic generation is required here.
+		if cfg.Data.Synthetic == (SyntheticConfig{}) {
+			errs = append(errs, ValidationError{
+				Field:   "data.synthetic",
+				Message: fmt.Sprintf("task %q requires data.synthetic (model + pairs) for training data generation", cfg.Project.Task),
+			})
+		}
 		// Classification and extraction predict from a label taxonomy, so it's
 		// required. Scoring outputs a number and needs no labels.
 		if cfg.Project.UsesLabels() && len(cfg.Project.Labels) == 0 {
@@ -91,6 +99,12 @@ func Validate(cfg *ExpertConfig) []ValidationError {
 		// Embedding (contrastive) trains an encoder on (query, document) pairs
 		// synthesized from the raw corpus. It has no label taxonomy, no
 		// classifier head, and is not quantized to GGUF.
+		if cfg.Data.Synthetic == (SyntheticConfig{}) {
+			errs = append(errs, ValidationError{
+				Field:   "data.synthetic",
+				Message: "task=embedding requires data.synthetic (model + pairs) for contrastive pair generation",
+			})
+		}
 		if len(cfg.Project.Labels) > 0 {
 			errs = append(errs, ValidationError{
 				Field:   "project.labels",

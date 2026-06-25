@@ -51,11 +51,11 @@ func allContainers() map[string]corev1.Container {
 		result["data/"+c.Name] = c
 	}
 
-	tj := training.TrainingJobManifest(cfg, sized, ns, "test-cm", pipeline.NewPipelineContext())
-	for _, c := range tj.Spec.Template.Spec.InitContainers {
+	cj := training.ConvertJobManifest(cfg, sized, ns, pipeline.NewPipelineContext())
+	for _, c := range cj.Spec.Template.Spec.InitContainers {
 		result["training-init/"+c.Name] = c
 	}
-	for _, c := range tj.Spec.Template.Spec.Containers {
+	for _, c := range cj.Spec.Template.Spec.Containers {
 		result["training/"+c.Name] = c
 	}
 
@@ -84,9 +84,6 @@ func TestSecurityNoPrivilegeEscalation(t *testing.T) {
 	for name, c := range allContainers() {
 		if c.SecurityContext == nil {
 			continue
-		}
-		if name == "training/training" {
-			continue // runs as root for GPU access
 		}
 		if c.SecurityContext.AllowPrivilegeEscalation == nil || *c.SecurityContext.AllowPrivilegeEscalation {
 			t.Errorf("%s: AllowPrivilegeEscalation must be false", name)
@@ -150,8 +147,8 @@ func TestSecurityProjectLabel(t *testing.T) {
 	dj := data.DataJobManifest(cfg, ns, "test-cm", pipeline.NewPipelineContext())
 	assertLbl(t, "data", dj.Labels, "slemify.io/project", cfg.Project.Name)
 
-	tj := training.TrainingJobManifest(cfg, sized, ns, "test-cm", pipeline.NewPipelineContext())
-	assertLbl(t, "training", tj.Labels, "slemify.io/project", cfg.Project.Name)
+	cj := training.ConvertJobManifest(cfg, sized, ns, pipeline.NewPipelineContext())
+	assertLbl(t, "training", cj.Labels, "slemify.io/project", cfg.Project.Name)
 
 	im := serving.GenerateInferenceManifests(cfg, sized, ns, pipeline.NewPipelineContext())
 	assertLbl(t, "serving", im.Deployment.Labels, "slemify.io/project", cfg.Project.Name)
@@ -165,8 +162,8 @@ func TestSecurityManagedByLabel(t *testing.T) {
 	dj := data.DataJobManifest(cfg, ns, "test-cm", pipeline.NewPipelineContext())
 	assertLbl(t, "data", dj.Labels, "app.kubernetes.io/managed-by", "slemify")
 
-	tj := training.TrainingJobManifest(cfg, sized, ns, "test-cm", pipeline.NewPipelineContext())
-	assertLbl(t, "training", tj.Labels, "app.kubernetes.io/managed-by", "slemify")
+	cj := training.ConvertJobManifest(cfg, sized, ns, pipeline.NewPipelineContext())
+	assertLbl(t, "training", cj.Labels, "app.kubernetes.io/managed-by", "slemify")
 }
 
 // --- No Hardcoded Secrets ---
@@ -188,13 +185,61 @@ func TestSecurityNoHardcodedSecrets(t *testing.T) {
 // --- Container Images ---
 
 func TestSecurityNoUnexpectedLatestTag(t *testing.T) {
-	allowed := map[string]bool{
-		"unsloth/unsloth:2026.5.7-pt2.10.0-vllm-0.16.0-cu12.8-studio-release-v0.1.41-beta-2026-MAY-24": true,
-		"amazon/aws-cli:latest":  true,
-	}
+	// Slemify-built images (ghcr.io/slemify/*) are tagged :latest by the build
+	// pipeline; third-party images must be pinned.
+	allowed := map[string]bool{}
 	for name, c := range allContainers() {
 		if strings.HasSuffix(c.Image, ":latest") && !allowed[c.Image] && !strings.Contains(c.Image, "slemify/") {
 			t.Errorf("%s: image %s uses :latest — pin a version", name, c.Image)
+		}
+	}
+}
+
+// --- Convert Job (generation) ---
+
+// TestSecurityConvertJobCPUOnly verifies the generation convert Job runs only on
+// the CPU pool: no GPU nodeSelector, no nvidia toleration, no GPU resources.
+func TestSecurityConvertJobCPUOnly(t *testing.T) {
+	cfg := secConfig()
+	sized := secSized()
+	job := training.ConvertJobManifest(cfg, sized, "test-ns", pipeline.NewPipelineContext())
+	spec := job.Spec.Template.Spec
+
+	if spec.NodeSelector["slemify.io/workload"] != "slm" {
+		t.Errorf("convert job must target the CPU (slm) pool, got nodeSelector %v", spec.NodeSelector)
+	}
+	for k := range spec.NodeSelector {
+		if strings.Contains(k, "gpu") || strings.Contains(k, "nvidia") {
+			t.Errorf("convert job must not have a GPU nodeSelector key, found %q", k)
+		}
+	}
+	for _, tol := range spec.Tolerations {
+		if strings.Contains(tol.Key, "nvidia") || strings.Contains(tol.Key, "gpu") {
+			t.Errorf("convert job must not tolerate GPU taints, found %q", tol.Key)
+		}
+	}
+	for _, c := range spec.Containers {
+		if _, ok := c.Resources.Limits["nvidia.com/gpu"]; ok {
+			t.Errorf("convert container %q must not request GPU resources", c.Name)
+		}
+	}
+}
+
+// TestSecurityConvertJobNoShellInjection verifies the convert Job exposes no
+// shell-injection vector: it runs the image ENTRYPOINT with structured env vars
+// rather than interpolating config values into a shell command string.
+func TestSecurityConvertJobNoShellInjection(t *testing.T) {
+	cfg := secConfig()
+	sized := secSized()
+	job := training.ConvertJobManifest(cfg, sized, "test-ns", pipeline.NewPipelineContext())
+	for _, c := range job.Spec.Template.Spec.Containers {
+		if len(c.Command) > 0 {
+			t.Errorf("convert container %q should not override Command with a shell wrapper, got %v", c.Name, c.Command)
+		}
+		for _, arg := range c.Args {
+			if strings.Contains(arg, "&&") || strings.Contains(arg, ";") || strings.Contains(arg, "$(") {
+				t.Errorf("convert container %q args look like a shell command: %q", c.Name, arg)
+			}
 		}
 	}
 }
@@ -206,8 +251,8 @@ func TestSecurityBatchJobsHaveDoNotDisrupt(t *testing.T) {
 	sized := secSized()
 	ns := "test-ns"
 
-	tj := training.TrainingJobManifest(cfg, sized, ns, "test-cm", pipeline.NewPipelineContext())
-	if tj.Spec.Template.Annotations["karpenter.sh/do-not-disrupt"] != "true" {
+	cj := training.ConvertJobManifest(cfg, sized, ns, pipeline.NewPipelineContext())
+	if cj.Spec.Template.Annotations["karpenter.sh/do-not-disrupt"] != "true" {
 		t.Error("training: missing do-not-disrupt annotation")
 	}
 }

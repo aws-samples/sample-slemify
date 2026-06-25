@@ -29,12 +29,10 @@ all: build-linux-amd64 build-linux-arm64 build-darwin-arm64
 build-data-pipeline:
 	docker build -t ghcr.io/slemify/data-pipeline:latest containers/data-pipeline/
 
-build-training:
-	@echo "NOTE: Training now uses the official unsloth/unsloth Docker image directly."
-	@echo "This target is retained for building the deprecated custom training image."
-	docker build -t ghcr.io/slemify/training:latest containers/training/
+build-gguf-convert:
+	docker build -t ghcr.io/slemify/gguf-convert:latest containers/gguf-convert/
 
-build-containers: build-data-pipeline build-training
+build-containers: build-data-pipeline build-gguf-convert
 
 clean:
 	rm -f $(BINARY) $(BINARY)-linux-* $(BINARY)-darwin-*

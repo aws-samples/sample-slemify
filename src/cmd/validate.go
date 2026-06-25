@@ -95,15 +95,24 @@ var validateCmd = &cobra.Command{
 		fmt.Println("✓ Config is valid.")
 		fmt.Println()
 		fmt.Println("Auto-sized values:")
-		fmt.Printf("  Training GPU:         %s\n", sized.TrainingGPU)
-		fmt.Printf("  Training instance:    %s\n", sized.TrainingInstance)
-		fmt.Printf("  Inference instance:   %s\n", sized.InferenceInstance)
-		fmt.Printf("  Checkpoint interval:  every %d steps\n", sized.CheckpointInterval)
-		fmt.Printf("  Epochs:               %d\n", sized.Epochs)
-		fmt.Printf("  Learning rate:        %g\n", sized.LearningRate)
-		fmt.Printf("  Warmup ratio:         %g\n", sized.WarmupRatio)
-		fmt.Printf("  LR scheduler:         %s\n", sized.Scheduler)
-		fmt.Printf("  Early stop patience:  %d evals\n", sized.EarlyStopPatience)
+		if cfg.Project.IsGeneration() {
+			// Generation is served stock: download base -> convert to GGUF ->
+			// quantize on CPU. No training, so no epochs/LR/scheduler.
+			fmt.Printf("  Base model:           %s\n", cfg.Model.Base)
+			fmt.Printf("  Quantization:         %s\n", cfg.Model.QuantizeLabel())
+			fmt.Printf("  Convert (CPU) memory: %s\n", sized.ConvertMemory)
+			fmt.Printf("  Convert ephemeral:    %s\n", sized.ConvertEphemeralStorage)
+			fmt.Printf("  Inference instance:   %s\n", sized.InferenceInstance)
+		} else {
+			fmt.Printf("  Training instance:    %s\n", sized.TrainingInstance)
+			fmt.Printf("  Inference instance:   %s\n", sized.InferenceInstance)
+			fmt.Printf("  Checkpoint interval:  every %d steps\n", sized.CheckpointInterval)
+			fmt.Printf("  Epochs:               %d\n", sized.Epochs)
+			fmt.Printf("  Learning rate:        %g\n", sized.LearningRate)
+			fmt.Printf("  Warmup ratio:         %g\n", sized.WarmupRatio)
+			fmt.Printf("  LR scheduler:         %s\n", sized.Scheduler)
+			fmt.Printf("  Early stop patience:  %d evals\n", sized.EarlyStopPatience)
+		}
 
 		return nil
 	},

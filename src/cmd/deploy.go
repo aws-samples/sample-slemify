@@ -109,7 +109,14 @@ func deploySingleExpert(ctx context.Context, cmd *cobra.Command, cfg *config.Exp
 		if err := setupClusterInfrastructure(ctx, client, cfg, sized, pc); err != nil {
 			return err
 		}
-		runner.RegisterStage(pipeline.StageData, data.Stage(client, cfg, namespace, pc))
+		if cfg.Project.IsGeneration() {
+			// Generation is served stock: no synthetic-data step, no fine-tuning.
+			// DATA is a no-op; the convert stage downloads the base, converts to
+			// GGUF, and quantizes it on CPU.
+			runner.RegisterStage(pipeline.StageData, func(ctx context.Context) ([]string, error) { return nil, nil })
+		} else {
+			runner.RegisterStage(pipeline.StageData, data.Stage(client, cfg, namespace, pc))
+		}
 		if cfg.Project.IsEncoderHead() || cfg.Project.IsEmbedding() {
 			// Encoder family (classification/scoring/embedding): train on CPU
 			// (frozen-head fit or contrastive fine-tune) and export ONNX. No GPU,
@@ -118,7 +125,10 @@ func deploySingleExpert(ctx context.Context, cmd *cobra.Command, cfg *config.Exp
 			runner.RegisterStage(pipeline.StageQuantize, func(ctx context.Context) ([]string, error) { return nil, nil })
 			runner.RegisterStage(pipeline.StageServing, serving.Stage(client, cfg, sized, namespace, pc))
 		} else {
-			runner.RegisterStage(pipeline.StageTraining, training.Stage(client, cfg, sized, namespace, pc))
+			// Generation: CPU convert (download base -> GGUF -> quantize -> S3).
+			// No fine-tuning. Quantize is a no-op (folded into convert); serving
+			// reads the GGUF from S3 unchanged.
+			runner.RegisterStage(pipeline.StageTraining, training.ConvertStage(client, cfg, sized, namespace, pc))
 			runner.RegisterStage(pipeline.StageQuantize, func(ctx context.Context) ([]string, error) { return nil, nil })
 			runner.RegisterStage(pipeline.StageServing, serving.Stage(client, cfg, sized, namespace, pc))
 		}
@@ -230,14 +240,6 @@ func setupClusterInfrastructure(ctx context.Context, client *k8s.Client, cfg *co
 	if err := client.ApplyYAML(ctx, []byte(slmNodePool)); err != nil {
 		return fmt.Errorf("applying slemify-slm NodePool: %w", err)
 	}
-	gpuNodeClass := training.GPUEC2NodeClassManifest(clusterName, nodeRole, cfg.Project.Name)
-	gpuNodePool := training.GPUNodePoolManifest(cfg, sized)
-	if err := client.ApplyYAML(ctx, []byte(gpuNodeClass)); err != nil {
-		return fmt.Errorf("applying slemify-gpu EC2NodeClass: %w", err)
-	}
-	if err := client.ApplyYAML(ctx, []byte(gpuNodePool)); err != nil {
-		return fmt.Errorf("applying slemify-gpu NodePool: %w", err)
-	}
 
 	fmt.Println("Setting up NodeOverlays...")
 	if client.IsNodeOverlayEnabled(ctx) {
@@ -271,15 +273,23 @@ func setupClusterInfrastructure(ctx context.Context, client *k8s.Client, cfg *co
 }
 
 func registerDryRunStages(runner *pipeline.Runner, cfg *config.ExpertConfig, sized config.SizedConfig, pc *pipeline.PipelineContext) {
-	runner.RegisterStage(pipeline.StageData, func(ctx context.Context) ([]string, error) {
-		fmt.Printf("  Bucket: s3://%s/%s\n", cfg.Data.Bucket, cfg.Data.Path)
-		fmt.Printf("  Sources: %d\n", len(cfg.Data.Sources))
-		fmt.Printf("  Synthetic: %d pairs via %s\n", cfg.Data.Synthetic.Pairs, cfg.Data.Synthetic.Model)
-		return []string{
-			fmt.Sprintf("s3://%s/%s/processed/train.jsonl", cfg.Data.Bucket, cfg.Project.Name),
-			fmt.Sprintf("s3://%s/%s/processed/eval.jsonl", cfg.Data.Bucket, cfg.Project.Name),
-		}, nil
-	})
+	if cfg.Project.IsGeneration() {
+		// Generation is served stock: no synthetic-data step, no fine-tuning.
+		runner.RegisterStage(pipeline.StageData, func(ctx context.Context) ([]string, error) {
+			fmt.Printf("  Data: n/a (generation is served stock; no synthetic data)\n")
+			return nil, nil
+		})
+	} else {
+		runner.RegisterStage(pipeline.StageData, func(ctx context.Context) ([]string, error) {
+			fmt.Printf("  Bucket: s3://%s/%s\n", cfg.Data.Bucket, cfg.Data.Path)
+			fmt.Printf("  Sources: %d\n", len(cfg.Data.Sources))
+			fmt.Printf("  Synthetic: %d pairs via %s\n", cfg.Data.Synthetic.Pairs, cfg.Data.Synthetic.Model)
+			return []string{
+				fmt.Sprintf("s3://%s/%s/processed/train.jsonl", cfg.Data.Bucket, cfg.Project.Name),
+				fmt.Sprintf("s3://%s/%s/processed/eval.jsonl", cfg.Data.Bucket, cfg.Project.Name),
+			}, nil
+		})
+	}
 
 	if cfg.Project.IsEncoderHead() || cfg.Project.IsEmbedding() {
 		// Encoder family (classification/scoring/embedding): CPU training + ONNX,
@@ -313,15 +323,16 @@ func registerDryRunStages(runner *pipeline.Runner, cfg *config.ExpertConfig, siz
 
 	runner.RegisterStage(pipeline.StageTraining, func(ctx context.Context) ([]string, error) {
 		fmt.Printf("  Base model: %s\n", cfg.Model.Base)
-		fmt.Printf("  Instance: %s (%s)\n", sized.TrainingInstance, sized.TrainingGPU)
-		fmt.Printf("  Spot: %v\n", cfg.Training.Spot)
-		fmt.Printf("  Epochs: %d, LR: %g\n", sized.Epochs, sized.LearningRate)
+		fmt.Printf("  Engine: download base -> convert to GGUF -> quantize (CPU, no GPU, no fine-tuning)\n")
+		fmt.Printf("  Instance: %s\n", sized.TrainingInstance)
+		fmt.Printf("  Quantization: %s\n", cfg.Model.QuantizeLabel())
+		fmt.Printf("  Memory: %s, Ephemeral storage: %s\n", sized.ConvertMemory, sized.ConvertEphemeralStorage)
 		return []string{
-			fmt.Sprintf("s3://%s/models/%s/full/", cfg.Data.Bucket, cfg.Project.Name),
+			fmt.Sprintf("s3://%s/models/%s/%s", cfg.Data.Bucket, cfg.Project.Name, cfg.Model.GGUFFilename()),
 		}, nil
 	})
 	runner.RegisterStage(pipeline.StageQuantize, func(ctx context.Context) ([]string, error) {
-		fmt.Printf("  Quantization: %s (GGUF)\n", cfg.Model.QuantizeLabel())
+		fmt.Printf("  Quantization: %s (folded into the convert stage)\n", cfg.Model.QuantizeLabel())
 		return []string{
 			fmt.Sprintf("s3://%s/models/%s/%s", cfg.Data.Bucket, cfg.Project.Name, cfg.Model.GGUFFilename()),
 		}, nil
