@@ -16,9 +16,9 @@
 #      torch.load guard / CVE-2025-32434). The transformers 5.x RCE fixes
 #      (CVE-2026-1839 v5.0, CVE-2026-4372 v5.3 — both require loading an
 #      UNTRUSTED model checkpoint) are blocked upstream until optimum-onnx
-#      supports 5.x, so ignore transformers >=5.0.0 to stop recreated
-#      unresolvable PRs. This pipeline only loads trusted, pinned models
-#      (BAAI/bge-* + its own artifacts), so that exposure is low. Lift this
+#      supports 5.x, so ignore transformers >=4.58.0 (the optimum-onnx cap) to
+#      stop recreated, unbuildable PRs. This pipeline only loads trusted, pinned
+#      models (BAAI/bge-* + its own artifacts), so that exposure is low. Lift this
 #      ignore once optimum-onnx supports transformers 5.x.
 version: 2
 updates:
@@ -40,8 +40,12 @@ updates:
           - "numpy"
           - "onnx*"
     ignore:
+      # optimum-onnx 0.1.0 (the ONNX exporter) caps transformers <4.58.0, so any
+      # bump to 4.58.0+ (including the 5.x line) is unbuildable here. Block the
+      # whole range, not just 5.x, so Dependabot stops proposing PRs that fail to
+      # install. Lift to track the cap once optimum-onnx supports newer ranges.
       - dependency-name: "transformers"
-        versions: [">=5.0.0"]
+        versions: [">=4.58.0"]
       # optimum-onnx 0.1.0 (the ONNX exporter) pins optimum~=2.1.0, so optimum
       # 2.2.0 is unresolvable and breaks the build. Hold optimum at 2.1.x until
       # optimum-onnx supports 2.2.0; lift alongside the transformers 5.x ignore.

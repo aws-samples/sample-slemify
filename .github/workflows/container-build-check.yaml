@@ -1,0 +1,31 @@
+name: Container Build Check
+
+# Build the pip-based containers on pull requests that touch them, so a
+# dependency bump (for example a Dependabot PR editing requirements.txt) that
+# breaks image resolution is caught on the PR instead of at the next build.
+# A failing pip resolve fails `docker build`, which is the gate we want.
+
+on:
+  pull_request:
+    paths:
+      - "src/containers/classifier-trainer/**"
+      - "src/containers/data-pipeline/**"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        container:
+          - classifier-trainer
+          - data-pipeline
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build ${{ matrix.container }} image
+        run: docker build -t "slemify-${{ matrix.container }}:ci" "src/containers/${{ matrix.container }}"
