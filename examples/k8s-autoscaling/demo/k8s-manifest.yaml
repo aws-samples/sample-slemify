@@ -210,13 +210,10 @@ spec:
             - containerPort: 8080
               protocol: TCP
           env:
-            # Cross-encoder scores ~10 short pairs per request. Thread counts
-            # are tied to the CPU request (not the node's core count) so the
-            # pod only uses the capacity it asked the scheduler for.
-            - name: OMP_NUM_THREADS
-              value: "6"
-            - name: MKL_NUM_THREADS
-              value: "6"
+            # Thread counts are detected at startup by app.py (_detect_threads):
+            # it reads the cgroup CPU limit if one is set, otherwise the cores
+            # available on the node. No hardcoded value, so the pod adapts to
+            # whatever CPU it's scheduled with. Set RERANKER_THREADS to override.
             # torch/transformers scratch space (root filesystem is read-only).
             - name: HOME
               value: "/tmp"
@@ -226,9 +223,10 @@ spec:
             requests:
               # Memory limit must equal request (security standard).
               # The cross-encoder (~280MB) plus torch runtime fits in 2Gi.
-              # CPU request drives the thread counts above; reranking is
-              # compute-bound, so more cores cut the cross-encoder latency.
-              cpu: "6"
+              # CPU request is the scheduling floor; reranking is compute-bound
+              # and bursts onto idle node cores (no CPU limit) per the detected
+              # thread count above.
+              cpu: "10"
               memory: 2Gi
             limits:
               memory: 2Gi

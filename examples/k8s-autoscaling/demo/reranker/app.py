@@ -20,6 +20,50 @@ Usage:
 
 import os
 
+
+def _detect_threads() -> int:
+    """Threads to use for CPU inference, detected at startup so the pod adapts to
+    whatever CPU it's actually given (no hardcoded magic number).
+
+    Priority:
+      1. RERANKER_THREADS env  - explicit operator override.
+      2. cgroup CPU quota      - the container's CPU *limit*, if one is set.
+      3. CPUs the process may run on (sched_getaffinity) - i.e. the node's cores
+         when there is no limit.
+    """
+    override = os.environ.get("RERANKER_THREADS", "")
+    if override.isdigit() and int(override) > 0:
+        return int(override)
+    # cgroup v2: "<quota> <period>" or "max <period>"
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            quota, period = f.read().split()
+            if quota != "max":
+                return max(1, round(int(quota) / int(period)))
+    except (OSError, ValueError):
+        pass
+    # cgroup v1
+    try:
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as fq, \
+                open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as fp:
+            quota, period = int(fq.read()), int(fp.read())
+            if quota > 0 and period > 0:
+                return max(1, round(quota / period))
+    except (OSError, ValueError):
+        pass
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:
+        return max(1, os.cpu_count() or 1)
+
+
+# Pin BLAS/OpenMP thread counts before torch is imported (via sentence_transformers)
+# so the native libraries honor the detected value instead of spawning one thread
+# per node core regardless of what this pod was scheduled with.
+_THREADS = _detect_threads()
+os.environ.setdefault("OMP_NUM_THREADS", str(_THREADS))
+os.environ.setdefault("MKL_NUM_THREADS", str(_THREADS))
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -43,6 +87,9 @@ class RerankRequest(BaseModel):
 @app.on_event("startup")
 def load_model():
     global _model
+    import torch
+    torch.set_num_threads(_THREADS)
+    print(f"Reranker using {_THREADS} CPU threads")
     print(f"Loading reranker model: {MODEL_NAME}")
     _model = CrossEncoder(MODEL_NAME, device="cpu")
     # Touch the model once so the first real request doesn't pay the lazy-init cost.
