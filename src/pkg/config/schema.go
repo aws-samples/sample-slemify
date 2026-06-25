@@ -133,7 +133,7 @@ type ModelConfig struct {
 	// tagger is feature-based and uses no encoder. Per-task requiredness is
 	// enforced in the validator.
 	Base     string `json:"base" yaml:"base" validate:"omitempty"`
-	Quantize string `json:"quantize,omitempty" yaml:"quantize,omitempty" validate:"omitempty,oneof=q4_k_m q8_0 f16 none"` // default: q4_k_m (generation only)
+	Quantize string `json:"quantize,omitempty" yaml:"quantize,omitempty" validate:"omitempty,oneof=q4_k_m q5_k_m q8_0 f16 none"` // default: q4_k_m (generation only)
 	// Head selects the classifier head for encoder-head tasks. Ignored for
 	// generation/embedding.
 	Head string `json:"head,omitempty" yaml:"head,omitempty" validate:"omitempty,oneof=logistic linear mlp"`
@@ -172,6 +172,8 @@ func (m ModelConfig) QuantizeLabel() string {
 		return "F16 (no quantization)"
 	case "q8_0":
 		return "Q8_0"
+	case "q5_k_m":
+		return "Q5_K_M"
 	default:
 		return "Q4_K_M"
 	}

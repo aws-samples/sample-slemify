@@ -24,6 +24,7 @@ from huggingface_hub import snapshot_download
 # (serve the f16 GGUF directly); the rest map to a llama-quantize preset.
 QUANT_PRESETS = {
     "q4_k_m": "Q4_K_M",
+    "q5_k_m": "Q5_K_M",
     "q8_0": "Q8_0",
 }
 NO_QUANTIZE = {"f16", "none"}
