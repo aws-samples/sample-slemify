@@ -1,4 +1,4 @@
-boto3>=1.43.34
+boto3>=1.43.36
 numpy<3
 torch==2.12.1
 scikit-learn==1.9.0
