@@ -426,7 +426,7 @@ The PDB does not protect against involuntary disruptions like Spot reclamation. 
 
 ## Faster container startup with SOCI
 
-When a new node is provisioned (scaling up, Spot replacement), the container runtime needs to pull the container image before the pod can start. The default containerd behavior downloads and unpacks each image layer sequentially and fully before starting the container. For multi-GB images like the Unsloth training container, this can add 30-60 seconds to pod startup.
+When a new node is provisioned (scaling up, Spot replacement), the container runtime needs to pull the container image before the pod can start. The default containerd behavior downloads and unpacks each image layer sequentially and fully before starting the container. For multi-GB images like the GGUF convert or model-serving containers, this can add 30-60 seconds to pod startup.
 
 Slemify uses [Bottlerocket](https://bottlerocket.dev/) as the node OS, which has native support for the [SOCI snapshotter](https://github.com/awslabs/soci-snapshotter) (Seekable OCI). SOCI is enabled via simple TOML settings in the EC2NodeClass userData, with no shell scripts or manual installation. It replaces the default sequential pull with parallel chunk-based downloads:
 

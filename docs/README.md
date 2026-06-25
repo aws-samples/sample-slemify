@@ -12,11 +12,12 @@ New to Slemify? Start here:
 
 ## Task families
 
-Slemify produces two kinds of specialist model, selected by `project.task`:
+Slemify produces a few families of specialist model, selected by `project.task`:
 
-- **Generation** (`task: generation`) — a causal LM fine-tuned with QLoRA on
-  GPU, exported to GGUF, served on CPU via llama.cpp. For free-form output:
-  reasoning, audit reports, structured generation.
+- **Generation** (`task: generation`) — a causal LM served stock: downloaded,
+  converted to GGUF, and quantized on CPU, served via llama.cpp and grounded by
+  RAG. No fine-tuning. For free-form output: reasoning, audit reports, structured
+  generation.
 - **Encoder-head** (`task: classification` and `task: scoring`, with `extraction`
   to follow) — a frozen encoder plus a lightweight head, trained
   and served entirely on CPU. Classification emits a label + confidence; scoring
@@ -39,7 +40,7 @@ The deep dives below note where the two paths differ.
 | Stage | Doc | What it covers |
 |-------|-----|----------------|
 | Data | [data.md](deep-dive/data.md) | Raw data quality, synthetic generation, label taxonomy, class balance, independent evaluation |
-| Training | [training.md](deep-dive/training.md) | Generation: QLoRA fine-tuning, sizing, Spot GPU, GGUF. Encoder-head: frozen-encoder + head fit on CPU. Embedding: contrastive fine-tune on CPU |
+| Training | [training.md](deep-dive/training.md) | Generation: served stock (download → GGUF → quantize) on CPU, no fine-tuning. Encoder-head: frozen-encoder + head fit on CPU. Embedding: contrastive fine-tune on CPU |
 | Serving | [serving.md](deep-dive/serving.md) | Generation: llama.cpp + GGUF. Encoder family: encoder + head/vector via ONNX. CPU inference, latency, autoscaling |
 | Report | [report.md](deep-dive/report.md) | Generation: LLM-as-judge. Classification: accuracy + per-class P/R/F1. Scoring: MAE/R². Embedding: recall@k/MRR. Cost projections |
 
@@ -47,4 +48,4 @@ The deep dives below note where the two paths differ.
 
 - [Silicon, Memory, and Modern Inference](https://cmanaha.github.io/tech-deep-dives/silicon-memory-inference/). why memory bandwidth (not FLOPs) determines inference speed
 - [Small Language Models are the Future of Agentic AI](https://arxiv.org/abs/2506.02153) (NVIDIA, 2025). the research case for SLMs in production
-- [QLoRA: Efficient Finetuning of Quantized Language Models](https://arxiv.org/abs/2305.14314). the fine-tuning technique Slemify uses
+- [Exploring and Mitigating Degradation of Low-Bit LLMs in Mathematical Reasoning](https://arxiv.org/abs/2505.11574). why low-bit quantization hurts reasoning more than perplexity

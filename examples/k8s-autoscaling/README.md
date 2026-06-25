@@ -14,7 +14,12 @@ k8s-autoscaling/
 │   ├── queries/      # 76 training queries (real-world K8s configs)
 │   └── eval-queries/ # 14 held-out evaluation queries
 ├── demo/             # Multi-agent demo application
-│   ├── server.py     # FastAPI orchestrator (triage + RAG + auditor + LLM fallback)
+│   ├── agent/        # LangGraph agent package (triage, retrieval, faithfulness gate, generation, tools, remediation)
+│   ├── server.py     # FastAPI entrypoint (serves the agent graph + chat UI)
+│   ├── ui.html       # Chat UI (live step log + streamed answers)
+│   ├── eval/         # End-to-end accuracy scorecard (run_eval.py, cases.yaml)
+│   ├── reranker/     # Stock cross-encoder reranker service
+│   ├── scenarios/    # Breakable cluster scenarios for remediation demos
 │   ├── scripts/      # Helper scripts (deploy, indexing, tmux dashboard)
 │   ├── Dockerfile    # Orchestrator container image
 │   └── k8s-manifest.yaml
@@ -28,18 +33,14 @@ k8s-autoscaling/
 | Triage | encoder (768d) | `classification` — intent routing + confidence | ~25ms |
 | Risk Scorer | encoder (768d) | `scoring` — operational risk 0.0-1.0 | ~25ms |
 | Retriever | encoder (768d) | `embedding` — domain-tuned RAG vectors | ~25ms |
-| Auditor | 8B (q4_k_m) | `generation` — structured config analysis | ~14s streaming |
+| Auditor | 8B (q8_0) | `generation` — structured config analysis | ~14s streaming |
 
-All run on Graviton CPUs with no GPU required for serving. The auditor is fine-tuned on GPU (QLoRA); the encoder-family models train on CPU — triage and risk scorer fit a head in seconds, the retriever contrastively fine-tunes in a few minutes. (The demo also runs a stock cross-encoder *reranker* on CPU — that's a serving pattern, not a Slemify-trained model; see the repo FAQ on why reranking isn't a task.)
+All run on Graviton CPUs with no GPU anywhere in the pipeline. The auditor is served *stock*: Slemify downloads the base model, converts it to GGUF, and quantizes it on CPU (no fine-tuning), and its domain knowledge comes from RAG at serving time. The encoder-family models do train, on CPU: triage and risk scorer fit a head in seconds, the retriever contrastively fine-tunes in a few minutes. (The demo also runs a stock cross-encoder *reranker* on CPU — that's a serving pattern, not a Slemify-trained model; see the repo FAQ on why reranking isn't a task.)
 
 ## Quick Start
 
 ```bash
-# Train and deploy the models you need
-slemify train --config auditor/expert.yaml
-slemify train --config triage/expert.yaml
-slemify train --config risk-scorer/expert.yaml
-slemify train --config retriever/expert.yaml
+# Run the full pipeline (data → prep → serving) for each model you need
 slemify deploy --config auditor/expert.yaml
 slemify deploy --config triage/expert.yaml
 slemify deploy --config risk-scorer/expert.yaml

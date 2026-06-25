@@ -86,8 +86,9 @@ Covers most agentic "hot spots":
 - `extraction` — pull typed entity spans from free-form text. Returns `{type, text}` spans (v1 is a feature-based token tagger; no encoder needed).
 - `embedding` — a domain-tuned retriever for RAG. Returns a vector.
 
-**Generation — GPU train (QLoRA), CPU serve (GGUF/llama.cpp).** A causal LM for
-free-form reasoning. Use `task: generation`, `output_format: free_form`.
+**Generation — stock model, CPU convert + serve (GGUF/llama.cpp), grounded by RAG.**
+A causal LM for free-form reasoning, served without fine-tuning. Use
+`task: generation`, `output_format: free_form`.
 
 Reranking is a deliberate non-goal: a strong general cross-encoder is already
 well-calibrated, and fine-tuning it needs relevance labels Slemify can't
@@ -156,9 +157,9 @@ If the cluster isn't set up yet, guide them through:
 ### Writing expert.yaml
 
 Based on the design phase, create the config. Set `project.task` to the family
-you chose. For `generation` the base is a causal LM (any Unsloth-compatible
-architecture); for the encoder family the base is a text encoder, and
-`classification`/`extraction` also need a `labels` taxonomy.
+you chose. For `generation` the base is a causal LM (any architecture llama.cpp's
+GGUF converter supports), served stock; for the encoder family the base is a text
+encoder, and `classification`/`extraction` also need a `labels` taxonomy.
 
 **Router Agent template:**
 
@@ -202,36 +203,21 @@ apiVersion: slemify/v1
 
 project:
   name: <descriptive-name>
-  task: generation         # causal LM, free-form reasoning
+  task: generation         # causal LM, served stock + RAG, free-form reasoning
   output_format: free_form
   domain: >
     <One paragraph describing what this agent analyzes, what domain
     expertise it has, and what structured output it produces.>
-  labels:
-    <error_type_or_category>:
-      - type_1
-      - type_2
-    <severity_or_dimension>:
-      - high
-      - medium
-      - low
 
 model:
-  base: ""  # HuggingFace model ID (8B recommended for structured reasoning)
-  quantize: q4_k_m
+  base: ""  # HuggingFace causal LM (8B recommended for structured reasoning)
+  quantize: q8_0  # re-check accuracy before going lower; reasoning is quant-sensitive
 
 data:
+  # No synthetic data or labels: generation is served stock and grounded by RAG.
+  # bucket/path are where the converted GGUF is uploaded.
   bucket: <your-s3-bucket>
   path: <project-name>/data/
-  sources:
-    - path: examples/
-      type: raw
-  synthetic:
-    model: <bedrock-model-id>
-    pairs: 2500                       # More pairs for reasoning tasks
-
-training:
-  spot: true
 ```
 
 ### Data Preparation
@@ -259,13 +245,13 @@ Slemify calls Amazon Bedrock with your raw examples and expert.yaml config. The 
 slemify deploy --config expert.yaml
 ```
 
-This runs data generation, training, (quantization for generation), serving, and
-a validation report. The path depends on the task:
+This runs the stages for your task, then serving and a validation report. The
+path depends on the task:
 - **Encoder family** (classification/scoring/extraction/embedding): a CPU
   training job (seconds to a few minutes), no GPU and no quantization, then ONNX
   serving on CPU.
-- **Generation**: QLoRA on a Spot GPU (~15-30 min), then GGUF quantization and
-  CPU serving via llama.cpp.
+- **Generation**: served stock — download, GGUF convert, and quantize on CPU
+  (~5-8 min, no GPU), then CPU serving via llama.cpp.
 
 Check status:
 ```bash
@@ -278,11 +264,10 @@ For **generation** (causal LM):
 
 | Stage | Duration | Cost |
 |-------|----------|------|
-| Data (synthetic generation) | 5-15 min | $10-50 (Bedrock API) |
-| Training (QLoRA on Spot GPU) | 15-30 min | $0.15-0.50 |
-| Quantization | 2-5 min | included |
+| Download base model | 2-4 min | $0 |
+| Convert to GGUF + quantize (CPU) | 3-5 min | <$1 |
 | Serving + Validation | 5-10 min | ~$0.10 |
-| **Total** | **30-60 min** | **$15-55** |
+| **Total** | **~10-20 min** | **<$2** |
 
 For the **encoder family** (classification/scoring/extraction/embedding) there is
 no GPU and no quantization: data generation is the same Bedrock step, training is
@@ -386,4 +371,4 @@ Be transparent with users about what Slemify does NOT do:
 - Repository: https://github.com/aws-samples/sample-slemify
 - Getting Started: https://github.com/aws-samples/sample-slemify/blob/main/docs/getting-started.md
 - EKS Best Practices for CPU Inference: https://docs.aws.amazon.com/eks/latest/best-practices/aiml-cpu-inference.html
-- Base models: Any Unsloth-compatible model from HuggingFace Hub
+- Base models: for generation, any HuggingFace causal LM llama.cpp can convert; for encoder tasks, any sentence-transformers encoder

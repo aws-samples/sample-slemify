@@ -2,7 +2,7 @@
 
 Generate, train, and validate small specialist models. One YAML, one command.
 
-Small specialist models handle the high-volume, repetitive tasks in your AI workflows (classification, routing, extraction) so your LLMs can focus on what they're best at. Slemify automates the path from raw data to a validated, production-ready model — a fine-tuned generative SLM (GGUF) for free-form tasks, or a CPU-trained encoder classifier for routing and labeling. How you deploy that model is up to you.
+Small specialist models handle the high-volume, repetitive tasks in your AI workflows (classification, routing, extraction) so your LLMs can focus on what they're best at. Slemify automates the path to a validated, production-ready model: a CPU-trained encoder classifier for routing and labeling, or a stock generative SLM (GGUF) served on CPU and grounded by RAG for free-form reasoning. How you deploy that model is up to you.
 
 ```bash
 slemify deploy --config expert.yaml
@@ -10,7 +10,7 @@ slemify deploy --config expert.yaml
 
 Slemify picks the right model family from `project.task`:
 
-- `task: generation` — a causal LM fine-tuned with QLoRA on GPU, served on CPU (GGUF/llama.cpp). For reasoning and free-form output.
+- `task: generation` — a causal LM served stock on CPU (GGUF/llama.cpp): Slemify downloads the base model, converts it to GGUF, and quantizes it. No fine-tuning; knowledge comes from RAG at serving time. For reasoning and free-form output.
 - `task: classification` — a frozen encoder + a lightweight head, trained and served entirely on CPU in seconds. For routing, intent, and labeling.
 - `task: scoring` — the same encoder-head family with a regression head, trained and served on CPU. Returns a single number in [0,1]. For risk/quality/confidence guardrails.
 - `task: extraction` — a CPU-trained token tagger that pulls typed entity spans out of free-form text. Returns a list of `{type, text}` spans. For entity/field extraction from tickets, logs, and messages.
@@ -46,13 +46,13 @@ The inference endpoint exposes an OpenAI-compatible API (`/v1/chat/completions`)
 ```
 expert.yaml → [DATA] → [TRAINING] → [SERVING + VALIDATION]
                  │          │                   │
-            Ingest +    QLoRA on          Deploy model,
-            Synthetic   Spot GPU          run eval report,
-            via Bedrock via Unsloth       generate HTML
+            Ingest +    CPU train, or      Deploy model,
+            Synthetic   convert+quantize   run eval report,
+            via Bedrock (generation)       generate HTML
 ```
 
-1. **Data**. Ingests your raw data from S3. Bedrock generates synthetic training pairs from your source content. You verify the output before training.
-2. **Training**. QLoRA fine-tuning on Spot GPU via Unsloth. Exports a quantized GGUF model to S3.
+1. **Data**. Ingests your raw data from S3. For trained tasks, Bedrock generates synthetic training pairs from your source content and you verify them before training. Generation is served stock, so it skips synthetic data.
+2. **Training**. Encoder tasks fit a head or contrastively tune an encoder on CPU in seconds to minutes. Generation has nothing to fine-tune, so this stage downloads the base model, converts it to GGUF, and quantizes it on CPU. Either way the output is uploaded to S3.
 3. **Serving + Validation**. Deploys the model on a live endpoint, runs the evaluation dataset through it, and generates an HTML report with accuracy, latency, and cost projections.
 
 The output is a GGUF model file in S3 and a production readiness report. The serving deployment that Slemify creates is production-quality and serves as a reference for your own infrastructure. You can use it as-is, adapt it, or serve the GGUF with any compatible runtime (llama.cpp, vLLM, Ollama). See the [Serving deep dive](docs/deep-dive/serving.md) for deployment guidance and best practices.
@@ -143,19 +143,18 @@ Downloads the HTML report from S3 and opens it in your browser. The report inclu
 | Classification (routing, triage) | 200-500 | Binary or multi-class. Clear categories. |
 | Scoring (risk, quality, confidence) | 500-1,200 | Regression target in [0,1]. Spread examples across the full range. |
 | Extraction (fields from text) | 500-1,000 | More examples = better edge case coverage. |
-| Structured generation (commands, configs) | 500-1,000 | Model needs to learn output format precisely. |
 
-Quality matters more than quantity. 500 well-curated instruction-response pairs beat 10,000 noisy ones. Bedrock generates synthetic examples from your source data, so you don't need to write them all by hand.
+These apply to the trained (encoder-family) tasks. `task: generation` is served stock and grounded by RAG, so it needs no training data. Quality matters more than quantity. 500 well-curated instruction-response pairs beat 10,000 noisy ones. Bedrock generates synthetic examples from your source data, so you don't need to write them all by hand.
 
 ## Cost
 
 | Item | Cost |
 |------|------|
-| Training (Spot GPU, one-time) | ~$0.15 |
-| Synthetic data (Bedrock) | ~$10-50 |
-| **Total to generate a model** | **~$15-55** |
+| Model prep (CPU: encoder train, or download + convert + quantize for generation) | <~$1 |
+| Synthetic data for trained tasks (Bedrock) | ~$10-50 |
+| **Total to produce a model** | **~$10-50** |
 
-Inference cost depends on how you deploy. The reference deployment (llama.cpp on CPU Spot) runs at ~$117/mo per replica. Throughput scales linearly: 3 replicas = 3x throughput at 3x cost. No rate limits, no per-token charges. See the [Serving deep dive](docs/deep-dive/serving.md) for cost comparisons across CPU, GPU, and LLM API options.
+Generation no longer uses a GPU: it is downloaded, converted to GGUF, and quantized on CPU, so it has no training cost and no synthetic-data cost. Inference cost depends on how you deploy. The reference deployment (llama.cpp on CPU Spot) runs at ~$117/mo per replica. Throughput scales linearly: 3 replicas = 3x throughput at 3x cost. No rate limits, no per-token charges. See the [Serving deep dive](docs/deep-dive/serving.md) for cost comparisons across CPU, GPU, and LLM API options.
 
 ## Examples
 
@@ -170,7 +169,7 @@ Technical docs covering the design decisions, best practices, and research behin
 
 - [Getting Started](docs/getting-started.md). End-to-end tutorial: build a multi-agent K8s expert from scratch
 - [Data Stage](docs/deep-dive/data.md). Raw data quality, synthetic generation, label taxonomy, verification
-- [Training Stage](docs/deep-dive/training.md). QLoRA, model sizing, Spot GPU, checkpointing, quantization
+- [Training Stage](docs/deep-dive/training.md). Encoder-head and embedding training on CPU, the stock generation convert/quantize path, model sizing, quantization
 - [Serving Stage](docs/deep-dive/serving.md). Reference deployment, CPU inference, autoscaling guidance
 - [Report Stage](docs/deep-dive/report.md). Accuracy measurement, SLM vs LLM comparison, cost projections
 
@@ -178,9 +177,8 @@ Technical docs covering the design decisions, best practices, and research behin
 
 The pipeline runs on Kubernetes (EKS). The output is a GGUF model in S3.
 
-- **Karpenter**. GPU nodes for training (Spot), CPU nodes for the reference deployment
-- **Unsloth**. QLoRA fine-tuning, 2-5x faster than standard training
-- **llama.cpp**. GGUF inference on CPU (used in the reference deployment and validation report)
+- **Karpenter**. CPU nodes for training, conversion, and the reference deployment (no GPU in the pipeline)
+- **llama.cpp**. GGUF conversion and quantization, plus CPU inference (used in the reference deployment and validation report)
 - **Pod Identity**. IAM access to S3 and Bedrock, no static credentials
 - **Systems Manager**. Remote container builds via SSM, no SSH keys or open ports required
 
@@ -209,7 +207,8 @@ A: If the task is repetitive, structured, and runs more than ~1,000 times/day. o
 A: For general tasks, no. For YOUR specific structured task with YOUR categories, a fine-tuned 3B model matches or beats general-purpose LLMs. [Salesforce's xLAM-2-8B](https://huggingface.co/Salesforce/Llama-xLAM-2-8b-fc-r) beat GPT-4o and Claude 3.5 at tool calling on the [Berkeley Function-Calling Leaderboard](https://gorilla.cs.berkeley.edu/leaderboard.html). Specialization beats size.
 
 **Q: Does fine-tuning always improve quality? When doesn't it help?**
-A: No, and Slemify is deliberate about this. Fine-tuning helps most when the model has to learn something it doesn't already know:
+A: No, and Slemify is deliberate about this. Fine-tuning helps most when the model has to learn something it doesn't already know, and it backfires when the model already has the skill and only lacks the facts:
+- **Generation** — *not* fine-tuned, on purpose. For a knowledge task the base model can already reason and write; what it lacks is your facts, and RAG supplies those at serving time better than training does. We tested fine-tuning the generative auditor in the k8s example and it made answers *worse*, so Slemify serves generation stock (download, convert to GGUF, quantize) and grounds it with RAG. (Adapting weights to a lower-precision *quantization* grid — QAT/QAD — is a different kind of fine-tuning and would be its own future task.)
 - **Classification / scoring** — the head (a router taxonomy, a risk rubric) doesn't exist in any pretrained model, so it *must* be trained. These tasks always benefit; the question is just whether you have enough data.
 - **Embedding** — domain-tuning a retriever measurably helps when your corpus uses vocabulary or relationships a general encoder hasn't specialized in (in our k8s example, recall@1 improved ~12 points over stock).
 - **Extraction** — *domain-dependent*, and the example shows both sides. Pulling entities from open-vocabulary prose (support tickets) a trained tagger beats a regex/gazetteer baseline by a wide margin (F1 0.63 → 0.89, driven by open-vocab service/error names). But pulling fields from *structured* text (k8s YAML configs) a plain parser already wins, so there a trained model adds nothing. The [extractor example](examples/support-tickets/entity-extraction/) documents both.
@@ -224,10 +223,10 @@ A: The default text encoder caps at ~512 tokens (roughly 350-400 words) and sile
 A: SLMs and RAG solve different problems, and Slemify now covers both sides. RAG retrieves relevant context for knowledge questions; the retrieval step itself is an embedding model, which you can domain-tune with `task: embedding`. The classification/scoring tasks handle routing and guardrails where you don't need retrieval, you need a fast decision. They work well together: an encoder classifier routes the query, a domain-tuned embedding model retrieves the knowledge, and a generative SLM writes the answer.
 
 **Q: Can I use a different base model?**
-A: Yes. For `task: generation`, any HuggingFace causal LM supported by Unsloth. For encoder-head tasks (`task: classification`, `task: scoring`) and `task: embedding`, any sentence-transformers text encoder. `task: extraction` (v1) is the exception — its feature-based token tagger uses no encoder, so `model.base` is omitted. The auto-sizer adjusts infrastructure based on the task and model size.
+A: Yes. For `task: generation`, any HuggingFace causal LM that llama.cpp's GGUF converter supports. For encoder-head tasks (`task: classification`, `task: scoring`) and `task: embedding`, any sentence-transformers text encoder. `task: extraction` (v1) is the exception — its feature-based token tagger uses no encoder, so `model.base` is omitted. The auto-sizer adjusts infrastructure based on the task and model size.
 
 **Q: What happens during a Spot interruption?**
-A: Training checkpoints sync to S3 every 500 steps. The next pod resumes from the last checkpoint automatically. Max work lost: ~20 minutes.
+A: The encoder-family training jobs run in seconds to minutes on CPU, so an interrupted job simply re-runs. The generation convert job (download + GGUF + quantize) is a one-shot, bandwidth-heavy run, so Slemify pins it to on-demand capacity to avoid a mid-run reclaim forcing a full re-download. Serving runs on Spot and is replaced automatically.
 
 ## Agent Skill
 
@@ -253,9 +252,7 @@ The skill includes templates for two patterns:
 - [xLAM: Large Action Models](https://huggingface.co/Salesforce/Llama-xLAM-2-8b-fc-r) (Salesforce). 8B model that beat GPT-4o at tool calling, proving specialization beats size
 - [Forbes: Don't Default to the Biggest AI Model](https://www.forbes.com/councils/forbestechcouncil/2026/04/22/dont-default-to-the-biggest-ai-model-agentic-systems-deserve-better/). 40-70% of agentic AI invocations can use SLMs
 - [Hallucination Propensity in Small Models](https://arxiv.org/abs/2411.00878). Research on knowledge mismatch between fine-tuning data and base model knowledge
-- [QLoRA: Efficient Finetuning of Quantized Language Models](https://arxiv.org/abs/2305.14314). The fine-tuning technique Slemify uses
-- [Unsloth](https://github.com/unslothai/unsloth). 2-5x faster QLoRA training with custom Triton kernels
-- [llama.cpp](https://github.com/ggerganov/llama.cpp). GGUF inference engine for CPU deployment
+- [llama.cpp](https://github.com/ggerganov/llama.cpp). GGUF conversion, quantization, and CPU inference engine
 - [Model Context Protocol](https://modelcontextprotocol.io). How SLMs expose tools to AI assistants
 - [Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks](https://arxiv.org/abs/1908.10084) (Reimers & Gurevych, 2019). The sentence-embedding approach behind Slemify's encoder-head and embedding tasks
 - [EKS Best Practices: AI/ML CPU Inference](https://docs.aws.amazon.com/eks/latest/best-practices/aiml-cpu-inference.html). When CPU inference is appropriate and how to tune it

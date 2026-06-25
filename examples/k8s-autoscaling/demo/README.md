@@ -3,12 +3,14 @@
 A CPU-first **agent** that audits Kubernetes autoscaling configurations. It
 triages a question, optionally gathers live evidence from the cluster with
 read-only tools, grounds itself in documentation via RAG, drafts an answer with
-a fine-tuned SLM, critiques its own answer, and escalates to a large LLM only
-when the question genuinely needs it.
+a stock SLM served on CPU, checks that draft against the evidence with an LLM
+faithfulness gate, and escalates to a large LLM only when the draft isn't
+supported (and abstains honestly if even that isn't).
 
 The point of the demo is **right tool for the right task**: the high-frequency,
 narrow steps (classify, retrieve, rank, generate a domain answer) run on small
-models on CPUs; a large LLM handles the open-ended tail. No GPUs serve traffic.
+models on CPUs; a large LLM checks each answer and handles the open-ended tail.
+No GPUs serve traffic.
 
 ## Architecture
 
@@ -32,19 +34,21 @@ flowchart TD
     RR --> GEN{Generate}
     GEN -->|in-domain question| AUD["Auditor SLM · CPU<br/>grounded answer"]
     GEN -->|unclassifiable| LLM["LLM API · Bedrock<br/>open-ended fallback"]
-    AUD --> CR{"Critic · CPU<br/>groundedness + fix lint"}
+    AUD --> CR{"Faithfulness gate · LLM<br/>draft supported by evidence?"}
     LLM --> CR
-    CR -->|pass| RM["Remediate · CPU<br/>propose fix · apply+verify if autopilot"]
-    CR -->|weak, attempts left| RF["Refine query"] --> EM
-    CR -->|still weak| ESC["LLM escalation · Bedrock"] --> OUT
+    CR -->|supported| RM["Remediate · CPU<br/>propose fix · apply+verify if autopilot"]
+    CR -->|not supported, attempts left| RF["Refine query"] --> EM
+    CR -->|SLM not supported| ESC["LLM escalation · Bedrock"] --> CR
+    CR -->|LLM also unsupported| AB["Abstain · calibrated answer"] --> OUT
     RM --> OUT[Answer streamed to user]
     RJ --> OUT
 ```
 
 Two things make this an agent rather than a fixed pipeline: the **plan → tool**
-loop lets it gather live evidence before answering, and the **critic → refine**
-loop lets it grade its own draft and retry (or escalate) when the answer isn't
-well grounded. Both decision points run on CPU.
+loop lets it gather live evidence before answering, and the **gate → refine /
+escalate / abstain** loop lets an LLM judge whether the draft is supported by the
+evidence and retry, escalate, or abstain when it isn't. The plan loop runs on
+CPU; the gate is one LLM call per answer.
 
 ## Components
 
@@ -57,13 +61,15 @@ well grounded. Both decision points run on CPU.
 | Retriever | Slemify retriever (`task: embedding`), ONNX | c8g (Graviton4 CPU) | Domain-tuned query/doc embeddings, 768d | **Yes** (fine-tuned encoder) |
 | Reranker | sentence-transformers cross-encoder | c8g (Graviton4 CPU) | Re-ranks candidates to the best few | No — stock |
 | OpenSearch | OpenSearch k-NN | CPU pod | Vector search over 3900+ doc chunks | — |
-| Auditor SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed | **Yes** (fine-tuned generation) |
-| Critic | numpy (groundedness heuristic) | in orchestrator | Scores answer groundedness; drives retry/escalate | No — code |
+| Auditor SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed | No — stock 8B (Slemify convert+quantize), grounded by RAG |
+| Faithfulness gate | Bedrock LLM | Managed | Judges whether the draft is supported by the evidence; drives accept/retry/escalate/abstain | No — LLM judge |
 | LLM API | Bedrock | Managed | Open-ended fallback / escalation | No — general model |
 
-Routing (which tool to use), argument extraction (the resource name), and the
-critic are deliberately **plain code, not models** — they are control-loop glue,
-and a few rules do the job. See "Right tool for the right task" below.
+Routing (which tool to use) and argument extraction (the resource name) are
+deliberately **plain code, not models** — they are control-loop glue, and a few
+rules do the job. The faithfulness gate is the opposite choice: catching a
+confidently-wrong domain answer needs judgement, so it's an LLM call, not a
+heuristic. See "Right tool for the right task" below.
 
 ## Pods & How They Interact
 
@@ -122,8 +128,8 @@ and the whitelisted, dry-run-first remediations described under "Remediation".
 That view is the **topology** — who calls whom. A single query is not one pass
 through it: the orchestrator coordinates these pods back and forth and re-runs
 whole stretches. It may hit the read-only tools several times while planning, and
-if the critic finds the draft weakly grounded it refines the query and runs the
-retrieve → rerank → generate → critic loop again before answering. The sequence
+if the faithfulness gate finds the draft unsupported it refines the query and runs the
+retrieve → rerank → generate → gate loop again before answering. The sequence
 for one query:
 
 ```mermaid
@@ -145,7 +151,7 @@ sequenceDiagram
         O->>K: get/list/watch (describe · events · investigate)
         K-->>O: live cluster state
     end
-    loop retrieve → generate → critic · repeats while ungrounded
+    loop retrieve → generate → gate · repeats while unsupported
         O->>R: embed query
         R-->>O: 768-d vector
         O->>S: k-NN search
@@ -159,7 +165,7 @@ sequenceDiagram
             O->>B: generate (token stream)
             B-->>O: draft (streamed to user)
         end
-        Note over O: critic scores groundedness —<br/>weak → refine query, loop again
+        Note over O: faithfulness gate (LLM) checks support —<br/>not supported → refine, escalate, or abstain
     end
     opt fix detected · approve (on click) or autopilot (now)
         O->>K: dry-run, then patch NodePool / Deployment
@@ -198,19 +204,24 @@ in the cluster's real state, not just the docs.
 If the orchestrator has no cluster credentials, tools degrade gracefully and the
 agent answers from documentation — the demo still runs.
 
-## Self-Correction (the critic loop)
+## Self-Correction (the faithfulness gate)
 
-After the auditor drafts an answer, a CPU **critic** scores how well that draft
-is grounded in the evidence the agent gathered (retrieved docs + tool output).
-On a low score the agent **refines** its query, retrieves again, and regenerates;
-if it still can't ground the answer after a bounded retry, it **escalates** to
-the LLM with everything it gathered. A weakly-grounded draft is replaced in the
-UI, so the audience sees the agent catch and correct itself.
+After the auditor drafts an answer, a **faithfulness gate** decides whether that
+draft is supported by the evidence the agent gathered (retrieved docs + tool
+output). The gate is an LLM call (Bedrock, `GATE_MODEL`, defaulting to the same
+model as escalation): catching a *confidently wrong* domain answer — one that
+reuses the right terms but states a field, default, or behavior the docs don't
+support — needs judgement a lexical heuristic can't provide. A small model proved
+too lenient at this, so the gate defaults to the capable model.
 
-The critic is a lexical-overlap heuristic (does the answer reuse the terms in its
-sources?), calibrated on live answers. It is intentionally **not** a trained
-model — see below. At the default threshold normal answers pass and stay on CPU;
-raise `GROUNDEDNESS_THRESHOLD` (env) to force the loop for a live demo.
+On a flagged draft the agent does one of four things: **refine** the query and
+regenerate (bounded retry); gather **live evidence** if the claim is about runtime
+state it hasn't checked; **escalate** to the LLM with everything it gathered; or,
+if even the escalated LLM answer fails the gate, **abstain** — emit a calibrated
+answer that states only what the evidence supports and says plainly what it could
+not confirm. That abstain step is the "never confidently wrong" backstop: the top
+of the ladder is not exempt from the gate. A replaced draft is updated in the UI,
+so the audience sees the agent catch and correct itself.
 
 ## Remediation (read-only → approve → autopilot)
 
@@ -254,10 +265,14 @@ steps and the confirmed result.
 The demo's guiding principle is matching the tool to the task, not training a
 model for every step:
 
-- **Fine-tune where domain quality genuinely improves.** The **auditor**
-  (generation) and the **retriever** (embedding) are fine-tuned on the K8s
-  corpus — that's where a custom model measurably beats a generic one (see the
-  retriever numbers below).
+- **Fine-tune where domain quality genuinely improves.** The **retriever**
+  (embedding) is fine-tuned on the K8s corpus — that's where a custom model
+  measurably beats a generic one (see the retriever numbers below).
+- **Serve a stock model where the base is already capable.** The **auditor**
+  (generation) is served stock and grounded by RAG. We tested fine-tuning it and
+  it made answers *worse*: the base model already reasons, what it lacked was the
+  facts, and RAG supplies those. (We also tested quantizing it below q8_0; that
+  lost calibration — see the repo training deep dive.)
 - **Train a cheap head for a learned closed-set decision.** **Triage** is a
   logistic head on a frozen encoder — CPU-trained in seconds and deterministic.
   Its category rejects clear noise up front and sends in-domain questions to the
@@ -266,14 +281,18 @@ model for every step:
 - **Use a stock model where it already wins.** The **reranker** is an
   off-the-shelf cross-encoder; we measured that *fine-tuning* one on synthetic
   data made it worse (see "Why Keep the Reranker").
-- **Use plain code for glue.** Tool routing, argument extraction, the guardrail,
-  and the critic are rules — control-loop decisions that don't need ML.
+- **Use plain code for glue.** Tool routing, argument extraction, and the
+  guardrail are rules — control-loop decisions that don't need ML.
+- **Use a capable LLM to check the cheap model.** The faithfulness gate is an LLM
+  judging whether the SLM draft is supported by the evidence — the one judgement
+  a heuristic couldn't make reliably.
 - **Use a large LLM for the open-ended tail.** Low-confidence or ambiguous
   questions escalate to Bedrock.
 
-So the agent runs on **three custom-trained models** (auditor, retriever,
-triage), a stock reranker, plain code for the control loop, and an LLM fallback —
-not a fine-tuned model per step.
+So the agent runs on **two custom-trained models** (retriever, triage), a stock
+SLM auditor, a stock reranker, plain code for the control loop, and a capable LLM
+for the faithfulness gate and the open-ended fallback — not a fine-tuned model
+per step.
 
 ## Knowledge Base
 
@@ -463,17 +482,12 @@ our NodePool disruption budget is set to nodes: "50%" but it doesn't seem to be 
 
 The LLM is the open-ended tail, not the default. A question reaches Bedrock two
 ways: triage can't classify it into the domain at all, or the auditor SLM drafts
-an answer the critic can't ground in the retrieved docs (after a refine retry).
-The second path is the common one. To force it in a live demo, raise the critic
-bar so a partially-grounded draft fails:
-
-```
-GROUNDEDNESS_THRESHOLD=0.4 python3 server.py
-```
-
-Then ask an in-domain question the corpus only partially covers — the auditor
-draft fails the groundedness check, the agent refines and retries, and on a
-second miss escalates to Bedrock with everything it gathered.
+an answer the faithfulness gate finds unsupported by the retrieved docs (after a refine retry).
+The second path is the common one. To see it, ask an in-domain question the
+corpus only thinly covers: the auditor draft states something the retrieved docs
+don't support, the faithfulness gate flags it, the agent refines and retries, and
+on a second miss escalates to Bedrock with everything it gathered (and if the LLM
+answer also isn't supported, it abstains with a calibrated reply).
 
 ### 3. Noise (rejected immediately)
 
@@ -662,11 +676,11 @@ python3 scripts/index-knowledge.py --append --source=karpenter
 
 ## The Story This Tells
 
-1. **Right tool for the right task** — fine-tune where it earns it (generation, retrieval), use stock models where they win (reranking), use plain code for glue (routing, extraction, critic), and use a large LLM for the open-ended tail
+1. **Right tool for the right task** — fine-tune where it earns it (retrieval), serve stock where the base is already capable (the generation auditor + RAG, the reranker), use plain code for glue (routing, extraction), and use a capable LLM to check answers (the faithfulness gate) and for the open-ended tail
 2. CPUs handle the full AI pipeline: classification, retrieval, reranking, generation, and tool use — no GPUs serve traffic
 3. An agent can route, gather live evidence, and self-correct on CPU; the LLM is one tool in the mix, not the foundation
 4. RAG + live cluster state grounds the response in real evidence (reduces hallucinations)
-5. Fine-tuned SLMs are more accurate than general LLMs on domain-specific tasks
+5. A stock SLM grounded by RAG handles the domain answer on CPU; the custom training pays off in the retriever, not the generator
 6. A domain-tuned retriever roughly doubles RAG retrieval quality (see "Why a Domain-Tuned Retriever")
 7. Read-only tools make the agent useful on real clusters without the risk of mutating them
 8. When you do want it to act, remediation is layered — read-only, approve-to-apply, then autopilot — with the write path gated, whitelisted, bounded to a named resource, and dry-run + verified

@@ -32,11 +32,11 @@ pkg/config/    Schema, validator, auto-sizer
 pkg/pipeline/  Stage sequencer, state machine
 pkg/k8s/       client-go wrapper, manifest apply
 pkg/data/      Synthetic data generation stage
-pkg/training/  Unsloth training script gen, Job submission
+pkg/training/  Generation GGUF convert + encoder/embedding training, Job submission
 pkg/serving/   Deployment, NodePool, KEDA gen, report Job
 pkg/report/    Report types, HTML template
 pkg/build/     Multi-arch container builds via EC2
-containers/    Python containers (data-pipeline, training)
+containers/    Python containers (data-pipeline, gguf-convert, classifier-trainer, classifier-serving)
 examples/      Reference implementations
 ```
 

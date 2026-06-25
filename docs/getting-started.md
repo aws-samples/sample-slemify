@@ -1,14 +1,14 @@
 # Getting Started: Build a Multi-Agent K8s Expert
 
-This guide walks you through building a complete multi-agent system using Slemify. By the end, you'll have two specialist models running on CPUs that audit Kubernetes autoscaling configurations, backed by a RAG knowledge base and an LLM fallback for edge cases. One is a CPU-trained encoder classifier (triage), the other a GPU-fine-tuned generative SLM (auditor).
+This guide walks you through building a complete multi-agent system using Slemify. By the end, you'll have two specialist models running on CPUs that audit Kubernetes autoscaling configurations, backed by a RAG knowledge base and an LLM fallback for edge cases. One is a CPU-trained encoder classifier (triage), the other a stock generative SLM served on CPU and grounded by RAG (auditor).
 
-Total time: ~2 hours (mostly waiting for training). Cost: ~$30 (synthetic data + Spot GPU training).
+Total time: ~1 hour (mostly waiting for the convert and indexing steps). Cost: ~$15-30 (mostly Bedrock synthetic data for the triage classifier; the auditor is convert-only on CPU).
 
 ## The problem
 
 Teams paste Kubernetes configs into ChatGPT and get answers that look correct but contain subtle errors. An LLM confidently tells you that `minValues: 3` in a Karpenter NodePool "blocks scheduling until 3 different families are provisioned" (wrong). It suggests `m6i` with `instance-generation Gt 6` (contradictory). It recommends deprecated APIs for current cluster versions.
 
-These hallucinations are hard to catch because the output is well-formatted and sounds authoritative. A fine-tuned SLM trained on the actual API docs doesn't have this problem. It knows what's valid because it learned from the source of truth.
+These hallucinations are hard to catch because the output is well-formatted and sounds authoritative. A small model grounded in the actual API docs via RAG doesn't have this problem. It answers from the retrieved source of truth instead of from memory, and a faithfulness gate rejects any draft the docs don't support.
 
 ## What we'll build
 
@@ -31,12 +31,13 @@ User question or YAML config
 Two specialists, one pipeline — and they use two different model families:
 - **Triage** (`task: classification`): a frozen encoder + logistic head that
   classifies intent in ~25ms. CPU-trained in seconds, deterministic.
-- **Auditor** (`task: generation`): an 8B causal LM fine-tuned with QLoRA that
-  produces structured config analysis, streamed.
+- **Auditor** (`task: generation`): an 8B causal LM served stock and grounded by
+  RAG that produces structured config analysis, streamed.
 
-Both run on Graviton4 CPUs at inference time. No GPUs serve traffic. (Only the
-auditor's *training* uses a GPU; the triage classifier trains on CPU.) The LLM
-API is called only for the ~10-20% of queries where triage isn't confident.
+Both run on Graviton4 CPUs at inference time, and no GPU is used anywhere in the
+pipeline: the triage classifier trains on CPU and the auditor is downloaded,
+converted to GGUF, and quantized on CPU. The LLM API is called only for the
+~10-20% of queries where triage isn't confident.
 
 ## Prerequisites
 
@@ -161,56 +162,38 @@ project:
     Expert auditor for Kubernetes autoscaling configurations on EKS.
     Produces structured reasoning about what is wrong, why it is
     dangerous, and how to fix it.
-  labels:
-    error_type:
-      - deprecated_api
-      - field_mismatch
-      - resource_conflict
-      - logic_error
-      - security_gap
-      - valid_config
-    severity:
-      - critical
-      - high
-      - medium
-      - low
-      - info
 
 model:
   base: ""  # HuggingFace causal LM (8B recommended for structured reasoning)
-  quantize: q4_k_m
+  # q8_0 held accuracy on this reasoning task in our eval; smaller quants lost
+  # calibration. Re-check your own scorecard before going lower.
+  quantize: q8_0
 
 data:
+  # Generation is served stock and grounded by RAG, so there is no synthetic data
+  # or label taxonomy here. bucket/path are where the converted GGUF is uploaded.
   bucket: slemify-data
   path: k8s-autoscaling/data/
-  sources:
-    - path: queries/
-      type: raw
-  synthetic:
-    model: eu.anthropic.claude-sonnet-4-6
-    pairs: 2500
-
-training:
-  spot: true
 ```
 
 Key choices:
 - **`task: generation`**: routes through the generative path — a causal LM
-  fine-tuned with QLoRA on GPU, exported to GGUF, served on CPU. Unlike triage,
-  the auditor must *write* a report, which only a generative model can do.
+  downloaded, converted to GGUF, and quantized on CPU (no fine-tuning), then
+  served on CPU and grounded by RAG. Unlike triage, the auditor must *write* a
+  report, which only a generative model can do.
 - **8B model**: large enough for structured reasoning with YAML output
 - **`output_format: free_form`**: the auditor generates paragraphs, not labels
-- **2500 synthetic pairs**: more training data because the output space is larger
+- **no synthetic data or labels**: the auditor isn't trained; its knowledge comes from RAG at serving time
 
 ## Step 4: Train and deploy
 
 ```bash
-# Train both models (runs on Spot GPU, ~20 min each)
+# Build both models (triage trains on CPU in seconds; the auditor converts on CPU, ~6 min)
 slemify deploy --config triage/expert.yaml
 slemify deploy --config auditor/expert.yaml
 ```
 
-Each command runs the full pipeline: synthetic data generation, QLoRA training on Spot GPU, GGUF quantization, deployment to your cluster, and a validation report.
+Each command runs the full pipeline: data prep, CPU training (triage) or GGUF convert and quantization (auditor), deployment to your cluster, and a validation report.
 
 Monitor progress:
 
@@ -280,8 +263,8 @@ The tmux dashboard shows all three pods processing in sequence, proving it's a m
 
 | Item | Cost | Frequency |
 |------|------|-----------|
-| Synthetic data (Bedrock) | ~$15 per model | One-time |
-| Training (Spot GPU) | ~$0.15 per model | One-time (or per retrain) |
+| Synthetic data (Bedrock, triage only) | ~$15 | One-time |
+| Model prep (CPU: triage train / auditor convert) | <$1 | One-time |
 | Inference (CPU Spot) | ~$117/mo per replica | Ongoing |
 | OpenSearch (CPU) | ~$50/mo | Ongoing |
 | LLM fallback (Bedrock) | ~$0.008 per query | Only for low-confidence queries |
