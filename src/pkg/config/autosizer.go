@@ -68,8 +68,11 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 	sampleCount := estimateSampleCount(data)
 
 	sized := SizedConfig{
-		TrainingGPU:       "none (CPU)",
-		TrainingInstance:  "Spot CPU (Karpenter selects)",
+		TrainingGPU: "none (CPU)",
+		// The generation "training" stage is the GGUF convert Job, pinned to
+		// on-demand (one-shot, bandwidth-heavy; a Spot reclaim would force a
+		// full re-download). Inference still runs on Spot.
+		TrainingInstance:  "On-Demand CPU (Karpenter selects)",
 		WarmupRatio:       0.1,
 		Scheduler:         "cosine",
 		EarlyStopPatience: 2,

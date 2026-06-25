@@ -113,9 +113,14 @@ func ConvertJobManifest(cfg *config.ExpertConfig, sized config.SizedConfig, ns s
 					AutomountServiceAccountToken: &automountSA,
 					SecurityContext:              k8s.RestrictedPodSecurityContext(),
 					RestartPolicy:                corev1.RestartPolicyOnFailure,
-					// CPU pool only — the conversion runs entirely on CPU.
+					// CPU pool only — the conversion runs entirely on CPU. Pin to
+					// on-demand: the convert Job is a one-shot, bandwidth-heavy run
+					// (downloads ~16GB of weights). A Spot reclaim mid-run forces a
+					// full re-download, so the small on-demand premium is worth the
+					// determinism here.
 					NodeSelector: map[string]string{
-						"slemify.io/workload": "slm",
+						"slemify.io/workload":        "slm",
+						"karpenter.sh/capacity-type": "on-demand",
 					},
 					Tolerations: []corev1.Toleration{
 						{
