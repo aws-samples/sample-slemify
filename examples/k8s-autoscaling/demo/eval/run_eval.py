@@ -36,6 +36,7 @@ import re
 import sys
 import time
 from datetime import datetime, timezone
+from itertools import zip_longest
 
 import boto3
 import httpx
@@ -70,17 +71,30 @@ def fetch_reference(query: str, answer: str) -> str:
         return [h["_source"]["text"] for h in r.json()["hits"]["hits"]]
 
     try:
-        vec = httpx.post(f"{EMBED_URL}/embed", json={"inputs": query[:8000]}, timeout=30).json()[0]
-        dense = _hits({"size": 15, "query": {"knn": {"embedding": {"vector": vec, "k": 15}}},
-                       "_source": ["text"]})
+        vec_q = httpx.post(f"{EMBED_URL}/embed", json={"inputs": query[:8000]}, timeout=30).json()[0]
+        dense_q = _hits({"size": 15, "query": {"knn": {"embedding": {"vector": vec_q, "k": 15}}},
+                        "_source": ["text"]})
         lex_q = _hits({"size": 10, "query": {"match": {"text": query[:1000]}}, "_source": ["text"]})
         lex_a = _hits({"size": 15, "query": {"match": {"text": answer[:2000]}}, "_source": ["text"]}) if answer else []
+        # Dense search on the ANSWER too: a real identifier the answer states in a
+        # different surface form than the corpus (e.g. MIN_VALUES_POLICY vs the
+        # docs' MinValuesPolicy / --min-values-policy) won't match by BM25 token,
+        # but its semantics still retrieve the proving chunk. Without this the
+        # judge can falsely flag a true claim as fabricated.
+        dense_a = []
+        if answer:
+            vec_a = httpx.post(f"{EMBED_URL}/embed", json={"inputs": answer[:8000]}, timeout=30).json()[0]
+            dense_a = _hits({"size": 15, "query": {"knn": {"embedding": {"vector": vec_a, "k": 15}}},
+                            "_source": ["text"]})
+        # Round-robin across the four sources so answer-grounding chunks always get
+        # slots (a question-dense flood can't crowd them out before the cap).
         seen, chunks = set(), []
-        for c in dense + lex_q + lex_a:
-            if c not in seen:
-                seen.add(c)
-                chunks.append(c)
-        return "\n\n---\n\n".join(chunks[:14])
+        for group in zip_longest(dense_q, dense_a, lex_a, lex_q):
+            for c in group:
+                if c and c not in seen:
+                    seen.add(c)
+                    chunks.append(c)
+        return "\n\n---\n\n".join(chunks[:18])
     except Exception as e:
         print(f"  (reference lookup unavailable: {e}; judging on authoritative points only)")
         return ""
@@ -95,9 +109,10 @@ def query_agent(text: str) -> dict:
     answer is scored.
     """
     triage, model, buf = "", "", []
+    autopilot = os.environ.get("EVAL_AUTOPILOT", "false").lower() in ("1", "true", "yes")
     with httpx.Client(timeout=300) as c:
         with c.stream("POST", f"{ORCHESTRATOR_URL}/query",
-                      json={"text": text, "autopilot": False}) as r:
+                      json={"text": text, "autopilot": autopilot}) as r:
             for line in r.iter_lines():
                 if not line.startswith("data: "):
                     continue
@@ -180,9 +195,13 @@ Return ONLY a JSON object, no prose:
 
 Where:
 - verdict "pass" = makes the authoritative points and is consistent with them, the
-  reference documentation, and the flags above; "partial" = mostly right but
-  missing a point or overly hedged; "fail" = contradicts an authoritative point or
-  the reference, violates a flag rule above, or misses the point of the question.
+  reference documentation, and the flags above. An answer that makes the points
+  clearly but ALSO adds honest notes about what it could not verify (calibrated
+  uncertainty) is still a PASS — do NOT downgrade for appropriate hedging or for
+  saying "I couldn't confirm X" when the core points are stated. "partial" =
+  hedges so much that it never commits to an authoritative point, or is missing a
+  point; "fail" = contradicts an authoritative point or the reference, violates a
+  flag rule above, or misses the point of the question.
 - hallucinated = stated an API field/value/behavior that CONTRADICTS the reference
   documentation or authoritative points, or that appears in neither and is not a
   basic, well-established fact. Do NOT flag a claim that the reference supports."""
@@ -203,7 +222,7 @@ def judge(case: dict, answer: str) -> dict:
     resp = _bedrock.converse(
         modelId=JUDGE_MODEL,
         messages=[{"role": "user", "content": [{"text": prompt}]}],
-        inferenceConfig={"maxTokens": 500, "temperature": 0},
+        inferenceConfig={"maxTokens": 800, "temperature": 0},
     )
     text = resp["output"]["message"]["content"][0]["text"]
     m = re.search(r"\{.*\}", text, re.DOTALL)

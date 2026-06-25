@@ -290,3 +290,64 @@
   must_include:
     - "v1 EC2NodeClass requires amiSelectorTerms (e.g., an alias like al2023@latest) to be set explicitly"
   must_not_say: []
+
+# --- Clean-framed variants (one intent, no presumed cause) ---
+# The minValues case above is intentionally leading (a calibration/premise test).
+# These ask the same topic cleanly, the way a well-formed question should.
+
+- id: minvalues-concept
+  topic: minValues
+  query: |
+    What does minValues do in a Karpenter NodePool requirement, and what happens if it cannot be satisfied?
+  expected_category: karpenter
+  should_reject: false
+  should_abstain: false
+  config_is_valid: false
+  leading_premise: false
+  must_include:
+    - "minValues sets the minimum number of distinct values the scheduler must consider for that requirement key"
+    - "if the minimum flexibility cannot be met, Strict policy fails scheduling (or falls back), BestEffort relaxes minValues"
+  must_not_say:
+    - "minValues is invalid"
+
+- id: minvalues-validate
+  topic: minValues
+  query: |
+    Is this NodePool requirements block valid?
+
+    apiVersion: karpenter.sh/v1
+    kind: NodePool
+    metadata:
+      name: default
+    spec:
+      template:
+        spec:
+          requirements:
+            - key: karpenter.k8s.aws/instance-family
+              operator: In
+              values: ["c5", "c6i", "c7g", "m5", "m6i", "m7g"]
+              minValues: 3
+  expected_category: karpenter
+  should_reject: false
+  should_abstain: false
+  config_is_valid: true
+  leading_premise: false
+  must_include:
+    - "the configuration is valid (6 listed families satisfies minValues: 3)"
+  must_not_say:
+    - "remove minValues"
+    - "minValues is invalid"
+
+- id: minvalues-mechanism
+  topic: minValues
+  query: |
+    Could minValues: 3 with 6 listed instance families ever leave pods Pending, and under what conditions?
+  expected_category: karpenter
+  should_reject: false
+  should_abstain: false
+  config_is_valid: true
+  leading_premise: false
+  must_include:
+    - "the config itself is valid; minValues: 3 is satisfiable by 6 listed families"
+    - "it could contribute to Pending only if the cluster cannot provide the minimum distinct usable values under Strict policy"
+  must_not_say: []
