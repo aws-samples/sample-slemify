@@ -61,6 +61,25 @@ def _build_context(state: AgentState) -> str:
     return "\n\n===\n\n".join(sections)
 
 
+async def _stream_answer(writer, name: str, token_stream) -> str:
+    """Relay a model's token stream onto the SSE vocabulary the UI consumes, and
+    return the full text. Emits the step_done timing on the first token (so the
+    UI can show time-to-first-token) and a token event per chunk. Shared by every
+    node that streams an answer (auditor SLM, LLM escalation, calibrated fallback)
+    so the streaming contract lives in one place."""
+    t = time.perf_counter()
+    parts, first = [], True
+    async for token in token_stream:
+        if first:
+            writer({"type": "step_done", "name": name, "ms": _ms(t), "detail": "time to first token"})
+            first = False
+        parts.append(token)
+        writer({"type": "token", "text": token})
+    if first:
+        writer({"type": "step_done", "name": name, "ms": _ms(t), "detail": "no output"})
+    return "".join(parts)
+
+
 # --- Nodes ---
 
 async def n_triage(state: AgentState) -> dict:
@@ -172,17 +191,8 @@ async def n_generate(state: AgentState) -> dict:
         writer({"type": "model", "name": "Auditor SLM (8B, CPU)"})
 
     writer({"type": "step_start", "name": name, "note": "generating answer"})
-    t = time.perf_counter()
-    parts, first = [], True
-    async for token in stream_fn(state["query"], context):
-        if first:
-            writer({"type": "step_done", "name": name, "ms": _ms(t), "detail": "time to first token"})
-            first = False
-        parts.append(token)
-        writer({"type": "token", "text": token})
-    if first:
-        writer({"type": "step_done", "name": name, "ms": _ms(t), "detail": "no output"})
-    return {"draft": "".join(parts), "attempts": attempts + 1, "used_llm": used_llm}
+    draft = await _stream_answer(writer, name, stream_fn(state["query"], context))
+    return {"draft": draft, "attempts": attempts + 1, "used_llm": used_llm}
 
 
 async def n_critic(state: AgentState) -> dict:
@@ -252,15 +262,7 @@ async def n_escalate(state: AgentState) -> dict:
     writer({"type": "answer_reset", "reason": "escalating"})
     writer({"type": "model", "name": "Claude Sonnet 4.5 (Bedrock)"})
     writer({"type": "step_start", "name": "LLM API (Bedrock escalation)", "note": "CPU answer not supported \u2014 escalating"})
-    t = time.perf_counter()
-    first = True
-    async for token in generation.stream_llm(state["query"], context):
-        if first:
-            writer({"type": "step_done", "name": "LLM API (Bedrock escalation)", "ms": _ms(t), "detail": "time to first token"})
-            first = False
-        writer({"type": "token", "text": token})
-    if first:
-        writer({"type": "step_done", "name": "LLM API (Bedrock escalation)", "ms": _ms(t), "detail": "no output"})
+    await _stream_answer(writer, "LLM API (Bedrock escalation)", generation.stream_llm(state["query"], context))
     return {"used_llm": True}
 
 
@@ -275,15 +277,8 @@ async def n_abstain(state: AgentState) -> dict:
     writer({"type": "model", "name": "Claude Sonnet 4.5 (Bedrock)"})
     writer({"type": "step_start", "name": "Calibrated answer (LLM)",
             "note": "evidence did not fully support the draft \u2014 answering with calibrated confidence"})
-    t = time.perf_counter()
-    first = True
-    async for token in generation.stream_calibrated(state["query"], context, state.get("gate_reason", "")):
-        if first:
-            writer({"type": "step_done", "name": "Calibrated answer (LLM)", "ms": _ms(t), "detail": "time to first token"})
-            first = False
-        writer({"type": "token", "text": token})
-    if first:
-        writer({"type": "step_done", "name": "Calibrated answer (LLM)", "ms": _ms(t), "detail": "no output"})
+    await _stream_answer(writer, "Calibrated answer (LLM)",
+                         generation.stream_calibrated(state["query"], context, state.get("gate_reason", "")))
     return {}
 
 
