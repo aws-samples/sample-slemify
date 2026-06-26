@@ -338,10 +338,11 @@ spec:
               value: "eu-west-1"
             - name: AWS_DEFAULT_REGION
               value: "eu-west-1"
-            # Read-only by default. Apply stays off unless ALLOW_APPLY=true here
-            # AND the opt-in write RBAC (k8s-rbac-apply.yaml) is applied.
+            # Apply is enabled here, but still gated by the opt-in write RBAC
+            # (k8s-rbac-apply.yaml). Without that RBAC the tools pod can read but
+            # cannot patch. Set to "false" to disable apply entirely.
             - name: ALLOW_APPLY
-              value: "false"
+              value: "true"
           resources:
             requests:
               cpu: 50m
