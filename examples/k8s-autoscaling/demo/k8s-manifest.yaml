@@ -8,18 +8,29 @@ metadata:
     app: k8s-autoscaling-orchestrator
     slemify.io/component: demo
 ---
-# Read-only RBAC for the agent's tools. The orchestrator describes cluster
-# resources and lists their events to ground its answers in live state. It is
-# granted ONLY get/list/watch — no create/update/patch/delete — so the agent
-# can never mutate the cluster. Resources span cluster-scoped CRDs (NodePool,
-# EC2NodeClass, Node) and namespaced kinds the demo reasons about, so this is a
-# ClusterRole; scope it to a Role + RoleBinding if you only need one namespace.
+# The sandbox tools pod is the ONLY workload with cluster credentials. The
+# orchestrator calls it over HTTP and holds no K8s RBAC of its own.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k8s-autoscaling-tools
+  namespace: slemify
+  labels:
+    app: k8s-autoscaling-tools
+    slemify.io/component: demo
+---
+# Read-only RBAC for the agent's tools, bound to the SANDBOX tools pod. It
+# describes cluster resources and lists their events to ground answers in live
+# state. Granted ONLY get/list/watch — no create/update/patch/delete — so the
+# agent can never mutate the cluster. Resources span cluster-scoped CRDs
+# (NodePool, EC2NodeClass, Node) and namespaced kinds the demo reasons about, so
+# this is a ClusterRole; scope it to a Role + RoleBinding for a single namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: k8s-autoscaling-orchestrator-readonly
+  name: k8s-autoscaling-tools-readonly
   labels:
-    app: k8s-autoscaling-orchestrator
+    app: k8s-autoscaling-tools
     slemify.io/component: demo
 rules:
   - apiGroups: ["karpenter.sh"]
@@ -47,17 +58,17 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: k8s-autoscaling-orchestrator-readonly
+  name: k8s-autoscaling-tools-readonly
   labels:
-    app: k8s-autoscaling-orchestrator
+    app: k8s-autoscaling-tools
     slemify.io/component: demo
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: k8s-autoscaling-orchestrator-readonly
+  name: k8s-autoscaling-tools-readonly
 subjects:
   - kind: ServiceAccount
-    name: k8s-autoscaling-orchestrator
+    name: k8s-autoscaling-tools
     namespace: slemify
 ---
 apiVersion: apps/v1
@@ -80,7 +91,9 @@ spec:
         slemify.io/component: demo
     spec:
       serviceAccountName: k8s-autoscaling-orchestrator
-      automountServiceAccountToken: true
+      # The orchestrator no longer touches the K8s API; cluster access lives in
+      # the sandbox tools pod. No token is mounted here.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -115,6 +128,8 @@ spec:
               value: "http://k8s-autoscaling-retriever-inference.slemify:8080"
             - name: RERANKER_URL
               value: "http://k8s-autoscaling-reranker.slemify:80"
+            - name: TOOLSVC_URL
+              value: "http://k8s-autoscaling-tools.slemify"
             - name: INDEX_NAME
               value: "k8s-autoscaling-knowledge"
             - name: LLM_MODEL
@@ -273,3 +288,132 @@ spec:
     - port: 80
       targetPort: 8080
       protocol: TCP
+---
+# Sandbox tools pod: the only workload with cluster credentials. Runs the SAME
+# orchestrator image with a different entrypoint (the toolsvc HTTP app). The
+# orchestrator decides which tool/args; this pod executes them against the API.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-autoscaling-tools
+  namespace: slemify
+  labels:
+    app: k8s-autoscaling-tools
+    slemify.io/component: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k8s-autoscaling-tools
+  template:
+    metadata:
+      labels:
+        app: k8s-autoscaling-tools
+        slemify.io/component: demo
+    spec:
+      serviceAccountName: k8s-autoscaling-tools
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+        slemify.io/workload: slm
+      tolerations:
+        - key: slemify.io/slm
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: tools
+          image: REPLACE_WITH_ECR_IMAGE
+          command: ["uvicorn", "agent.toolsvc:app", "--host", "0.0.0.0", "--port", "8080"]
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: AWS_REGION
+              value: "eu-west-1"
+            - name: AWS_DEFAULT_REGION
+              value: "eu-west-1"
+            # Read-only by default. Apply stays off unless ALLOW_APPLY=true here
+            # AND the opt-in write RBAC (k8s-rbac-apply.yaml) is applied.
+            - name: ALLOW_APPLY
+              value: "false"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-autoscaling-tools
+  namespace: slemify
+  labels:
+    app: k8s-autoscaling-tools
+    slemify.io/component: demo
+spec:
+  type: ClusterIP
+  selector:
+    app: k8s-autoscaling-tools
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+---
+# Defense in depth: only the orchestrator may reach the tools service. Requires
+# a NetworkPolicy-enforcing CNI (e.g. Cilium, Calico); without one this is a
+# no-op and the ClusterIP remains in-cluster reachable.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: k8s-autoscaling-tools-ingress
+  namespace: slemify
+  labels:
+    app: k8s-autoscaling-tools
+    slemify.io/component: demo
+spec:
+  podSelector:
+    matchLabels:
+      app: k8s-autoscaling-tools
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: k8s-autoscaling-orchestrator
+      ports:
+        - protocol: TCP
+          port: 8080

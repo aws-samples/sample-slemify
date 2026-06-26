@@ -21,7 +21,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
 from . import classify, config, extract, gate, generation, retrieval, tools
-from . import remediation
+from . import toolclient
 from .validation import validate_config, validate_draft_fix
 
 
@@ -110,7 +110,7 @@ async def n_intent(state: AgentState) -> dict:
     writer({"type": "step_start", "name": "Intent router (CPU)", "note": "answer from docs, or act on the cluster?"})
     t = time.perf_counter()
     intent = await loop.run_in_executor(None, classify.classify_intent, state["query"])
-    use_tools = intent == "action" and tools.available()
+    use_tools = intent == "action" and toolclient.available()
     pending = extract.select_cluster_tools(state["query"]) if use_tools else []
     detail = ("explicit cluster request \u2192 " + ", ".join(pending)) if pending else "answer from documentation"
     writer({"type": "step_done", "name": "Intent router (CPU)", "ms": _ms(t), "detail": detail})
@@ -128,7 +128,7 @@ async def n_gather(state: AgentState) -> dict:
         args = extract.extract_args(state["query"], tool)
         writer({"type": "step_start", "name": f"Tool \u00b7 {tool}", "note": extract.args_summary(tool, args)})
         t = time.perf_counter()
-        output = await loop.run_in_executor(None, tools.run_tool, tool, args)
+        output = await loop.run_in_executor(None, toolclient.run_tool, tool, args)
         writer({"type": "step_done", "name": f"Tool \u00b7 {tool}", "ms": _ms(t), "detail": tools.tool_detail(output)})
         results.append({"tool": tool, "args": args, "output": output})
     return {"tool_results": results, "pending_tools": []}
@@ -217,7 +217,7 @@ async def n_critic(state: AgentState) -> dict:
     can_retry = attempts <= config.MAX_CRITIC_RETRIES
     # A flagged answer about live state, on a query we haven't yet inspected the
     # cluster for, calls for real evidence rather than escalation/speculation.
-    needs_evidence = (escalate and not used_llm and not fix_issues and tools.available()
+    needs_evidence = (escalate and not used_llm and not fix_issues and toolclient.available()
                       and extract.is_operational(state["query"]) and not state.get("tool_results"))
 
     if passed:
@@ -296,7 +296,7 @@ async def n_remediate(state: AgentState) -> dict:
     """
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
-    rem = await loop.run_in_executor(None, remediation.detect_remediation, state["query"])
+    rem = await loop.run_in_executor(None, toolclient.detect_remediation, state["query"])
     if not rem:
         return {}
     if not state.get("autopilot"):
@@ -306,21 +306,21 @@ async def n_remediate(state: AgentState) -> dict:
         writer({"type": "proposal", "action": rem["action"], "target": rem["target"],
                 "summary": rem["summary"], "manual": rem.get("manual", "")})
         return {}
-    apply_fn, verify_fn = remediation.REMEDIATIONS[rem["action"]]
+    action = rem["action"]
     target = rem["target"]
     writer({"type": "response", "text": (
         f"**Autopilot is on \u2014 applying now.** Bounded, whitelisted change "
         f"({rem['summary']}); it dry-runs first, then I re-read `{target}` to verify.")})
     writer({"type": "step_start", "name": "Apply fix (autopilot)", "note": rem["summary"]})
     t = time.perf_counter()
-    result = await loop.run_in_executor(None, apply_fn, target)
+    result = await loop.run_in_executor(None, toolclient.apply, action, target)
     writer({"type": "step_done", "name": "Apply fix (autopilot)", "ms": _ms(t), "detail": result["message"]})
     if not result["ok"]:
         writer({"type": "response", "text": f"**Autopilot could not apply the fix:** {result['message']}"})
         return {}
     writer({"type": "step_start", "name": "Verify (CPU)", "note": f"re-checking {target}"})
     t = time.perf_counter()
-    check = await loop.run_in_executor(None, verify_fn, target)
+    check = await loop.run_in_executor(None, toolclient.verify, action, target)
     writer({"type": "step_done", "name": "Verify (CPU)", "ms": _ms(t), "detail": check["message"]})
     status = "applied and verified" if check["ok"] else "applied, but verification failed"
     writer({"type": "response", "text": f"**Autopilot {status}.** {check['message']}"})

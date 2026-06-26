@@ -1,21 +1,22 @@
 # OPT-IN write RBAC for the agent's apply (autopilot / approve-to-apply) modes.
 #
 # This is NOT applied by default. Without it — and without ALLOW_APPLY=true on
-# the orchestrator Deployment — the agent is strictly read-only and cannot
+# the sandbox tools Deployment — the agent is strictly read-only and cannot
 # change the cluster. Apply it only when you want the agent to remediate:
 #
 #   kubectl apply -f k8s-rbac-apply.yaml
 #
-# It grants the orchestrator ServiceAccount the minimum write verbs for the
+# It grants the SANDBOX tools ServiceAccount the minimum write verbs for the
 # whitelisted remediations (currently: patch a NodePool's capacity-type to
-# enable Spot). Scope this down further if you only need specific NodePools.
+# enable Spot, and drop an unschedulable nodeSelector key from a Deployment).
+# Scope this down further if you only need specific resources.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: k8s-autoscaling-orchestrator-apply
+  name: k8s-autoscaling-tools-apply
   labels:
-    app: k8s-autoscaling-orchestrator
+    app: k8s-autoscaling-tools
     slemify.io/component: demo
 rules:
   # Patch NodePools (e.g. add 'spot' to capacity-type). No create/delete.
@@ -30,15 +31,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: k8s-autoscaling-orchestrator-apply
+  name: k8s-autoscaling-tools-apply
   labels:
-    app: k8s-autoscaling-orchestrator
+    app: k8s-autoscaling-tools
     slemify.io/component: demo
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: k8s-autoscaling-orchestrator-apply
+  name: k8s-autoscaling-tools-apply
 subjects:
   - kind: ServiceAccount
-    name: k8s-autoscaling-orchestrator
+    name: k8s-autoscaling-tools
     namespace: slemify

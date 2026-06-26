@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from agent import config, extract, remediation, retrieval, tools
+from agent import toolclient
 from agent.graph import agent
 
 app = FastAPI()
@@ -55,7 +56,10 @@ async def health():
 async def warmup():
     """Warm the SLMs and retrieval to avoid cold-start latency on first query."""
     global _ready
-    tools.init_k8s()
+    # When sandboxed (TOOLSVC_URL set), the orchestrator holds no cluster creds;
+    # the tools pod runs init_k8s itself. Only init in-process for single-pod dev.
+    if not config.TOOLSVC_URL:
+        tools.init_k8s()
     body = {
         "model": "model",
         "messages": [{"role": "user", "content": "warmup"}],
@@ -98,8 +102,9 @@ async def query_endpoint(q: Query):
 
 @app.get("/config")
 async def get_config():
-    """Tell the UI whether apply (approve/autopilot) is available on this server."""
-    return {"apply_enabled": config.ALLOW_APPLY}
+    """Tell the UI whether apply (approve/autopilot) is available. In sandbox
+    mode this reflects the tools pod's ALLOW_APPLY (where writes execute)."""
+    return {"apply_enabled": toolclient.apply_enabled()}
 
 
 @app.post("/apply")
@@ -119,16 +124,15 @@ async def apply_endpoint(req: ApplyRequest):
             yield sse("response", text="Unknown or invalid remediation request.")
             yield "data: [DONE]\n\n"
             return
-        apply_fn, verify_fn = entry
         loop = asyncio.get_event_loop()
         yield sse("step_start", name="Apply fix", note=f"{req.action} on {req.target}")
         t = time.perf_counter()
-        result = await loop.run_in_executor(None, apply_fn, req.target)
+        result = await loop.run_in_executor(None, toolclient.apply, req.action, req.target)
         yield sse("step_done", name="Apply fix", ms=round((time.perf_counter() - t) * 1000), detail=result["message"])
         if result["ok"]:
             yield sse("step_start", name="Verify (CPU)", note=f"re-checking {req.target}")
             t = time.perf_counter()
-            check = await loop.run_in_executor(None, verify_fn, req.target)
+            check = await loop.run_in_executor(None, toolclient.verify, req.action, req.target)
             yield sse("step_done", name="Verify (CPU)", ms=round((time.perf_counter() - t) * 1000), detail=check["message"])
             status = "Applied and verified" if check["ok"] else "Applied, but verification failed"
             yield sse("response", text=f"**{status}.** {check['message']}")

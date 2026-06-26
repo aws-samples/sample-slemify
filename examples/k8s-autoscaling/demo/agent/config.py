@@ -17,6 +17,11 @@ OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:9200")
 EMBEDDING_URL = os.environ.get("EMBEDDING_URL", "http://localhost:8083")
 # In-cluster cross-encoder re-ranker.
 RERANKER_URL = os.environ.get("RERANKER_URL", "http://localhost:8084")
+# Sandbox that executes the cluster-touching tools in a separate pod. When set,
+# the orchestrator holds NO cluster RBAC and calls this service over HTTP; the
+# tools pod is the only workload with K8s credentials. Empty = run tools in-process
+# (single-pod dev mode).
+TOOLSVC_URL = os.environ.get("TOOLSVC_URL", "")
 INDEX_NAME = os.environ.get("INDEX_NAME", "k8s-autoscaling-knowledge")
 
 # --- Models ---

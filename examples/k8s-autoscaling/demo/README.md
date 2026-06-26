@@ -57,7 +57,7 @@ CPU; the gate is one LLM call per answer.
 | Chat UI | Static web app | Any | Live step log + markdown answers | — |
 | Orchestrator | Python FastAPI + LangGraph | CPU pod | The agent graph: triage → plan/tools → retrieve → generate → critic | No — plain code |
 | Triage classifier | Slemify classifier-serving (ONNX) | c8g (Graviton4 CPU) | Intent classification + confidence | Yes (classification head) |
-| Read-only tools | Kubernetes Python client | in orchestrator | `describe_resource`, `list_events`, `investigate_cluster`, `validate_config` — gather live evidence | No — code |
+| Read-only tools | Kubernetes Python client | tools sandbox pod | `describe_resource`, `list_events`, `investigate_cluster`, `validate_config` — gather live evidence | No — code |
 | Retriever | Slemify retriever (`task: embedding`), ONNX | c8g (Graviton4 CPU) | Domain-tuned query/doc embeddings, 768d | **Yes** (fine-tuned encoder) |
 | Reranker | sentence-transformers cross-encoder | c8g (Graviton4 CPU) | Re-ranks candidates to the best few | No — stock |
 | OpenSearch | OpenSearch k-NN | CPU pod | Vector search over 3900+ doc chunks | — |
@@ -76,21 +76,25 @@ heuristic. See "Right tool for the right task" below.
 Every model runs in its own pod; the orchestrator holds no model and is a thin
 coordinator that calls each one over HTTP. The two ONNX models (triage and
 retriever) run the **same** `classifier-serving` image as separate Deployments,
-differentiated by `PROJECT`/`TASK`. All five demo pods land on CPU (Graviton4)
+differentiated by `PROJECT`/`TASK`. The demo pods land on CPU (Graviton4)
 nodes; OpenSearch runs as a StatefulSet.
 
-The key thing to notice: **only the orchestrator talks to the Kubernetes API.**
-It is the one component with cluster credentials — it runs the read-only tools
-(`get`/`list`/`watch`) and, when apply is enabled, the gated writes (`patch` a
-NodePool or Deployment). The model pods only serve inference and never touch the
-API; the reranker even runs with `automountServiceAccountToken: false`.
+The key thing to notice: **only the tools sandbox pod talks to the Kubernetes
+API.** It is the one component with cluster credentials — it runs the read-only
+tools (`get`/`list`/`watch`) and, when apply is enabled, the gated writes
+(`patch` a NodePool or Deployment). The orchestrator decides *which* tool and
+arguments (credential-free parsing) and calls the sandbox over HTTP; it mounts
+no ServiceAccount token. The model pods only serve inference and never touch the
+API; the reranker also runs with `automountServiceAccountToken: false`. A
+NetworkPolicy restricts the sandbox so only the orchestrator can reach it.
 
 ```mermaid
 flowchart LR
     UI["Chat UI<br/>(browser)"] <-->|"/query · SSE stream"| ORCH
 
     subgraph NS["slemify namespace · CPU (Graviton4) pods"]
-        ORCH["<b>orchestrator</b> pod<br/>LangGraph agent + tools<br/>(no model loaded)"]
+        ORCH["<b>orchestrator</b> pod<br/>LangGraph agent<br/>(no model, no cluster creds)"]
+        TOOLS["<b>tools</b> sandbox pod<br/>read-only K8s client<br/>(only pod with cluster creds)"]
         TRIAGE["triage-inference pod<br/>classifier-serving · ONNX"]
         RETR["retriever-inference pod<br/>classifier-serving · ONNX embed"]
         RERANK["reranker pod<br/>cross-encoder · torch"]
@@ -98,6 +102,7 @@ flowchart LR
         OS[("opensearch<br/>vector DB · StatefulSet")]
     end
 
+    ORCH <-->|"run_tool · HTTP"| TOOLS
     ORCH <-->|"classify"| TRIAGE
     ORCH <-->|"embed"| RETR
     ORCH <-->|"k-NN search"| OS
@@ -112,18 +117,20 @@ flowchart LR
         KARP["Karpenter<br/>→ nodes"]
     end
 
-    ORCH ==>|"read-only get/list/watch<br/><b>+ gated patch</b>"| API
+    TOOLS ==>|"read-only get/list/watch<br/><b>+ gated patch</b>"| API
     API --> NP
     API --> DEP
     NP -.->|provisions| KARP
 
     style ORCH stroke:#1f6feb,stroke-width:3px
+    style TOOLS stroke:#d29922,stroke-width:3px
     style API stroke:#d29922,stroke-width:2px
 ```
 
-The thick edge from the orchestrator to the API server is the only write path in
-the system, and it stays bounded: gated by `ALLOW_APPLY`, the opt-in write RBAC,
-and the whitelisted, dry-run-first remediations described under "Remediation".
+The thick edge from the tools sandbox pod to the API server is the only write
+path in the system, and it stays bounded: gated by `ALLOW_APPLY`, the opt-in
+write RBAC, and the whitelisted, dry-run-first remediations described under
+"Remediation".
 
 That view is the **topology** — who calls whom. A single query is not one pass
 through it: the orchestrator coordinates these pods back and forth and re-runs
@@ -193,16 +200,16 @@ in the cluster's real state, not just the docs.
 - Tools call the Kubernetes API through the Python client with structured,
   validated arguments — never a shelled-out `kubectl` with interpolated user
   text, so there is no command-injection surface.
-- The orchestrator's RBAC is a ClusterRole with **only** `get`/`list`/`watch` —
+- The tools sandbox pod's RBAC is a ClusterRole with **only** `get`/`list`/`watch` —
   no `create`/`update`/`patch`/`delete`. The agent can read the cluster but can
-  never change it.
+  never change it. The orchestrator itself holds no cluster RBAC.
 - Resource names and namespaces (untrusted, pulled from the query) are validated
   against the Kubernetes name regex before any API call.
 - `validate_config` makes no API call at all (server-side dry-run would need
   write permission), so it works even with tools disabled.
 
-If the orchestrator has no cluster credentials, tools degrade gracefully and the
-agent answers from documentation — the demo still runs.
+If the tools sandbox is unreachable or has no cluster credentials, tools degrade
+gracefully and the agent answers from documentation — the demo still runs.
 
 ## Self-Correction (the faithfulness gate)
 
