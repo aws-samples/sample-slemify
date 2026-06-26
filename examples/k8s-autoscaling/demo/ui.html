@@ -3,8 +3,8 @@
 <title>K8s Autoscaling Agent</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
-:root[data-theme="dark"]{--bg:#0d1117;--panel:#0f1117;--surface:#161b22;--surface2:#1c2230;--fg:#e6edf3;--border:#2a3038;--muted:#8b949e;--accent:#1f6feb;--accent-hover:#388bfd;--code-bg:#0d1117;--strong:#f0f6fc;--user-bg:#1f6feb;--cpu:#3fb950;--cpu-bg:rgba(63,185,80,0.12);--llm:#a371f7;--llm-bg:rgba(163,113,247,0.14)}
-:root[data-theme="light"]{--bg:#f6f8fa;--panel:#ffffff;--surface:#ffffff;--surface2:#f6f8fa;--fg:#1f2328;--border:#d1d9e0;--muted:#656d76;--accent:#0969da;--accent-hover:#0550ae;--code-bg:#f6f8fa;--strong:#1f2328;--user-bg:#0969da;--cpu:#1a7f37;--cpu-bg:rgba(26,127,55,0.10);--llm:#8250df;--llm-bg:rgba(130,80,223,0.10)}
+:root[data-theme="dark"]{--bg:#0d1117;--panel:#0f1117;--surface:#161b22;--surface2:#1c2230;--fg:#e6edf3;--border:#2a3038;--muted:#8b949e;--accent:#1f6feb;--accent-hover:#388bfd;--code-bg:#0d1117;--strong:#f0f6fc;--user-bg:#1f6feb;--cpu:#3fb950;--cpu-bg:rgba(63,185,80,0.12);--llm:#a371f7;--llm-bg:rgba(163,113,247,0.14);--tuned:#e3b341;--tuned-bg:rgba(227,179,65,0.14)}
+:root[data-theme="light"]{--bg:#f6f8fa;--panel:#ffffff;--surface:#ffffff;--surface2:#f6f8fa;--fg:#1f2328;--border:#d1d9e0;--muted:#656d76;--accent:#0969da;--accent-hover:#0550ae;--code-bg:#f6f8fa;--strong:#1f2328;--user-bg:#0969da;--cpu:#1a7f37;--cpu-bg:rgba(26,127,55,0.10);--llm:#8250df;--llm-bg:rgba(130,80,223,0.10);--tuned:#9a6700;--tuned-bg:rgba(154,103,0,0.12)}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--fg);height:100vh;display:flex;flex-direction:column;transition:background .2s,color .2s}
 .appbar{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;background:var(--panel);border-bottom:1px solid var(--border)}
@@ -65,6 +65,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .step{display:flex;gap:10px;background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--muted);border-radius:8px;padding:9px 11px;animation:slidein .2s ease}
 .step.cpu{border-left-color:var(--cpu)}
 .step.llm{border-left-color:var(--llm)}
+.step.tuned{border-left-color:var(--tuned);background:var(--tuned-bg)}
+.step.tuned .bar i{background:var(--tuned)}
+.step.tuned .chk{color:var(--tuned)}
+.step .tag{font-size:9.5px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;color:var(--tuned);border:1px solid var(--tuned);border-radius:10px;padding:1px 6px;margin-right:6px;flex-shrink:0}
 .step .ic{font-size:15px;line-height:1.4;flex-shrink:0;width:20px;text-align:center}
 .step .body{flex:1;min-width:0}
 .step .top{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
@@ -72,6 +76,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .step .dur{font-size:12px;font-variant-numeric:tabular-nums;color:var(--muted);flex-shrink:0}
 .step.done.cpu .dur{color:var(--cpu)}
 .step.done.llm .dur{color:var(--llm)}
+.step.done.tuned .dur{color:var(--tuned)}
 .step .dt{font-size:11.5px;color:var(--muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .step .bar{height:3px;border-radius:2px;background:var(--border);margin-top:7px;overflow:hidden}
 .step .bar i{display:block;height:100%;width:0;background:var(--cpu);transition:width .3s}
@@ -87,6 +92,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .gnode{font-size:11px;font-weight:600;padding:5px 10px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--muted);white-space:nowrap;transition:border-color .2s,color .2s,background .2s}
 .gnode.cpu.active,.gnode.cpu.done{border-color:var(--cpu);color:var(--cpu);background:var(--cpu-bg)}
 .gnode.llm.active,.gnode.llm.done{border-color:var(--llm);color:var(--llm);background:var(--llm-bg)}
+.gnode.tuned{border-color:var(--tuned);color:var(--tuned)}
+.gnode.tuned.active,.gnode.tuned.done{border-color:var(--tuned);color:var(--tuned);background:var(--tuned-bg)}
 .gnode.active{animation:gpulse 1.1s infinite}
 .gnode .gchk{margin-left:5px}
 .gconn{width:1px;height:9px;background:var(--border);margin:0 auto}
@@ -123,13 +130,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   <aside class="trace-pane">
     <div class="trace-head"><span>Agent trace</span><span class="total" id="traceTotal"></span></div>
     <div class="gmap" id="gmap">
-      <div class="grow"><div class="gnode cpu" id="g-triage">Triage</div></div>
+      <div class="grow"><div class="gnode cpu tuned" id="g-triage">Triage</div></div>
       <div class="gconn"></div>
       <div class="grow"><div class="gnode cpu" id="g-plan">Intent</div></div>
       <div class="gconn"></div>
       <div class="grow"><div class="gnode cpu" id="g-lint">Lint</div><span class="gbranch">/</span><div class="gnode cpu" id="g-tools">Tools &#8635;</div></div>
       <div class="gconn"></div>
-      <div class="grow"><div class="gnode cpu" id="g-retrieve">Retrieve &middot; Rerank</div></div>
+      <div class="grow"><div class="gnode cpu tuned" id="g-retrieve">Retrieve</div><span class="gbranch">&middot;</span><div class="gnode cpu" id="g-rerank">Rerank</div></div>
       <div class="gconn"></div>
       <div class="grow"><div class="gnode cpu" id="g-generate">Auditor SLM</div><span class="gbranch">&rarr;</span><div class="gnode llm" id="g-llm">LLM</div></div>
       <div class="gconn"></div>
@@ -138,7 +145,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
       <div class="grow"><div class="gnode cpu" id="g-remediate">Remediate</div></div>
     </div>
     <div class="trace" id="trace"><div class="hint">The agent's steps appear here as it works &mdash; each node, its timing, and whether it ran on CPU or the LLM.</div></div>
-    <div class="legend"><span><span class="sw" style="background:var(--cpu)"></span>CPU</span><span><span class="sw" style="background:var(--llm)"></span>LLM</span></div>
+    <div class="legend"><span><span class="sw" style="background:var(--cpu)"></span>CPU</span><span><span class="sw" style="background:var(--llm)"></span>LLM</span><span><span class="sw" style="background:var(--tuned)"></span>Fine-tuned model</span></div>
   </aside>
 </div>
 <script>
@@ -169,6 +176,13 @@ function nodeType(name){
   if(n.includes('refine')) return 'refine';
   return 'other';
 }
+// Agents backed by a Slemify-trained / fine-tuned model: the triage classifier
+// (classification head) and the retriever (contrastively tuned encoder).
+// NOT the reranker (stock cross-encoder) or auditor SLM (stock).
+function isTuned(name){
+  const n = name.toLowerCase();
+  return n.includes('triage') || n.includes('retriever');
+}
 const BAR_SCALE = 3000;
 function fmt(ms){ return ms>=1000 ? (ms/1000).toFixed(2)+'s' : ms+' ms'; }
 function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -186,11 +200,11 @@ function addMsg(html, cls){
 
 let steps={};
 function addStep(name, note){
-  const t = nodeType(name), cpu = t!=='llm';
+  const t = nodeType(name), cpu = t!=='llm', tuned = isTuned(name);
   const d=document.createElement('div');
-  d.className='step running '+(cpu?'cpu':'llm');
+  d.className='step running '+(cpu?'cpu':'llm')+(tuned?' tuned':'');
   d.innerHTML='<span class="ic">'+(NODE[t]||NODE.other).ic+'</span>'+
-    '<div class="body"><div class="top"><span class="nm">'+esc(name)+'</span><span class="dur"></span></div>'+
+    '<div class="body"><div class="top"><span class="nm">'+(tuned?'<span class="tag">tuned</span>':'')+esc(name)+'</span><span class="dur"></span></div>'+
     '<div class="dt">'+esc(note||'working...')+'</div><div class="bar"><i></i></div></div>'+
     '<span class="spin"></span>';
   trace.appendChild(d); trace.scrollTop=trace.scrollHeight;
@@ -210,9 +224,13 @@ function traceNote(text){
   trace.appendChild(d); trace.scrollTop=trace.scrollHeight;
 }
 
-const GIDS=['triage','plan','lint','tools','retrieve','generate','llm','critic','remediate'];
+const GIDS=['triage','plan','lint','tools','retrieve','rerank','generate','llm','critic','remediate'];
 const GMAP={classify:'triage',plan:'plan',lint:'lint',extract:'lint',tool:'tools',retrieve:'retrieve',generate:'generate',llm:'llm',critic:'critic',remediate:'remediate'};
-function graphEl(name){ const id=GMAP[nodeType(name)]; return id?document.getElementById('g-'+id):null; }
+function graphEl(name){
+  // Reranker is a separate stock model from the tuned retriever; map it to its own node.
+  if(name.toLowerCase().includes('rerank')) return document.getElementById('g-rerank');
+  const id=GMAP[nodeType(name)]; return id?document.getElementById('g-'+id):null;
+}
 function gReset(){ GIDS.forEach(id=>{ const el=document.getElementById('g-'+id); if(el){ el.classList.remove('active','done'); const c=el.querySelector('.gchk'); if(c) c.remove(); } }); }
 function gActivate(name){ const el=graphEl(name); if(el){ el.classList.remove('done'); el.classList.add('active'); } }
 function gDone(name){ const el=graphEl(name); if(!el) return; el.classList.remove('active'); el.classList.add('done'); if(!el.querySelector('.gchk')){ const c=document.createElement('span'); c.className='gchk'; c.textContent='\u2713'; el.appendChild(c); } }
