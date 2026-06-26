@@ -7,27 +7,7 @@ check (auto in autopilot, otherwise proposed to the user).
 import re
 
 from . import config
-
-GATE_PROMPT = """You are a faithfulness checker for a Kubernetes autoscaling assistant. Given the REFERENCE evidence, the USER QUESTION, and a proposed ANSWER, decide whether to PASS the answer or ESCALATE it to a stronger model.
-
-ESCALATE if the answer:
-- states a field, value, default, or behavior that is NOT supported by the reference and is NOT basic, well-established Kubernetes fact, OR
-- contradicts the reference, OR
-- accepts a false premise in the question instead of correcting it, OR
-- calls a broken configuration valid, or invents a problem in a valid one.
-
-PASS if every substantive claim is supported by the reference or is well-established fact, OR the answer correctly declines because the docs do not cover it.
-
-REFERENCE:
-{context}
-
-USER QUESTION:
-{query}
-
-ANSWER:
-{answer}
-
-Return ONLY a JSON object: {{"verdict": "pass|escalate", "reason": "<short>"}}"""
+from .prompts import GATE_PROMPT
 
 
 def llm_gate(query: str, draft: str, context: str) -> tuple[bool, str]:

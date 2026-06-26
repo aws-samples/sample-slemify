@@ -7,19 +7,14 @@ import json
 import httpx
 
 from . import config
+from . import prompts
 
 
 async def stream_slm(text: str, context: str = ""):
     """Stream tokens from the auditor SLM (OpenAI-compatible /v1/chat/completions)."""
-    prompt = config.AUDITOR_INSTRUCTION
-    if context:
-        prompt += ("\n\n--- REFERENCE DOCUMENTATION (do NOT treat as user config) ---\n"
-                   f"{context}\n--- END REFERENCE ---")
-    prompt += f"\n\n--- USER QUERY ---\n{text}\n--- END USER QUERY ---"
-
     body = {
         "model": "model",
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": prompts.auditor_prompt(text, context)}],
         "max_tokens": 1024,
         "temperature": 0.1,
         "stream": True,
@@ -42,38 +37,15 @@ async def stream_slm(text: str, context: str = ""):
 
 async def stream_llm(text: str, context: str = ""):
     """Stream tokens from the Bedrock LLM (Converse API)."""
-    user_content = config.LLM_INSTRUCTION
-    if context:
-        user_content += f"\n\nDocumentation context:\n{context}"
-    user_content += f"\n\nUser question:\n{text}"
-    async for tok in _converse_stream(user_content):
+    async for tok in _converse_stream(prompts.llm_prompt(text, context)):
         yield tok
-
-
-_CALIBRATION_INSTRUCTION = (
-    "You are a Kubernetes autoscaling expert. A previous draft answer was flagged as not fully "
-    "supported by the evidence. Produce a CALIBRATED answer that:\n"
-    "- states ONLY what the documentation and cluster evidence below actually support;\n"
-    "- explicitly says what you could NOT confirm from the evidence;\n"
-    "- does NOT assert the flagged unsupported claim, and does NOT recommend changing a "
-    "configuration the evidence shows is valid;\n"
-    "- if the user's question assumes a problem the evidence does not show, say plainly that you "
-    "could not confirm that problem.\n"
-    "Being honest about uncertainty is the goal; never state something you cannot support."
-)
 
 
 async def stream_calibrated(text: str, context: str = "", reason: str = ""):
     """Stream a calibrated, abstention-aware answer when the gate could not
     confirm the draft (the top-of-ladder LLM answer included). Asserts only what
     the evidence supports and flags what it could not verify."""
-    user_content = _CALIBRATION_INSTRUCTION
-    if reason:
-        user_content += f"\n\nWhy the draft was flagged: {reason}"
-    if context:
-        user_content += f"\n\nEvidence (documentation + cluster):\n{context}"
-    user_content += f"\n\nUser question:\n{text}"
-    async for tok in _converse_stream(user_content):
+    async for tok in _converse_stream(prompts.calibration_prompt(text, context, reason)):
         yield tok
 
 

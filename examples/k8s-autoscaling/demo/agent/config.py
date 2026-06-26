@@ -59,23 +59,7 @@ ALLOW_APPLY = os.environ.get("ALLOW_APPLY", "false").lower() in ("1", "true", "y
 # context) on the SSE stream, to tell a retrieval/routing gap from a generation gap.
 DEBUG_CONTEXT = bool(os.environ.get("DEBUG_CONTEXT"))
 
-# --- Instructions ---
-TRIAGE_INSTRUCTION = (
-    "Classify this Kubernetes autoscaling support query into a routing "
-    "category and confidence level."
-)
-AUDITOR_INSTRUCTION = (
-    "You are a Kubernetes autoscaling auditor. "
-    "Answer ONLY based on the reference documentation below. "
-    "Do NOT invent fields, behaviors, or modes not in the docs. "
-    "If the docs don't cover something, say so. "
-    "State what is correct, why, and provide a fix if needed."
-)
-LLM_INSTRUCTION = (
-    "You are a Kubernetes autoscaling expert. Answer the user's question accurately "
-    "using the provided documentation context. Be specific and include YAML examples "
-    "when relevant. If the documentation doesn't cover the topic, say so."
-)
+# Prompt text lives in prompts.py (all instructions and templates in one place).
 
 # --- Shared clients (initialized once) ---
 bedrock = boto3.client("bedrock-runtime")

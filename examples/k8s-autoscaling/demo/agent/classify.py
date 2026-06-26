@@ -16,6 +16,7 @@ import re
 import httpx
 
 from . import config
+from . import prompts
 
 _VALID_CATEGORIES = {
     "karpenter_config", "keda_config", "hpa_config",
@@ -28,7 +29,7 @@ def classify(text: str) -> dict:
     """Triage via the Slemify-trained classifier: {category, confidence}."""
     body = {
         "model": "model",
-        "messages": [{"role": "user", "content": f"{config.TRIAGE_INSTRUCTION}\n\n{text}"}],
+        "messages": [{"role": "user", "content": prompts.triage_prompt(text)}],
         "max_tokens": 32,
         "temperature": 0.1,
     }
