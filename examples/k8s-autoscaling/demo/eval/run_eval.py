@@ -102,7 +102,21 @@ def fetch_reference(query: str, answer: str) -> str:
 
 # --- Orchestrator I/O ---
 
-def query_agent(text: str) -> dict:
+def query_agent(text: str, attempts: int = 3) -> dict:
+    """Query the orchestrator, retrying transient transport errors (e.g. a
+    dropped port-forward) so infra blips are not scored as model failures."""
+    last_exc = None
+    for i in range(attempts):
+        try:
+            return _query_once(text)
+        except httpx.TransportError as e:  # ConnectError, ReadError, RemoteProtocolError, ...
+            last_exc = e
+            if i < attempts - 1:
+                time.sleep(3)
+    raise last_exc
+
+
+def _query_once(text: str) -> dict:
     """POST to /query and collect the final answer, triage detail, and model.
 
     Resets the answer buffer on answer_reset so only the final (post-retry)
@@ -298,10 +312,12 @@ def run_case(case: dict, repeat: int) -> dict:
     """Run a case `repeat` times; return aggregated status + per-run detail."""
     runs, judges, secs = [], [], []
     last = {}
+    last_answer, last_model = "", ""
     for _ in range(repeat):
         t0 = time.perf_counter()
         try:
             result = query_agent(case["query"])
+            last_answer, last_model = result.get("answer", ""), result.get("model", "")
             sc = score_case(case, result)
         except Exception as e:
             sc = {"status": "error", "checks": {}, "violations": [],
@@ -315,7 +331,8 @@ def run_case(case: dict, repeat: int) -> dict:
     return {"id": case["id"], "topic": case.get("topic", ""),
             "status": status, "runs": runs, "pass_rate": f"{passes}/{repeat}",
             "violations": last.get("violations", []),
-            "judge": judges[-1], "seconds": round(sum(secs), 1)}
+            "judge": judges[-1], "seconds": round(sum(secs), 1),
+            "model": last_model, "answer": last_answer}
 
 
 def main():
