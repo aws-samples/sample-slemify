@@ -1,7 +1,7 @@
 torch==2.5.1
 transformers==4.46.3
 sentencepiece==0.2.0
-protobuf==5.28.3
+protobuf==5.29.6
 numpy==1.26.4
 huggingface_hub==0.26.2
 boto3==1.35.71
