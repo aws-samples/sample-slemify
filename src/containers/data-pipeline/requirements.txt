@@ -1,4 +1,4 @@
-boto3>=1.43.36
+boto3>=1.43.39
 pypdf>=6.14.2
 openai>=2.44.0
 tiktoken>=0.13.0
