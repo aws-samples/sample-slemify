@@ -63,6 +63,41 @@ updates:
         patterns:
           - "*"
 
+  # GGUF conversion (exact pins). Group so a torch/transformers/protobuf/
+  # sentencepiece bump lands as one coordinated PR instead of four
+  # conflicting single-package ones.
+  - package-ecosystem: "pip"
+    directory: "/src/containers/gguf-convert"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      gguf-convert-deps:
+        patterns:
+          - "*"
+
+  # Classifier serving (range pins).
+  - package-ecosystem: "pip"
+    directory: "/src/containers/classifier-serving"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      classifier-serving-deps:
+        patterns:
+          - "*"
+
+  # Go module (single go.mod at /src covers the CLI and its indirect deps).
+  - package-ecosystem: "gomod"
+    directory: "/src"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      go-deps:
+        patterns:
+          - "*"
+
   # Keep CI actions current (low volume, low risk).
   - package-ecosystem: "github-actions"
     directory: "/"
