@@ -1,6 +1,6 @@
-fastapi==0.115.12
-uvicorn==0.34.2
-onnxruntime==1.20.1
-tokenizers==0.21.0
-numpy<2
-boto3>=1.35.0
+fastapi==0.141.1
+uvicorn==0.52.1
+onnxruntime==1.28.0
+tokenizers==0.23.1
+numpy<3
+boto3>=1.43.67
