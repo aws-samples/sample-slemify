@@ -10,6 +10,8 @@ on:
     paths:
       - "src/containers/classifier-trainer/**"
       - "src/containers/data-pipeline/**"
+      - "src/containers/gguf-convert/**"
+      - "src/containers/classifier-serving/**"
 
 permissions:
   contents: read
@@ -23,6 +25,8 @@ jobs:
         container:
           - classifier-trainer
           - data-pipeline
+          - gguf-convert
+          - classifier-serving
     steps:
       - name: Checkout
         uses: actions/checkout@v7
