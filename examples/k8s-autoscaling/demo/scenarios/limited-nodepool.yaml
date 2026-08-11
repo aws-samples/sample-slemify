@@ -1,0 +1,84 @@
+# Demo scenario: payments-api pods target a dedicated NodePool, but that
+# NodePool has spec.limits.cpu: "0" — so Karpenter can never provision a node
+# for it and the pods stay Pending. The fix the agent applies (approve or
+# autopilot) is to raise the NodePool's cpu limit so provisioning can proceed.
+#
+# Applying this manifest RESETS the scenario to its broken state: limit back to
+# 0. reset-demo.sh deletes the Deployment first so all replicas come back
+# freshly Pending rather than a rolling mix.
+#
+# NOTE: fixing this launches a real node. Reset after demoing so it consolidates.
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: demo-payments
+  labels:
+    demo.slemify.io/scenario: limits
+spec:
+  # The misconfiguration: a CPU limit of 0 means Karpenter will never provision
+  # a node for this pool, so any pod that targets it is stuck Pending.
+  limits:
+    cpu: "0"
+  template:
+    metadata:
+      labels:
+        demo.slemify.io/pool: payments
+    spec:
+      expireAfter: 720h
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot", "on-demand"]
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-api
+  namespace: slemify
+  labels:
+    demo.slemify.io/scenario: limits
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: payments-api
+  template:
+    metadata:
+      labels:
+        app: payments-api
+    spec:
+      # Targets the demo-payments pool only. No other node carries this label,
+      # so the pods wait for that pool — which can't scale until its limit > 0.
+      nodeSelector:
+        demo.slemify.io/pool: payments
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:3.9@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

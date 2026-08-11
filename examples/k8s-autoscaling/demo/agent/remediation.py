@@ -62,6 +62,45 @@ def verify_nodepool_spot(name: str) -> dict:
     return {"ok": False, "message": f"Verification failed: capacity-type is {caps}."}
 
 
+def _nodepool_cpu_limit(np: dict):
+    return ((np.get("spec") or {}).get("limits") or {}).get("cpu")
+
+
+def raise_nodepool_limits(name: str) -> dict:
+    """Raise a NodePool's cpu limit when it is 0 (which blocks ALL provisioning,
+    so pods targeting it stay Pending). Dry-runs first, sets only spec.limits.cpu."""
+    if not config.ALLOW_APPLY:
+        return {"ok": False, "message": "Apply is disabled (set ALLOW_APPLY=true and grant write RBAC)."}
+    if not extract.valid_k8s_name(name):
+        return {"ok": False, "message": "Invalid NodePool name."}
+    api = k8s_client.CustomObjectsApi()
+    try:
+        np = api.get_cluster_custom_object("karpenter.sh", "v1", "nodepools", name)
+    except Exception as e:
+        return {"ok": False, "message": f"Could not fetch NodePool {name}: {e}"}
+    if str(_nodepool_cpu_limit(np)) != "0":
+        return {"ok": True, "message": f"NodePool {name} cpu limit is {_nodepool_cpu_limit(np)}; no change needed."}
+    patch = {"spec": {"limits": {"cpu": "100"}}}
+    try:
+        api.patch_cluster_custom_object("karpenter.sh", "v1", "nodepools", name, body=patch, dry_run="All")
+        api.patch_cluster_custom_object("karpenter.sh", "v1", "nodepools", name, body=patch)
+    except Exception as e:
+        return {"ok": False, "message": f"Apply failed (dry-run or apply): {e}"}
+    return {"ok": True, "message": f"Patched NodePool {name}: cpu limit 0 -> 100; it can provision nodes again."}
+
+
+def verify_nodepool_limits(name: str) -> dict:
+    api = k8s_client.CustomObjectsApi()
+    try:
+        np = api.get_cluster_custom_object("karpenter.sh", "v1", "nodepools", name)
+    except Exception as e:
+        return {"ok": False, "message": f"Could not re-read NodePool {name}: {e}"}
+    limit = _nodepool_cpu_limit(np)
+    if str(limit) != "0":
+        return {"ok": True, "message": f"Verified: NodePool {name} cpu limit is now {limit}."}
+    return {"ok": False, "message": f"Verification failed: cpu limit is still {limit}."}
+
+
 def _all_node_label_keys() -> set:
     keys = set()
     for n in k8s_client.CoreV1Api().list_node().items:
@@ -132,6 +171,7 @@ def verify_deployment_schedulable(target: str) -> dict:
 # Whitelist of structured remediations: action -> (apply, verify), single target.
 REMEDIATIONS = {
     "enable_spot_on_nodepool": (enable_spot_on_nodepool, verify_nodepool_spot),
+    "raise_nodepool_limits": (raise_nodepool_limits, verify_nodepool_limits),
     "fix_unschedulable_nodeselector": (fix_unschedulable_nodeselector, verify_deployment_schedulable),
 }
 
@@ -153,6 +193,11 @@ def detect_remediation(query: str) -> dict | None:
                 "karpenter.sh", "v1", "nodepools", name)
         except Exception:
             return None
+        if str(_nodepool_cpu_limit(np)) == "0":
+            return {"action": "raise_nodepool_limits", "target": name,
+                    "summary": f"raise NodePool {name} cpu limit from 0 so it can provision nodes",
+                    "manual": (f"kubectl patch nodepool {name} --type merge \\\n"
+                               "  -p '{\"spec\":{\"limits\":{\"cpu\":\"100\"}}}'")}
         caps = _nodepool_capacity_types(np)
         if caps is not None and "spot" not in caps:
             return {"action": "enable_spot_on_nodepool", "target": name,

@@ -242,8 +242,9 @@ function clearAll(){
 }
 
 const SCENARIOS=[
-  {label:'\uD83D\uDCD0 minValues \u00b7 on CPU', text:'my NodePool has this requirement but pods are still pending:\n\napiVersion: karpenter.sh/v1\nkind: NodePool\nmetadata:\n  name: default\nspec:\n  template:\n    spec:\n      requirements:\n        - key: karpenter.k8s.aws/instance-family\n          operator: In\n          values: ["c5", "c6i", "c7g", "m5", "m6i", "m7g"]\n          minValues: 3\n\nwhat does minValues do and is my config correct?'},
-  {label:'\uD83D\uDD27 Fix Spot \u00b7 acts on cluster', text:'NodePool `demo-spot-misconfigured` is only using expensive on-demand instances. Why, and how do I fix it to use Spot?'},
+  {label:'\uD83D\uDCD0 minValues \u00b7 on CPU', text:'What does the minValues field do in a Karpenter v1 NodePool requirement?'},
+  {label:'\uD83D\uDD04 Karpenter v1 \u00b7 on CPU', text:'In Karpenter v1, which API kinds replaced the v1beta1 Provisioner and AWSNodeTemplate?'},
+  {label:'\uD83E\uDE79 Fix pending pods \u00b7 autopilot', text:'Pods are stuck Pending on NodePool `demo-payments` because its CPU limit is 0. Fix it.'},
   {label:'\u2601\uFE0F Missing AMI \u00b7 falls back to LLM', text:'on karpenter v1 EC2NodeClass, my amiSelectorTerms only has a role and subnets but no AMI selection and nodes wont come up. whats required?'},
   {label:'\uD83D\uDEAB Off-topic \u00b7 skips the agent', text:'what is the weather like today in Seattle?'}
 ];

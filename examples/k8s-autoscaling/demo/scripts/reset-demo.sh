@@ -7,38 +7,43 @@ set -euo pipefail
 #   ./scripts/reset-demo.sh          # re-break both scenarios
 #   ./scripts/reset-demo.sh --clean  # remove the demo resources entirely
 #
-# What it does:
-#   - Spot cost: re-applies the NodePool with capacity-type on-demand-only,
-#     dropping any "spot" the agent added.
-#   - Pending pods: recreates the Deployment so all replicas come back freshly
-#     Pending (a plain apply would leave a rolling mix of old Running pods).
+# Spot cost: NodePool capacity-type back to on-demand only.
+# Pending pods: NodePool demo-payments cpu limit back to 0, payments-api
+#   recreated, and its provisioned node removed so all replicas come back
+#   freshly Pending (rather than scheduling onto a leftover node).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCENARIOS_DIR="$(dirname "$SCRIPT_DIR")/scenarios"
 NAMESPACE="slemify"
-
-NODEPOOL_MANIFEST="${SCENARIOS_DIR}/spot-cost-nodepool.yaml"
-DEPLOY_MANIFEST="${SCENARIOS_DIR}/pending-pods-deployment.yaml"
+SPOT="${SCENARIOS_DIR}/spot-cost-nodepool.yaml"
+LIMITED="${SCENARIOS_DIR}/limited-nodepool.yaml"
 
 if [[ "${1:-}" == "--clean" ]]; then
   echo "=== Removing demo scenario resources ==="
-  kubectl delete -f "${DEPLOY_MANIFEST}" --ignore-not-found
-  kubectl delete -f "${NODEPOOL_MANIFEST}" --ignore-not-found
+  kubectl delete -f "${LIMITED}" --ignore-not-found
+  kubectl delete -f "${SPOT}" --ignore-not-found
+  kubectl delete node -l demo.slemify.io/pool=payments --ignore-not-found
   echo "Done. Demo scenarios removed."
   exit 0
 fi
 
-echo "=== Resetting: Spot-cost NodePool (on-demand only) ==="
-kubectl apply -f "${NODEPOOL_MANIFEST}"
+echo "=== Reset: Spot-cost NodePool (on-demand only) ==="
+kubectl apply -f "${SPOT}"
 
-echo "=== Resetting: pending-pods Deployment (recreate so all replicas are Pending) ==="
+echo "=== Reset: pending pods (NodePool limit 0, fresh Pending) ==="
 kubectl delete deployment payments-api -n "${NAMESPACE}" --ignore-not-found --wait=true
-kubectl apply -f "${DEPLOY_MANIFEST}"
+kubectl delete node -l demo.slemify.io/pool=payments --ignore-not-found
+kubectl apply -f "${LIMITED}"
+# The agent's fix is a PATCH, which leaves apply's last-applied annotation at 0,
+# so `apply` alone may report "unchanged" and not revert a fixed limit. Force it.
+kubectl patch nodepool demo-payments --type merge -p '{"spec":{"limits":{"cpu":"0"}}}'
 
 echo
 echo "=== Broken state restored ==="
 kubectl get nodepool demo-spot-misconfigured \
-  -o jsonpath='NodePool demo-spot-misconfigured capacity-type: {.spec.template.spec.requirements[?(@.key=="karpenter.sh/capacity-type")].values}{"\n"}'
+  -o jsonpath='spot-pool capacity-type: {.spec.template.spec.requirements[?(@.key=="karpenter.sh/capacity-type")].values}{"\n"}'
+kubectl get nodepool demo-payments \
+  -o jsonpath='payments-pool cpu limit: {.spec.limits.cpu}{"\n"}'
 kubectl get pods -n "${NAMESPACE}" -l app=payments-api \
   -o custom-columns=POD:.metadata.name,STATUS:.status.phase --no-headers || true
 echo
