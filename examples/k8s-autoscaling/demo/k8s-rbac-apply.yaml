@@ -6,10 +6,15 @@
 #
 #   kubectl apply -f k8s-rbac-apply.yaml
 #
-# It grants the SANDBOX tools ServiceAccount the minimum write verbs for the
-# whitelisted remediations (currently: patch a NodePool's capacity-type to
-# enable Spot, and drop an unschedulable nodeSelector key from a Deployment).
-# Scope this down further if you only need specific resources.
+# It grants the SANDBOX tools ServiceAccount get/patch/update on exactly the
+# two KINDS agent/patch_schema.py's PATCH_SCHEMA ever proposes a field-level
+# patch for (NodePool, Deployment). This is the KIND-level half of the
+# authority boundary; the FIELD-level half (which fields on those kinds, with
+# what value constraints) is enforced in code by patch_schema.py, not by RBAC.
+# See PERMISSIONS.md for the full picture and how to verify both halves.
+#
+# Scope this down further (e.g. resourceNames: [...]) if you only need it to
+# ever touch specific, named resources.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

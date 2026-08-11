@@ -20,7 +20,7 @@ from typing import TypedDict
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
-from . import classify, config, extract, gate, generation, retrieval, tools
+from . import classify, config, extract, gate, generation, patch_schema, prompts, retrieval, tools
 from . import toolclient
 from .validation import validate_config, validate_draft_fix
 
@@ -282,45 +282,89 @@ async def n_abstain(state: AgentState) -> dict:
     return {}
 
 
+async def _find_fix(state: AgentState, writer, loop) -> dict | None:
+    """Two ways to find a fix, in order:
+      1. detect_remediation: cheap, evidence-checked heuristics for the known
+         problem shapes this demo ships scenarios for (no model call).
+      2. Otherwise, if the query names a resource of a kind PATCH_SCHEMA covers
+         at all, ask the auditor SLM (CPU) to propose a fix -- constrained by
+         response_format to only ever name a field from patch_schema for this
+         kind. Its proposal is then re-validated against the schema (defense
+         in depth: the grammar should already guarantee this) before it is
+         shown to anyone or ever reaches apply.
+    Either way the result is the same shape: {kind, target, field, value,
+    summary, manual}. Returns None if no fix is found or a proposal fails to
+    validate -- never a best-effort guess.
+    """
+    rem = await loop.run_in_executor(None, toolclient.detect_remediation, state["query"])
+    if rem:
+        return rem
+
+    target_info = await loop.run_in_executor(None, toolclient.named_target, state["query"])
+    if not target_info:
+        return None
+    kind, target = target_info["kind"], target_info["target"]
+    diagnosis = state.get("draft", "")
+    prompt = prompts.fix_proposal_prompt(kind, target, diagnosis)
+    schema = patch_schema.json_schema_for_kind(kind)
+    writer({"type": "step_start", "name": "Fix proposal (Auditor SLM, CPU)",
+            "note": f"proposing a schema-constrained fix for {kind} {target}"})
+    t = time.perf_counter()
+    proposal = await generation.propose_fix(prompt, schema)
+    if not proposal or proposal.get("no_fix") or proposal.get("field") in (None, "none"):
+        writer({"type": "step_done", "name": "Fix proposal (Auditor SLM, CPU)", "ms": _ms(t),
+                "detail": "no safe fix proposed"})
+        return None
+    field, value = proposal.get("field", ""), proposal.get("value", "")
+    plan = await loop.run_in_executor(None, toolclient.plan_fix, kind, target, field, value)
+    if not plan.get("ok"):
+        writer({"type": "step_done", "name": "Fix proposal (Auditor SLM, CPU)", "ms": _ms(t),
+                "detail": f"proposal rejected by schema: {plan.get('message')}"})
+        return None
+    writer({"type": "step_done", "name": "Fix proposal (Auditor SLM, CPU)", "ms": _ms(t),
+            "detail": f"{field} -> {value}"})
+    return {"kind": kind, "target": target, "field": field, "value": value,
+            "summary": plan.get("message", patch_schema.describe_fix(kind, field, value)),
+            "manual": patch_schema.manual_command(kind, plan.get("name", target), plan.get("namespace"),
+                                                   plan.get("patch") or {}) if plan.get("patch") else ""}
+
+
 async def n_remediate(state: AgentState) -> dict:
     """After answering: if a safe, bounded fix applies to a resource the user
     named, apply it (autopilot) or propose it for one-click apply (supervised).
 
     The apply itself dry-runs server-side first and re-reads to verify. Read-only
-    by default — no mutation unless autopilot AND ALLOW_APPLY AND a whitelisted
-    remediation is detected for a specific named target.
-
-    (Planned extension: when a proposed fix targets a resource that does NOT
-    exist in the cluster, offer a confirm-gated server-side dry-run to validate
-    the fix without persisting it.)
+    by default — no mutation unless autopilot AND ALLOW_APPLY AND a fix is found
+    (by the evidence-based heuristic, or a model proposal validated against
+    patch_schema) for a specific named target. See PERMISSIONS.md for exactly
+    what this can ever touch and why.
     """
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
-    rem = await loop.run_in_executor(None, toolclient.detect_remediation, state["query"])
+    rem = await _find_fix(state, writer, loop)
     if not rem:
         return {}
+    kind, target, field, value = rem["kind"], rem["target"], rem["field"], rem["value"]
     if not state.get("autopilot"):
         writer({"type": "response", "text": (
             "**Autopilot is off, so I won't change anything in the cluster.** "
             "Here's the fix I'd apply \u2014 click **Apply this fix**, or apply it yourself below.")})
-        writer({"type": "proposal", "action": rem["action"], "target": rem["target"],
+        writer({"type": "proposal", "kind": kind, "target": target, "field": field, "value": value,
                 "summary": rem["summary"], "manual": rem.get("manual", "")})
         return {}
-    action = rem["action"]
-    target = rem["target"]
     writer({"type": "response", "text": (
-        f"**Autopilot is on \u2014 applying now.** Bounded, whitelisted change "
+        f"**Autopilot is on \u2014 applying now.** Bounded, schema-checked change "
         f"({rem['summary']}); it dry-runs first, then I re-read `{target}` to verify.")})
     writer({"type": "step_start", "name": "Apply fix (autopilot)", "note": rem["summary"]})
     t = time.perf_counter()
-    result = await loop.run_in_executor(None, toolclient.apply, action, target)
+    result = await loop.run_in_executor(None, toolclient.apply_fix, kind, target, field, value)
     writer({"type": "step_done", "name": "Apply fix (autopilot)", "ms": _ms(t), "detail": result["message"]})
     if not result["ok"]:
         writer({"type": "response", "text": f"**Autopilot could not apply the fix:** {result['message']}"})
         return {}
     writer({"type": "step_start", "name": "Verify (CPU)", "note": f"re-checking {target}"})
     t = time.perf_counter()
-    check = await loop.run_in_executor(None, toolclient.verify, action, target)
+    check = await loop.run_in_executor(None, toolclient.verify_fix, kind, target, field, value)
     writer({"type": "step_done", "name": "Verify (CPU)", "ms": _ms(t), "detail": check["message"]})
     status = "applied and verified" if check["ok"] else "applied, but verification failed"
     writer({"type": "response", "text": f"**Autopilot {status}.** {check['message']}"})

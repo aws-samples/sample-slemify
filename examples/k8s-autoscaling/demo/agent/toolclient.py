@@ -70,21 +70,40 @@ def detect_remediation(query: str) -> dict | None:
         return None
 
 
-def apply(action: str, target: str) -> dict:
+def named_target(query: str) -> dict | None:
     if not config.TOOLSVC_URL:
-        entry = remediation.REMEDIATIONS.get(action)
-        return entry[0](target) if entry else {"ok": False, "message": f"Unknown action: {action}"}
+        return remediation.named_target(query)
     try:
-        return _post("/apply", {"action": action, "target": target})
+        return _post("/named_target", {"query": query}).get("target")
+    except Exception:
+        return None
+
+
+def plan_fix(kind: str, target: str, field: str, value: str) -> dict:
+    """Validate + compute a proposal's patch and summary without applying it.
+    Used both to render a proposal to the UI and (before that) to validate a
+    model-proposed fix before it is ever shown or applied."""
+    if not config.TOOLSVC_URL:
+        return remediation.plan_patch(kind, target, field, value)
+    try:
+        return _post("/plan_fix", {"kind": kind, "target": target, "field": field, "value": value})
     except Exception as e:
         return {"ok": False, "message": f"Tools service unavailable: {e}"}
 
 
-def verify(action: str, target: str) -> dict:
+def apply_fix(kind: str, target: str, field: str, value: str) -> dict:
     if not config.TOOLSVC_URL:
-        entry = remediation.REMEDIATIONS.get(action)
-        return entry[1](target) if entry else {"ok": False, "message": f"Unknown action: {action}"}
+        return remediation.apply_patch(kind, target, field, value)
     try:
-        return _post("/verify", {"action": action, "target": target})
+        return _post("/apply_fix", {"kind": kind, "target": target, "field": field, "value": value})
+    except Exception as e:
+        return {"ok": False, "message": f"Tools service unavailable: {e}"}
+
+
+def verify_fix(kind: str, target: str, field: str, value: str) -> dict:
+    if not config.TOOLSVC_URL:
+        return remediation.verify_patch(kind, target, field, value)
+    try:
+        return _post("/verify_fix", {"kind": kind, "target": target, "field": field, "value": value})
     except Exception as e:
         return {"ok": False, "message": f"Tools service unavailable: {e}"}

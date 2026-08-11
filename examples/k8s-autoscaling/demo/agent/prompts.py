@@ -12,7 +12,10 @@ Which model sees which prompt:
   - llm_prompt      -> escalation LLM (Bedrock)      : when the gate escalates
   - calibration_prompt -> calibration LLM (Bedrock)  : the abstain backstop
   - GATE_PROMPT     -> faithfulness gate LLM (Bedrock): is the draft supported?
+  - fix_proposal_prompt -> auditor SLM (llama.cpp, CPU), schema-constrained:
+    propose a remediation within patch_schema's allowed fields
 """
+from . import patch_schema
 
 # --- Instruction strings ---
 
@@ -95,6 +98,31 @@ def llm_prompt(text: str, context: str = "") -> str:
         p += f"\n\nDocumentation context:\n{context}"
     p += f"\n\nUser question:\n{text}"
     return p
+
+
+FIX_PROPOSAL_INSTRUCTION = (
+    "You are a Kubernetes remediation planner. You will be shown a diagnosed problem "
+    "with one named resource, plus the ONLY fields you are allowed to change on that "
+    "resource (nothing else may ever be changed). Propose exactly one field+value fix "
+    "that addresses the diagnosis, or say no safe fix applies. "
+    "Only use a field from the allowed list. If the diagnosis does not match any "
+    "allowed field, set no_fix to true rather than forcing an unrelated change."
+)
+
+
+def fix_proposal_prompt(kind: str, target: str, diagnosis: str) -> str:
+    """The auditor SLM's remediation-proposal prompt: instruction + the allowed
+    fields for this kind (from patch_schema) + the diagnosed problem. The
+    response is constrained to patch_schema.json_schema_for_kind(kind), so the
+    model cannot name a field outside this list even if it tried."""
+    fields = patch_schema.fields_for_kind(kind)
+    allowed = "\n".join(f"- {f}: {d}" for f, d in fields.items()) or "(no fields are allowed for this kind)"
+    return (
+        f"{FIX_PROPOSAL_INSTRUCTION}\n\n"
+        f"--- RESOURCE ---\n{kind} {target}\n\n"
+        f"--- ALLOWED FIELDS (only these may ever be changed) ---\n{allowed}\n\n"
+        f"--- DIAGNOSIS ---\n{diagnosis}\n"
+    )
 
 
 def calibration_prompt(text: str, context: str = "", reason: str = "") -> str:

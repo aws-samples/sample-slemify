@@ -35,6 +35,30 @@ async def stream_slm(text: str, context: str = ""):
                     continue
 
 
+async def propose_fix(prompt: str, json_schema: dict) -> dict | None:
+    """Ask the auditor SLM (CPU) for a schema-constrained remediation proposal.
+    Passed as response_format.json_schema, llama.cpp's server compiles this into
+    a GBNF grammar and masks the sampler, so the model CANNOT emit a field name
+    or JSON shape outside json_schema, regardless of what it 'wants' to say.
+    Returns the parsed dict, or None if the call/parse failed (caller treats
+    that as no_fix, never as a license to guess)."""
+    body = {
+        "model": "model",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 256,
+        "temperature": 0.0,
+        "response_format": {"type": "json_schema", "json_schema": {"name": "fix_proposal", "schema": json_schema}},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(f"{config.AUDITOR_URL}/v1/chat/completions", json=body)
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"]
+            return json.loads(content)
+    except Exception:
+        return None
+
+
 async def stream_llm(text: str, context: str = ""):
     """Stream tokens from the Bedrock LLM (Converse API)."""
     async for tok in _converse_stream(prompts.llm_prompt(text, context)):

@@ -312,14 +312,14 @@ function addProposal(msg){
   if(msg.manual){ html+='<div class="pmanual">Run it yourself:</div><pre class="pcmd"><code>'+esc(msg.manual)+'</code></pre>'; }
   div.innerHTML=html;
   const btn=document.createElement('button'); btn.textContent='Apply this fix';
-  btn.onclick=()=>applyFix(msg.action, msg.target, btn);
+  btn.onclick=()=>applyFix(msg.kind, msg.target, msg.field, msg.value, btn);
   div.appendChild(btn);
   chat.appendChild(div); chat.scrollTop=chat.scrollHeight;
 }
 
-async function applyFix(action, target, btn){
+async function applyFix(kind, target, field, value, btn){
   btn.disabled=true; btn.textContent='Applying\u2026';
-  const resp=await fetch('/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,target})});
+  const resp=await fetch('/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,target,field,value})});
   const reader=resp.body.getReader(); const dec=new TextDecoder(); let buffer='';
   while(true){
     const {done,value}=await reader.read(); if(done) break;

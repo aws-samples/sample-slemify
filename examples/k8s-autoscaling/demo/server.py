@@ -19,7 +19,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from agent import config, extract, remediation, retrieval, tools
+from agent import config, retrieval, tools
 from agent import toolclient
 from agent.graph import agent
 
@@ -37,8 +37,10 @@ class Query(BaseModel):
 
 
 class ApplyRequest(BaseModel):
-    action: str
+    kind: str
     target: str
+    field: str
+    value: str = ""
 
 
 def sse(event_type: str, **kwargs) -> str:
@@ -109,30 +111,28 @@ async def get_config():
 
 @app.post("/apply")
 async def apply_endpoint(req: ApplyRequest):
-    """Execute a whitelisted remediation on a named target, then verify it.
+    """Apply a schema-validated fix (kind/target/field/value) to a named
+    target, then verify it.
 
-    The same bounded path autopilot uses, gated by ALLOW_APPLY + the whitelist +
-    a valid target name, triggered by the user's explicit approval instead.
+    The same bounded path autopilot uses, gated by ALLOW_APPLY + patch_schema
+    validation (re-checked here, not trusted from the request) + a valid
+    target name, triggered by the user's explicit approval instead. See
+    PERMISSIONS.md for exactly what fields/kinds this can ever touch.
     """
     async def event_stream():
         if not config.ALLOW_APPLY:
             yield sse("response", text="Apply is disabled on this server.")
             yield "data: [DONE]\n\n"
             return
-        entry = remediation.REMEDIATIONS.get(req.action)
-        if not entry or not extract.valid_k8s_name(req.target.split("/")[-1]):
-            yield sse("response", text="Unknown or invalid remediation request.")
-            yield "data: [DONE]\n\n"
-            return
         loop = asyncio.get_event_loop()
-        yield sse("step_start", name="Apply fix", note=f"{req.action} on {req.target}")
+        yield sse("step_start", name="Apply fix", note=f"{req.kind} {req.target}: {req.field} -> {req.value}")
         t = time.perf_counter()
-        result = await loop.run_in_executor(None, toolclient.apply, req.action, req.target)
+        result = await loop.run_in_executor(None, toolclient.apply_fix, req.kind, req.target, req.field, req.value)
         yield sse("step_done", name="Apply fix", ms=round((time.perf_counter() - t) * 1000), detail=result["message"])
         if result["ok"]:
             yield sse("step_start", name="Verify (CPU)", note=f"re-checking {req.target}")
             t = time.perf_counter()
-            check = await loop.run_in_executor(None, toolclient.verify, req.action, req.target)
+            check = await loop.run_in_executor(None, toolclient.verify_fix, req.kind, req.target, req.field, req.value)
             yield sse("step_done", name="Verify (CPU)", ms=round((time.perf_counter() - t) * 1000), detail=check["message"])
             status = "Applied and verified" if check["ok"] else "Applied, but verification failed"
             yield sse("response", text=f"**{status}.** {check['message']}")

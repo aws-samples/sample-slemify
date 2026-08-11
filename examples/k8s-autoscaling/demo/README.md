@@ -12,6 +12,10 @@ narrow steps (classify, retrieve, rank, generate a domain answer) run on small
 models on CPUs; a large LLM checks each answer and handles the open-ended tail.
 No GPUs serve traffic.
 
+> **What can this agent actually change?** See **[PERMISSIONS.md](PERMISSIONS.md)**
+> for the complete, generated list of every field it may ever patch, and how to
+> verify it against live RBAC yourself (`python3 scripts/print-permissions.py`).
+
 ## Architecture
 
 The orchestration is a [LangGraph](https://langchain-ai.github.io/langgraph/)
@@ -112,8 +116,8 @@ flowchart LR
 
     subgraph WP["cluster control plane · what the agent patches"]
         API["Kubernetes<br/>API server"]
-        NP["NodePool<br/>(add 'spot')"]
-        DEP["Deployment<br/>(drop bad nodeSelector)"]
+        NP["NodePool<br/>(schema-allowed fields only)"]
+        DEP["Deployment<br/>(schema-allowed fields only)"]
         KARP["Karpenter<br/>→ nodes"]
     end
 
@@ -129,8 +133,8 @@ flowchart LR
 
 The thick edge from the tools sandbox pod to the API server is the only write
 path in the system, and it stays bounded: gated by `ALLOW_APPLY`, the opt-in
-write RBAC, and the whitelisted, dry-run-first remediations described under
-"Remediation".
+write RBAC, and `agent/patch_schema.py`'s field-level schema, dry-run-first —
+see "Remediation" and **PERMISSIONS.md**.
 
 That view is the **topology** — who calls whom. A single query is not one pass
 through it: the orchestrator coordinates these pods back and forth and re-runs
@@ -248,24 +252,53 @@ says it won't change anything and offers the button or the manual command; in
 **autopilot** it says it's applying the fix now, then shows the apply + verify
 steps and the confirmed result.
 
-**Safety — apply is deliberately narrow:**
+**What decides "is there a fix":** two paths, in order. First, a cheap,
+evidence-checked heuristic (`remediation.detect_remediation`) recognizes the
+two problem shapes this demo ships scenarios for, with no model call. If that
+finds nothing but the query still names a resource of a kind the schema covers,
+the auditor SLM (CPU) is asked to propose a fix — see "How a fix is proposed"
+below. Either way the result is the same shape and goes through the identical
+validate → dry-run → apply → verify pipeline; there is no separate, less-checked
+path for a model-proposed fix.
+
+**Safety — apply is deliberately narrow, and generic ≠ unbounded:**
 - **Disabled by default.** Without `ALLOW_APPLY=true` *and* the opt-in write
-  ClusterRole (`k8s-rbac-apply.yaml`, `get`/`patch`/`update` on NodePools only),
-  the agent physically cannot mutate the cluster — the default RBAC is
-  read-only `get`/`list`/`watch`.
-- **Whitelisted, structured patches only.** The agent never executes free-form
-  changes. Each remediation is a coded `(apply, verify)` pair that edits a single
-  field. Two are wired up today: add `spot` to one NodePool's capacity-type, and
-  remove an impossible `nodeSelector` key (one no node satisfies) from a named
-  Deployment so its pods can schedule.
-- **Bounded blast radius.** A remediation is only offered for a resource the
-  user **explicitly named** and that genuinely has the problem — never a blanket
-  change across the cluster. Intentionally on-demand NodePools are left alone
-  unless you name them.
+  ClusterRole (`k8s-rbac-apply.yaml`, `get`/`patch`/`update` on NodePools and
+  Deployments only), the agent physically cannot mutate the cluster — the
+  default RBAC is read-only `get`/`list`/`watch`.
+- **A field-level schema, not free-form patches.** `agent/patch_schema.py`
+  defines the ONLY (kind, field) pairs that may ever be changed, each with its
+  own value constraints (a range, a quantity floor, an enum). No write —
+  heuristic-detected or model-proposed — reaches the cluster without first
+  validating against this schema. See **PERMISSIONS.md** for the full table
+  and how to verify it yourself.
+- **Bounded blast radius.** A fix is only offered for a resource the user
+  **explicitly named** and that genuinely has the problem — never a blanket
+  change across the cluster.
 - **Dry-run then verify.** The apply server-side dry-runs first, then patches,
   then re-reads the resource to confirm the change took effect.
 - **Human in the loop by default.** Autopilot is opt-in per request; absent it,
   every fix waits for an explicit click.
+
+### How a fix is proposed (when the heuristic doesn't cover it)
+
+Instead of one hand-written `(apply, verify)` function per failure scenario,
+there is one generic engine (`remediation.plan_patch` / `apply_patch` /
+`verify_patch`) parameterized by `patch_schema.PATCH_SCHEMA`. Onboarding a new
+*fixable field* is a schema entry; onboarding a new *kind of write* (a new
+"verb") is a small, reusable function, not a scenario.
+
+When the query names a resource of a schema-covered kind but the fast
+heuristic doesn't recognize the specific problem, the auditor SLM is asked to
+propose which allowed field to change and to what value — constrained by a
+JSON Schema built straight from `PATCH_SCHEMA` and passed as `response_format`
+to the CPU auditor's OpenAI-compatible endpoint. llama.cpp compiles that into a
+grammar and masks the sampler, so **the model cannot name a field outside the
+schema even if it tried** — this isn't a prompted convention, it's enforced at
+decode time. The proposal is then independently re-validated against the same
+schema (defense in depth) before it is ever shown to the user or reaches the
+apply path. If no allowed field addresses the diagnosis, the model returns
+`no_fix: true` and nothing is proposed.
 
 ## Right Tool for the Right Task
 
@@ -526,19 +559,31 @@ With autopilot **off** you get a proposed fix plus an *Apply this fix* button an
 the manual command; with autopilot **on** the agent patches the NodePool's
 capacity-type and re-reads it to confirm Spot is now allowed.
 
-**Pending pods — a structured fix the agent can apply** (names the Deployment, so
-the fix is bounded to it; the agent removes the impossible `nodeSelector` key no
-node satisfies). Note this one has a real side effect: once the pods can
-schedule, Karpenter may launch a node, so it costs money in a way the Spot fix
-does not.
+**Pending pods — a structured fix the agent can apply** (names the NodePool, so
+the fix is bounded to it; the agent raises `spec.limits.cpu` off `0`, which was
+blocking Karpenter from provisioning any node for it). Note this one has a real
+side effect: once a node can be provisioned, Karpenter launches one, so it
+costs money in a way the Spot fix does not.
 
 ```
-All pods for the `payments-api` Deployment in namespace `slemify` are stuck in Pending. Why, and how do I fix it?
+Pods are stuck Pending on NodePool `demo-payments` because its CPU limit is 0. Fix it.
 ```
 
 With autopilot **off** you get the proposed fix plus the *Apply this fix* button
-and manual command; with autopilot **on** the agent patches out the bad
-`nodeSelector` key and re-reads the Deployment to confirm the pods can schedule.
+and manual command; with autopilot **on** the agent raises the limit and
+re-reads the NodePool to confirm it can provision.
+
+**A fix the model has to propose itself** — ask about the *memory* limit
+instead of CPU (the fast heuristic only checks `spec.limits.cpu`, so this one
+exercises the schema-constrained model-proposal path described in "How a fix is
+proposed" above):
+
+```
+NodePool `demo-payments` pods are stuck Pending. describe_resource shows spec.limits.memory is 0, which blocks provisioning (its cpu limit is fine). Fix it.
+```
+
+See **PERMISSIONS.md** for the complete, generated list of every field the
+agent is ever allowed to touch, and how to verify it against live RBAC.
 
 ### Resetting the scenarios
 
@@ -690,5 +735,5 @@ python3 scripts/index-knowledge.py --append --source=karpenter
 5. A stock SLM grounded by RAG handles the domain answer on CPU; the custom training pays off in the retriever, not the generator
 6. A domain-tuned retriever roughly doubles RAG retrieval quality (see "Why a Domain-Tuned Retriever")
 7. Read-only tools make the agent useful on real clusters without the risk of mutating them
-8. When you do want it to act, remediation is layered — read-only, approve-to-apply, then autopilot — with the write path gated, whitelisted, bounded to a named resource, and dry-run + verified
+8. When you do want it to act, remediation is layered — read-only, approve-to-apply, then autopilot — with the write path gated by a field-level schema (not per-scenario code), bounded to a named resource, and dry-run + verified (see PERMISSIONS.md)
 9. Kubernetes-native: Karpenter provisions nodes, KEDA scales, OpenSearch runs in-cluster — everything on Spot with consolidation
