@@ -1,7 +1,7 @@
-torch==2.5.1
-transformers==4.46.3
-sentencepiece==0.2.0
-protobuf==5.28.3
-numpy==1.26.4
-huggingface_hub==0.26.2
-boto3==1.35.71
+torch==2.13.0
+transformers==5.14.1
+sentencepiece==0.2.2
+protobuf==7.35.1
+numpy==2.5.1
+huggingface_hub==1.27.0
+boto3==1.43.67
