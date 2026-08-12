@@ -116,6 +116,56 @@ def _pod_scheduling_summary(pod) -> str:
             f"nodeAffinity: {'set' if has_affinity else 'none'}; tolerations: {tols or 'none'}")
 
 
+def _scheduling_reason_tier(segment: str) -> int:
+    """Rank a single clause of a FailedScheduling message by how decisive it
+    is, lowest tier first. Karpenter's scheduling simulator reports every
+    reason it tried across every candidate node/NodePool in one message, so
+    most clauses describe *other* workloads' constraints, not this pod's
+    actual blocker:
+      0. Capacity/quota reasons (exceeded limits, insufficient resources) -
+         these are hard stops that explain "nothing can ever schedule here",
+         the strongest possible signal.
+      1. Requirement/selector mismatches - can be decisive, but Karpenter also
+         emits a generic "does not have known values (typo of ...?)" advisory
+         for any non-canonical label, which sounds like a confident diagnosis
+         but is just Karpenter not recognizing a custom label name.
+      2. Taint mismatches - almost always about a *different* node belonging
+         to a different workload; on a shared cluster these dominate by sheer
+         count and rarely explain why *this* pod can't schedule anywhere.
+    """
+    s = segment.lower()
+    if "exceed" in s or "insufficient" in s or "would exceed" in s:
+        return 0
+    if "did not tolerate taint" in s:
+        return 2
+    return 1
+
+
+def _prioritize_scheduling_message(message: str) -> str:
+    """A FailedScheduling message concatenates every reason the scheduler tried
+    across every candidate node/NodePool, with no indication of which one (if
+    any) actually explains the failure. Reordering by decisiveness alone still
+    leaves an LLM to infer "first mentioned = cause", which is not reliable: a
+    tier-1 advisory (e.g. Karpenter's generic "does not have known values (typo
+    of ...?)" hint about a custom label) reads as a specific, confident-sounding
+    diagnosis and can still out-compete a terser tier-0 clause for the model's
+    attention. Label the decisive clause explicitly instead of relying on
+    position, and mark the rest as context so an incidental clause about a
+    taint or label on some other node's requirements isn't mistaken for the
+    reason this pod can't schedule."""
+    segments = [s.strip() for s in message.split(";") if s.strip()]
+    if not segments:
+        return message
+    ordered = sorted(segments, key=_scheduling_reason_tier)
+    primary, rest = ordered[0], ordered[1:]
+    if _scheduling_reason_tier(primary) > 0 or not rest:
+        # No clause looks like a hard capacity/quota stop; nothing to single
+        # out as more authoritative than the others.
+        return "; ".join(ordered)
+    return (f"PRIMARY BLOCKER: {primary} | other scheduler messages (informational only, "
+            f"often about other nodes/workloads on a shared cluster): {'; '.join(rest)}")
+
+
 def _latest_warning_event(v1, namespace: str, name: str):
     try:
         evs = v1.list_namespaced_event(
@@ -124,20 +174,33 @@ def _latest_warning_event(v1, namespace: str, name: str):
         if not warns:
             return None
         e = warns[-1]
-        return f"{e.reason}: {(e.message or '').strip()[:280]}"
+        message = (e.message or "").strip()
+        if e.reason == "FailedScheduling":
+            message = _prioritize_scheduling_message(message)
+        return f"{e.reason}: {message[:280]}"
     except Exception:
         return None
 
 
 def _format_nodepool(d: dict) -> str:
     name = (d.get("metadata") or {}).get("name")
-    reqs = (((d.get("spec") or {}).get("template") or {}).get("spec") or {}).get("requirements") or []
+    spec = d.get("spec") or {}
+    reqs = ((spec.get("template") or {}).get("spec") or {}).get("requirements") or []
     fields = {r.get("key"): r.get("values") for r in reqs if isinstance(r, dict)}
-    disruption = ((d.get("spec") or {}).get("disruption") or {}).get("consolidationPolicy")
+    disruption = (spec.get("disruption") or {}).get("consolidationPolicy")
+    # spec.limits caps how much capacity Karpenter will ever provision for this
+    # pool. A limit of 0 (or any limit provisioning would exceed) is a common,
+    # easy-to-miss cause of pods stuck Pending — surface it next to the other
+    # provisioning knobs so it's visible in the same evidence blob as any
+    # pending-pod events, instead of requiring a separate describe_resource
+    # call the model has to cross-reference on its own.
+    limits = spec.get("limits") or {}
+    limits_str = ", ".join(f"{k}={v}" for k, v in limits.items()) if limits else "none"
     return (f"- {name}: capacity-type={fields.get('karpenter.sh/capacity-type') or 'any'}, "
             f"instance-family={fields.get('karpenter.k8s.aws/instance-family') or '-'}, "
             f"instance-category={fields.get('karpenter.k8s.aws/instance-category') or '-'}, "
-            f"arch={fields.get('kubernetes.io/arch') or 'any'}, consolidation={disruption or '-'}")
+            f"arch={fields.get('kubernetes.io/arch') or 'any'}, consolidation={disruption or '-'}, "
+            f"limits={limits_str}")
 
 
 def _nodepool_summaries() -> str:
@@ -160,16 +223,20 @@ def investigate_cluster(args: dict) -> str:
         return "Invalid namespace."
     query = args.get("query") or ""
 
-    # A specifically named NodePool: focus on it. If not found (name may have been
-    # mis-extracted, or it doesn't exist), fall through to general triage rather
-    # than abort, so we still report real pod health.
+    # A specifically named NodePool: report its config, but always fall through
+    # to the pod-health scan below too. A query naming a NodePool alongside a
+    # pod symptom ("pods are stuck Pending on NodePool X") needs both pieces of
+    # evidence — returning only the NodePool config here left the pod-health
+    # claim completely unverified, so the faithfulness gate had nothing to check
+    # it against.
     ref = extract.resource_ref(query)
     name = extract.extract_name(query)
+    nodepool_section = ""
     if ref and ref.get("kind") == "NodePool" and name:
         try:
             np = k8s_client.CustomObjectsApi().get_cluster_custom_object(
                 "karpenter.sh", "v1", "nodepools", name)
-            return "NODEPOOL:\n" + _format_nodepool(np)
+            nodepool_section = "NODEPOOL:\n" + _format_nodepool(np) + "\n\n"
         except Exception:
             pass
 
@@ -178,7 +245,7 @@ def investigate_cluster(args: dict) -> str:
         pods = (v1.list_namespaced_pod(namespace).items if namespace
                 else v1.list_pod_for_all_namespaces().items)
     except Exception as e:
-        return f"(could not list pods: {e})\n\nNODEPOOLS:\n" + _nodepool_summaries()
+        return nodepool_section + f"(could not list pods: {e})\n\nNODEPOOLS:\n" + _nodepool_summaries()
 
     problems = [p for p in pods
                 if p.status.phase == "Pending"
@@ -193,11 +260,11 @@ def investigate_cluster(args: dict) -> str:
             event = _latest_warning_event(v1, p.metadata.namespace, p.metadata.name)
             if event:
                 lines.append(f"    event: {event}")
-        return "PROBLEM PODS:\n" + "\n".join(lines)
+        return nodepool_section + "PROBLEM PODS:\n" + "\n".join(lines)
 
     # No unhealthy pods. Say so explicitly so the answer can state the reported
     # symptom isn't present rather than invent a cause for it.
-    return f"No pending or unhealthy pods found in {scope}.\n\nNODEPOOLS:\n" + _nodepool_summaries()
+    return nodepool_section + f"No pending or unhealthy pods found in {scope}.\n\nNODEPOOLS:\n" + _nodepool_summaries()
 
 
 _TOOLS = {
