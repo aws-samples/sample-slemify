@@ -485,20 +485,22 @@ an embedding retriever — the same `classifier-serving` image, different
 `PROJECT`/`TASK`), a stock cross-encoder reranker, and an OpenSearch vector DB,
 all on CPU, coordinated by a small orchestrator that holds no model.
 
-The pattern worth copying: **the orchestrator is the only component with cluster
-credentials.** It calls each model over the OpenAI-compatible / TEI HTTP
-contracts described above, and it is the single place that talks to the
-Kubernetes API — running read-only tools (`get`/`list`/`watch`) and, when
-explicitly enabled, gated `patch` writes. The model-serving pods only do
-inference and never touch the API (the reranker even runs with
-`automountServiceAccountToken: false`).
+The pattern worth copying: **cluster credentials live in exactly one place, and
+it is not the orchestrator.** The orchestrator itself holds no Kubernetes RBAC
+at all; a separate, sandboxed tools pod is the only workload with cluster
+credentials, and it is the single place that talks to the Kubernetes API —
+running read-only tools (`get`/`list`/`watch`) and, when explicitly enabled,
+gated `patch` writes. The orchestrator calls that tools pod (and each model)
+over HTTP; the model-serving pods only do inference and never touch the API
+(the reranker even runs with `automountServiceAccountToken: false`).
 
 ```mermaid
 flowchart LR
     UI["client / UI"] -->|"HTTP · SSE"| ORCH
 
     subgraph NS["application namespace · CPU pods"]
-        ORCH["<b>orchestrator</b><br/>agent + tools<br/>(no model loaded)"]
+        ORCH["<b>orchestrator</b><br/>agent (no model, no cluster creds)"]
+        TOOLS["<b>tools sandbox</b><br/>only workload with cluster creds"]
         TRIAGE["triage<br/>classifier-serving · ONNX"]
         RETR["retriever<br/>classifier-serving · ONNX embed"]
         RERANK["reranker<br/>cross-encoder · torch"]
@@ -511,6 +513,7 @@ flowchart LR
     ORCH <-->|"k-NN search"| OS
     ORCH <-->|"rerank"| RERANK
     ORCH <-->|"generate · stream"| AUD
+    ORCH <-->|"HTTP · run_tool / apply_fix"| TOOLS
     ORCH <-->|"Converse API · LLM fallback"| BR["LLM fallback<br/>(managed, off-cluster)"]
 
     subgraph WP["cluster control plane · what the agent patches"]
@@ -519,11 +522,11 @@ flowchart LR
         KARP["Karpenter → nodes"]
     end
 
-    ORCH ==>|"read-only get/list/watch<br/><b>+ gated patch</b>"| API
+    TOOLS ==>|"read-only get/list/watch<br/><b>+ gated patch</b>"| API
     API --> NP
     NP -.->|provisions| KARP
 
-    style ORCH stroke:#1f6feb,stroke-width:3px
+    style TOOLS stroke:#1f6feb,stroke-width:3px
     style API stroke:#d29922,stroke-width:2px
 ```
 

@@ -31,7 +31,7 @@ work here** — treat RBAC as the outer fence and the schema as the actual lock.
 | Kind | Field | Verb | Constraint | What it's for |
 |------|-------|------|------------|----------------|
 | `NodePool` | `spec.limits.cpu` | set a quantity | ≥ `1` | Unblock provisioning when the limit is `0` |
-| `NodePool` | `spec.limits.memory` | set a quantity | ≥ `1Gi` | Same, for memory |
+| `NodePool` | `spec.limits.memory` | set a quantity | ≥ `4Gi` | Same, for memory (no real EC2 instance type has less; a lower floor would leave pods stuck Pending even after a "successful" fix) |
 | `NodePool` | capacity-type requirement | add to a fixed set | value ∈ `{spot, on-demand, reserved}` | Allow Spot capacity |
 | `Deployment` | `spec.template.spec.nodeSelector` | remove specific keys | only keys **no node in the cluster carries** | Un-stick pods pinned to an impossible selector |
 | `Deployment` | `spec.replicas` | set an integer | `0`–`50` | Change desired replica count |
