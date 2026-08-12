@@ -156,6 +156,8 @@ These apply to the trained (encoder-family) tasks. `task: generation` is served 
 
 Generation no longer uses a GPU: it is downloaded, converted to GGUF, and quantized on CPU, so it has no training cost and no synthetic-data cost. Inference cost depends on how you deploy. The reference deployment (llama.cpp on CPU Spot) runs at ~$117/mo per replica. Throughput scales linearly: 3 replicas = 3x throughput at 3x cost. No rate limits, no per-token charges. See the [Serving deep dive](docs/deep-dive/serving.md) for cost comparisons across CPU, GPU, and LLM API options.
 
+**This isn't only a $/token argument.** Many production Kubernetes clusters report single-digit percent GPU utilization, because latency-insensitive and structurally simple work (routing, classification, validation, embedding) ends up parked on the same expensive pool as the generation workloads that actually need it. Moving that work to CPU isn't just cheaper per call, it frees up GPU capacity for the model that genuinely needs it. For the four encoder-family tasks (`classification`, `scoring`, `extraction`, `embedding`), there's effectively no volume threshold to clear: CPU training and serving are cheap at any scale, so the usual self-hosting break-even math (which only favors self-hosting past a real volume threshold, often millions of tokens/day) doesn't apply — that math is specific to serving a generative model, and Slemify sidesteps it by not fine-tuning generation in the first place.
+
 ## Examples
 
 - [K8s Autoscaling Auditor](examples/k8s-autoscaling/). Tiered SLM system: a triage classifier routes queries, an 8B auditor produces structured reasoning about Karpenter/KEDA/HPA misconfigurations
@@ -201,7 +203,7 @@ The reference serving deployment (llama.cpp on CPU) is included for validation a
 ## FAQ
 
 **Q: When should I use an SLM vs just calling an LLM API?**
-A: If the task is repetitive, structured, and runs more than ~1,000 times/day. or if data can't leave your VPC. Below that volume, an LLM API is simpler and fine.
+A: If the task is repetitive, structured, and runs more than ~1,000 times/day, or if data can't leave your VPC. Below that volume, an LLM API is simpler and fine. This threshold applies to the encoder-family tasks (classification, scoring, extraction, embedding) — training and serving them on CPU costs cents regardless of volume, so there's little downside to starting early. `task: generation` is a different calculation: you're comparing a self-hosted CPU (or GPU) deployment against an LLM API's per-token price, and that comparison only favors self-hosting past real volume (industry self-hosting break-even estimates for generative models commonly land in the millions of tokens/day). Below that, keep generation on the LLM API even if you've already adopted Slemify for routing/classification around it.
 
 **Q: Can a 3B model really match a frontier LLM?**
 A: For general tasks, no. For YOUR specific structured task with YOUR categories, a fine-tuned 3B model matches or beats general-purpose LLMs. [Salesforce's xLAM-2-8B](https://huggingface.co/Salesforce/Llama-xLAM-2-8b-fc-r) beat GPT-4o and Claude 3.5 at tool calling on the [Berkeley Function-Calling Leaderboard](https://gorilla.cs.berkeley.edu/leaderboard.html). Specialization beats size.
