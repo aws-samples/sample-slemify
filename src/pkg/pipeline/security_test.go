@@ -115,8 +115,28 @@ func TestSecurityMemoryRequestEqualsLimit(t *testing.T) {
 	}
 }
 
+// TestSecurityNoCPULimits enforces the default project-wide policy: CPU is
+// compressible, so a limit just adds CFS throttling risk for no crash-safety
+// benefit (unlike memory, where OOM is fatal and a limit is required).
+//
+// serving/llama-cpp is a deliberate, tested exception. llama.cpp's --threads
+// is pinned to the pod's CPU *request* (see deployment.go llamaCppArgs) so
+// its thread pool matches its actual quota instead of autodetecting the
+// node's full core count. That pin only holds under real contention if the
+// request is backed by a matching *limit* — without one the pod is
+// Burstable and the pin is a no-op whenever the node has free cores, which
+// silently reintroduces the oversubscription problem the pin exists to fix.
+// Verified live: under CPU contention, the throttled (Guaranteed) pod
+// outperformed the unthrottled (Burstable) one at the same --threads value.
+var cpuLimitExceptions = map[string]bool{
+	"serving/llama-cpp": true,
+}
+
 func TestSecurityNoCPULimits(t *testing.T) {
 	for name, c := range allContainers() {
+		if cpuLimitExceptions[name] {
+			continue
+		}
 		if c.Resources.Limits != nil {
 			if _, has := c.Resources.Limits[corev1.ResourceCPU]; has {
 				t.Errorf("%s: has CPU limit — only requests allowed", name)

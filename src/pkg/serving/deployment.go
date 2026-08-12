@@ -182,7 +182,20 @@ func inferenceDeployment(cfg *config.ExpertConfig, sized config.SizedConfig, ns 
 									corev1.ResourceCPU:    resource.MustParse(sized.InferenceCPU),
 									corev1.ResourceMemory: resource.MustParse(sized.InferenceMemory),
 								},
+								// CPU limit matches the request (Guaranteed QoS for
+								// CPU): --threads is pinned to sized.InferenceCPU
+								// (see llamaCppArgs), and that pin only means
+								// something if the pod's CPU quota is actually
+								// bounded to that value. Without a CPU limit, the
+								// pod is Burstable and can use every free core on
+								// the node when it's idle — fine on its own, but it
+								// means the pod never gets throttled down to what
+								// --threads assumes, so the pin does nothing on an
+								// idle node and only matters once the node is under
+								// contention. Setting limit = request makes the
+								// guarantee real in both cases.
 								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse(sized.InferenceCPU),
 									corev1.ResourceMemory: resource.MustParse(sized.InferenceMemory),
 								},
 							},

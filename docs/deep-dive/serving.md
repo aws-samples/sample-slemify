@@ -258,15 +258,17 @@ If your use case involves longer inputs (full documents, long log entries), you 
 
 The auto-sizer maps your model size and quantization level to CPU, memory, and thread count for the inference pod. Karpenter then picks the cheapest instance that satisfies those resource requests.
 
-| Model size | CPU request | Memory request | Threads |
-|-----------|------------|---------------|---------|
+| Model size | CPU request = limit | Memory request = limit | Threads |
+|-----------|---------------------|------------------------|---------|
 | ≤3B | 4 cores | 6Gi (Q4_K_M) / 12Gi (F16) | 4 |
 | ≤8B | 8 cores | 16Gi (Q4_K_M) / 24Gi (F16) | 8 |
 | >8B | 16 cores | 24Gi (Q4_K_M) / 40Gi (F16) | 16 |
 
 The memory request accounts for the model file plus the KV cache and runtime overhead. The CPU request determines how many threads llama.cpp uses for matrix operations. More threads help up to the point where memory bandwidth saturates, after which adding threads provides no benefit.
 
-**Thread count matters.** Setting threads higher than the number of physical cores (ignoring hyperthreads) can actually hurt performance due to cache contention. The auto-sizer sets threads equal to the CPU request, which maps to physical cores on most instance types.
+**Thread count matters.** Setting threads higher than the number of physical cores (ignoring hyperthreads) can actually hurt performance due to cache contention. The auto-sizer sets threads equal to the CPU request, and the inference pod's CPU **limit** is set equal to the request too (Guaranteed QoS for CPU) — llama.cpp's `--threads` is wired to this same value.
+
+This is a deliberate exception to Slemify's usual policy of not setting CPU limits elsewhere (CPU is compressible, so a limit is normally just throttling risk with no crash-safety upside — unlike memory, where a limit is required because OOM is fatal). For the inference pod specifically, the limit isn't there to protect other pods from this one; it's there so `--threads` reflects reality. Without a matching limit, an idle node lets the pod burst onto every free core, so `--threads` pins a thread pool that never gets held to it — no downside there, but it means the pin does nothing until the node is *already* busy, which is exactly when you need it to. Measured directly: under real CPU contention on a shared node, a throttled (Guaranteed) pod with `--threads` matching its request served ~40% higher aggregate throughput than an unthrottled (Burstable) pod with the same `--threads` value, because the thread pool wasn't fighting the scheduler for cores it didn't actually have.
 
 **Models larger than 8B.** The auto-sizer supports models up to 30B+ parameters on CPU. Larger models work but with proportionally higher latency (more weights to read per token). For classification and routing tasks with short output, models up to 30B are viable on CPU if the response time fits your SLAs. For most classification tasks, 3-8B is the sweet spot: fast enough for real-time use, large enough for multi-class accuracy.
 

@@ -187,6 +187,32 @@ func TestDeploymentResourceRequests(t *testing.T) {
 	}
 }
 
+func TestDeploymentCPULimitMatchesRequest(t *testing.T) {
+	// Guaranteed QoS for CPU: the --threads pin (see
+	// TestDeploymentThreadsMatchCPURequest) only bounds thread count to the
+	// pod's *request*. Without a matching CPU *limit*, the pod is Burstable
+	// and can use every free core on the node — harmless on an idle node,
+	// but it means the pod is never actually held to the quota --threads
+	// assumes, so the pin only starts mattering once the node is already
+	// under contention. Measured live: under contention, an unthrottled pod
+	// with --threads set to its request still benefits from the limit
+	// existing, because it stops the pod from silently relying on headroom
+	// that may not be there next time.
+	cfg := karpenterConfig()
+	sized := sized7B()
+	m := GenerateInferenceManifests(cfg, sized, "slemify", pc)
+
+	c := m.Deployment.Spec.Template.Spec.Containers[0]
+	cpuReq := c.Resources.Requests["cpu"]
+	cpuLim := c.Resources.Limits["cpu"]
+	if cpuLim.IsZero() {
+		t.Fatal("CPU limit should be set (Guaranteed QoS), got none — pod defaults to Burstable and can burst unbounded")
+	}
+	if cpuReq.Cmp(cpuLim) != 0 {
+		t.Errorf("CPU limit (%s) should equal CPU request (%s)", cpuLim.String(), cpuReq.String())
+	}
+}
+
 func TestDeploymentModelVolume(t *testing.T) {
 	cfg := karpenterConfig()
 	sized := sized7B()
