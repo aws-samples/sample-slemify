@@ -104,12 +104,25 @@ def is_operational(text: str) -> bool:
 def select_cluster_tools(query: str) -> list:
     """On the diagnose path, pick which read-only cluster tool(s) to run: a named
     resource is described directly (with events on a symptom); otherwise a broad
-    live investigation. (Manifest linting is handled separately, before this.)"""
+    live investigation. (Manifest linting is handled separately, before this.)
+
+    An operational query that names a resource other than Pod (e.g. "pods are
+    stuck Pending on NodePool X") also gets investigate_cluster, which is the
+    only tool that actually checks pod health. Without it, describing the named
+    resource alone never verifies the pod symptom the query claims — the
+    faithfulness gate then has no evidence to check that claim against, since
+    describe_resource/list_events only look at the named resource itself. Stays
+    within MAX_TOOL_CALLS (3): describe_resource + list_events + investigate_cluster."""
     ref = resource_ref(query)
     name = extract_name(query)
     operational = is_operational(query)
     if ref and name:
-        return ["describe_resource", "list_events"] if operational else ["describe_resource"]
+        if not operational:
+            return ["describe_resource"]
+        tools = ["describe_resource", "list_events"]
+        if ref.get("kind") != "Pod":
+            tools.append("investigate_cluster")
+        return tools
     return ["investigate_cluster"]
 
 
