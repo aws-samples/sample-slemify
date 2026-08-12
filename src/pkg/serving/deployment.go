@@ -282,6 +282,16 @@ func llamaCppArgs(cfg *config.ExpertConfig, modelPath string, sized config.Sized
 		"--mlock",
 		"--cache-prompt",
 	}
+	// Pin the thread count to the pod's actual CPU request. Without this,
+	// llama.cpp's autodetect (std::thread::hardware_concurrency) reads the
+	// node's total core count, not the pod's cgroup CPU quota — on a node
+	// with more cores than the pod requested, that oversubscribes the quota
+	// and threads contend instead of running, hurting throughput under
+	// concurrent requests. sized.InferenceThreads is computed to match
+	// sized.InferenceCPU (see autosizer.go).
+	if sized.InferenceThreads != "" {
+		args = append(args, "--threads", sized.InferenceThreads, "--threads-batch", sized.InferenceThreads)
+	}
 	// For models that support thinking mode (Qwen3, DeepSeek), disable it.
 	// The fine-tuned model produces output directly without needing to think.
 	// Ensure max_tokens in the inference request is high enough for the full response.

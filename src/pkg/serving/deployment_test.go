@@ -132,6 +132,45 @@ func TestDeploymentLivenessProbe(t *testing.T) {
 	}
 }
 
+func TestDeploymentThreadsMatchCPURequest(t *testing.T) {
+	// llama.cpp's thread autodetect reads the node's core count, not the
+	// pod's cgroup CPU quota. Without an explicit --threads pinned to the
+	// pod's CPU request, a pod scheduled on a node with more cores than it
+	// requested oversubscribes its own quota and threads contend instead of
+	// running — this regresses concurrent-request throughput. See
+	// llamaCppArgs in deployment.go.
+	cfg := karpenterConfig()
+	sized := sized7B()
+	m := GenerateInferenceManifests(cfg, sized, "slemify", pc)
+
+	c := m.Deployment.Spec.Template.Spec.Containers[0]
+	if sized.InferenceThreads == "" {
+		t.Fatal("test fixture sized.InferenceThreads must be non-empty")
+	}
+
+	foundThreads, foundThreadsBatch := false, false
+	for i, arg := range c.Args {
+		if arg == "--threads" && i+1 < len(c.Args) {
+			if c.Args[i+1] != sized.InferenceThreads {
+				t.Errorf("--threads = %q, want %q (sized.InferenceThreads)", c.Args[i+1], sized.InferenceThreads)
+			}
+			foundThreads = true
+		}
+		if arg == "--threads-batch" && i+1 < len(c.Args) {
+			if c.Args[i+1] != sized.InferenceThreads {
+				t.Errorf("--threads-batch = %q, want %q (sized.InferenceThreads)", c.Args[i+1], sized.InferenceThreads)
+			}
+			foundThreadsBatch = true
+		}
+	}
+	if !foundThreads {
+		t.Error("--threads not found in llama.cpp args; thread count will be autodetected from the node instead of the pod's CPU request")
+	}
+	if !foundThreadsBatch {
+		t.Error("--threads-batch not found in llama.cpp args")
+	}
+}
+
 func TestDeploymentResourceRequests(t *testing.T) {
 	cfg := karpenterConfig()
 	sized := sized7B()
