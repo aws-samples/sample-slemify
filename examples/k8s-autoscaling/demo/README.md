@@ -9,8 +9,10 @@ supported (and abstains honestly if even that isn't).
 
 The point of the demo is **right tool for the right task**: the high-frequency,
 narrow steps (classify, retrieve, rank, generate a domain answer) run on small
-models on CPUs; a large LLM checks each answer and handles the open-ended tail.
-No GPUs serve traffic.
+models on CPUs; a large LLM checks *every* answer (not just some) and handles
+the open-ended tail. No GPUs serve traffic. The LLM check is unconditional but
+cheaper than a full LLM answer — see "Cost model" further down for the actual
+numbers and the breakeven point where that stops being true.
 
 > **What can this agent actually change?** See **[PERMISSIONS.md](PERMISSIONS.md)**
 > for the complete, generated list of every field it may ever patch, and how to
@@ -233,6 +235,50 @@ answer that states only what the evidence supports and says plainly what it coul
 not confirm. That abstain step is the "never confidently wrong" backstop: the top
 of the ladder is not exempt from the gate. A replaced draft is updated in the UI,
 so the audience sees the agent catch and correct itself.
+
+### Cost model: the gate calls Bedrock on every query, not some
+
+Be precise about what "CPU-first" saves here: the gate is **not** a cheap
+heuristic that occasionally defers to Bedrock. It is an unconditional Bedrock
+call on every single answer, including the escalated LLM's own answer (the gate
+checks that too). There is no query that completes without at least one Bedrock
+call. If you're citing this demo as "mostly avoids the LLM," that's not what the
+code does — say "checks with the LLM every time, but the check is cheaper than a
+full answer" instead.
+
+What actually differs from calling Bedrock directly is *which part* of a Bedrock
+call you pay for. A direct answer pays for a full generation (Sonnet 4.5:
+$3/1M input tokens, $15/1M output tokens — output is 5x the price). The gate
+pays the same input-token cost (it needs the same query + evidence + docs to
+judge the draft) but only a short verdict on the output side. Using this demo's
+actual context sizes (`gate.py` caps context at 12k chars):
+
+| Outcome | Bedrock calls | Rough cost | vs. direct |
+|---|---|---|---|
+| Direct-to-LLM (no CPU stage) | 1 generation | $0.0155 | baseline |
+| Gate passes SLM draft first try | 1 gate call | $0.0118 | ~24% cheaper |
+| SLM fails, escalation passes | gate → escalate → gate | $0.0391 | ~2.5x more expensive |
+| SLM and escalation both fail (abstain) | gate → escalate → gate → calibrate | $0.0547 | ~3.5x more expensive |
+
+Solving for the SLM's first-pass rate `p` where expected cost breaks even with
+calling Bedrock directly: **p needs to be roughly 87-92%** (depending on how
+failures resolve) before this architecture is actually cheaper. Below that
+threshold, a failed query pays for the same Bedrock input tokens two or three
+times over, and CPU-first loses to just asking the LLM. This demo does not yet
+measure and publish that pass rate — it should, since it's the number the whole
+economic argument rests on, not an assumption.
+
+**When the pass rate is low, the fix is usually not more compute.** The cheapest
+lever is almost always what the SLM is *shown*, not the model itself: bad or
+missing evidence (a truncated tool output, a stale doc chunk) produces a
+confidently-wrong draft regardless of model size. Work through, in order, before
+reaching for a bigger model or routing more to Bedrock: (1) evidence/tool-output
+quality, (2) retrieval coverage, (3) prompt clarity, (4) gate consistency (the
+judge itself is noisy — the same query/evidence/answer can flip pass/escalate on
+a bare retry at temperature 0), and only then (5) an actual model-capability
+ceiling. Fixes at levels 1-4 are one-time engineering costs that improve every
+future query for free; more Bedrock calls or GPU capacity are recurring costs
+that scale with volume forever.
 
 ## Remediation (read-only → approve → autopilot)
 
@@ -730,7 +776,7 @@ python3 scripts/index-knowledge.py --append --source=karpenter
 
 1. **Right tool for the right task** — fine-tune where it earns it (retrieval), serve stock where the base is already capable (the generation auditor + RAG, the reranker), use plain code for glue (routing, extraction), and use a capable LLM to check answers (the faithfulness gate) and for the open-ended tail
 2. CPUs handle the full AI pipeline: classification, retrieval, reranking, generation, and tool use — no GPUs serve traffic
-3. An agent can route, gather live evidence, and self-correct on CPU; the LLM is one tool in the mix, not the foundation
+3. An agent can route, gather live evidence, and self-correct on CPU; the LLM checks every answer (it is not skipped), but a passing check costs less than a full LLM answer — see "Cost model" above for the breakeven math
 4. RAG + live cluster state grounds the response in real evidence (reduces hallucinations)
 5. A stock SLM grounded by RAG handles the domain answer on CPU; the custom training pays off in the retriever, not the generator
 6. A domain-tuned retriever roughly doubles RAG retrieval quality (see "Why a Domain-Tuned Retriever")
