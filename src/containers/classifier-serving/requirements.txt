@@ -1,6 +1,6 @@
 fastapi==0.141.1
-uvicorn==0.52.1
+uvicorn==0.52.3
 onnxruntime==1.28.0
 tokenizers==0.23.1
 numpy<3
-boto3>=1.43.67
+boto3>=1.43.72
