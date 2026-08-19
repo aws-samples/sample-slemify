@@ -19,7 +19,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from agent import config, retrieval, tools
+from agent import config, metrics, retrieval, tools
 from agent import toolclient
 from agent.graph import agent
 
@@ -100,6 +100,16 @@ async def query_endpoint(q: Query):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/stats")
+async def stats():
+    """Gate-outcome counters and the measured SLM first-pass rate. The cost
+    model of the CPU-first architecture hinges on this number (breakeven vs
+    calling the LLM directly is ~87-92%); until now it was only ever estimated
+    from the eval scorecard. Counters reset on restart; the JSON-line metric
+    events in the pod logs are the durable record."""
+    return metrics.snapshot()
 
 
 @app.get("/config")

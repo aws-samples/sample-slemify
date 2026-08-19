@@ -20,7 +20,7 @@ from typing import TypedDict
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
-from . import classify, config, extract, gate, generation, patch_schema, prompts, retrieval, tools
+from . import classify, config, extract, gate, generation, metrics, patch_schema, prompts, retrieval, tools
 from . import toolclient
 from .validation import validate_config, validate_draft_fix
 
@@ -167,6 +167,21 @@ async def n_retrieve(state: AgentState) -> dict:
     t = time.perf_counter()
     docs = await loop.run_in_executor(None, retrieval.rerank_docs, query[:config.RERANK_QUERY_CHARS], candidates, keep)
     writer({"type": "step_done", "name": "Reranker (cross-encoder, CPU)", "ms": _ms(t), "detail": f"kept top {len(docs)}"})
+
+    # Field-aware guarantee for pasted configs: similarity ranking can bury the
+    # one chunk that DEFINES a field the manifest uses (the model then
+    # fabricates about exactly that field — proven failure mode). Fetch each
+    # used field's authoritative definition and append what the reranked set
+    # is missing. Additive, so the similarity-ranked grounding is untouched.
+    fields = extract.manifest_fields(query)
+    if fields:
+        writer({"type": "step_start", "name": "Field definitions (OpenSearch)",
+                "note": f"authoritative docs for: {', '.join(fields[:6])}"})
+        t = time.perf_counter()
+        extra = await loop.run_in_executor(None, retrieval.field_definition_docs, fields, docs)
+        writer({"type": "step_done", "name": "Field definitions (OpenSearch)", "ms": _ms(t),
+                "detail": f"added {len(extra)} definition chunk(s)" if extra else "already covered"})
+        docs = docs + extra
     return {"docs": docs}
 
 
@@ -230,6 +245,18 @@ async def n_critic(state: AgentState) -> dict:
         verdict = "could not confirm \u2014 calibrating an honest answer"
     else:
         verdict = "escalating to LLM"
+
+    # Instrument every gate check, and the terminal resolutions, so the real
+    # production pass rate (not the eval proxy) is measurable. The economics of
+    # this architecture hinge on the SLM's first-pass rate; see agent/metrics.py.
+    category = state.get("category", "unknown")
+    metrics.record_gate_check(category, used_llm, escalate, attempts, reason or "")
+    if passed:
+        metrics.record_outcome(category, "llm_pass" if used_llm else "slm_pass")
+    elif used_llm and not (fix_issues and can_retry) and not needs_evidence:
+        metrics.record_outcome(category, "abstain")
+    elif needs_evidence and not state.get("autopilot"):
+        metrics.record_outcome(category, "propose")
     detail = "supported" if not escalate else f"not supported \u2192 {'abstain' if used_llm else 'escalate'}: {reason}"
     if fix_issues:
         detail += " \u00b7 fix uses deprecated/invalid config"
