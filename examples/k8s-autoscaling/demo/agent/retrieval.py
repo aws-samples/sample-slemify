@@ -72,6 +72,53 @@ def hybrid_candidates(embedding: list[float], query: str, broaden: bool = False)
     return out
 
 
+# Field-aware retrieval: official-docs sources whose chunks define API fields
+# (as opposed to blogs/examples that merely use them).
+_AUTHORITATIVE_SOURCES = ["karpenter", "keda"]
+
+
+def field_definition_docs(fields: list[str], exclude: list[str],
+                          max_fields: int = 6, per_field: int = 1) -> list[str]:
+    """Fetch the authoritative definition chunk for each named field.
+
+    Complements (does not replace) the reranked global top-k: for a pasted
+    multi-field config, similarity ranking favors chunks that look like the
+    query — other example YAML, blog posts — and can drop the terse reference
+    chunk that actually defines one of the fields. The model then fabricates
+    about exactly that field (proven: consolidateAfter, lessons-learned
+    section 20 — the defining chunk existed in the corpus, scored 2.9, and
+    never reached the model). A targeted per-field lexical search filtered to
+    the official docs reliably ranks the definition first (validated against
+    the live corpus before this was written).
+
+    Best-effort: any search failure returns what was found so far — the
+    reranked docs still ground the answer, just without the guarantee."""
+    out = []
+    seen = set(exclude)
+    for field in fields[:max_fields]:
+        try:
+            res = config.opensearch.search(
+                index=config.INDEX_NAME,
+                body={
+                    "size": per_field,
+                    "query": {"bool": {
+                        "must": {"match": {"text": field}},
+                        "filter": {"terms": {"source": _AUTHORITATIVE_SOURCES}},
+                    }},
+                    "_source": ["text", "source", "section"],
+                },
+            )
+            for h in res["hits"]["hits"]:
+                doc = _fmt_hit(h)
+                if doc not in seen:
+                    seen.add(doc)
+                    out.append(doc)
+        except Exception as e:
+            print(f"  Field-definition lookup failed for '{field}': {e}")
+            break
+    return out
+
+
 def rerank_docs(query: str, docs: list[str], top_k: int) -> list[str]:
     """Re-rank candidates with the cross-encoder, keeping the best top_k. Falls
     back to vector order (truncated) if the reranker is unavailable."""
