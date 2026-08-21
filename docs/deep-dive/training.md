@@ -178,24 +178,29 @@ serving included, still runs on Spot.
 
 ## Choosing a base model
 
-The base model is the one Slemify converts and serves. Slemify supports any HuggingFace causal LM that llama.cpp's GGUF converter can read. The choice depends on your task complexity.
+The base model is the one Slemify converts and serves. Slemify supports any HuggingFace causal LM that llama.cpp's GGUF converter can read, including Mixture-of-Experts (MoE) architectures. Two decisions matter: the architecture (dense vs MoE) and the size.
 
-For knowledge-grounded reasoning over your own corpus (the primary generation use case), pick the smallest model that answers your eval cases well once it is grounded by RAG. Smaller is cheaper and faster on CPU:
+**Architecture first: dense vs Mixture-of-Experts.** On CPU, inference speed is set by memory bandwidth: every generated token requires streaming the model's *active* weights through RAM. In a dense model, every parameter is active for every token, so speed is inversely proportional to total size. An MoE stores many parallel "expert" sub-networks but routes each token through only a few of them, so its per-token cost tracks its *active* parameters while its quality tracks closer to its *total* parameters. That trade — pay in RAM capacity, save on bandwidth — is a poor fit for GPUs (VRAM is the scarce resource) but an excellent fit for CPU serving, where RAM is abundant and bandwidth is the constraint.
 
-| Model size | Good for | Inference speed (CPU) |
-|-----------|----------|----------------------|
-| 1-3B | Simple structured answers, tight latency budgets | Fast. Sub-second to first token on most CPUs. |
-| 7-8B | Multi-step reasoning, config analysis, structured generation | Moderate. 1-2s on CPU. |
-| 13B+ | Complex reasoning, long-form generation | Slow on CPU. Consider GPU serving. |
+Measured on the k8s-autoscaling auditor (same eval, same hardware, same llama.cpp settings): Qwen3-30B-A3B (30.5B total, ~3.3B active per token, q4) beat the dense 8B (q8) on accuracy (12/18 vs 10/18 scorecard, 66.7% vs 51.6% faithfulness-gate first-pass rate) while decoding 1.6-2.3x faster. The costs: ~2x the pod memory (26Gi vs 16Gi) and ~25% slower prefill — batch-processing a long prompt touches most experts collectively, so the sparse-activation saving applies to decode, not prefill. Net latency was still lower on real queries because answers are long enough that decode dominates.
 
-**The practical guidance:** start with the smallest model that answers your eval cases well when grounded by RAG. You can always scale up if accuracy is too low, but you can't get back the latency and cost savings of a smaller model.
+| Model class | Good for | CPU speed | Memory |
+|-------------|----------|-----------|--------|
+| Dense 1-3B | Simple structured answers, tight latency budgets | Fast decode and prefill | Small (2-6GB quantized) |
+| Dense 7-8B | Multi-step reasoning, config analysis | Moderate | ~5-9GB quantized |
+| Small-MoE (e.g. 30B total / ~3B active) | The dense-8B use cases, at higher quality AND faster decode | Decode near dense-3B speed; prefill slightly slower than dense 8B | Large (~18GB+ quantized) — all experts stay resident |
+| Dense 13B+ | Complex long-form generation | Slow decode on CPU | Consider whether a small-MoE fits instead before reaching for GPUs |
+
+**The practical guidance:** start with the smallest *dense* model that answers your eval cases well when grounded by RAG — it is the cheapest to serve and iterate on. If accuracy falls short, evaluate a small-MoE before a bigger dense model: it is the only step up that can raise quality and decode speed at the same time, provided your nodes have the RAM and your workload is decode-heavy (long answers). A bigger dense model only ever trades speed for quality. Whatever you pick, the decision must be made against your own scorecard (see [report](report.md)), not the model card.
 
 <details>
 <summary>Why not always use the biggest model?</summary>
 
-Bigger models are slower and more expensive to serve. On CPU (where Slemify deploys for inference), latency is roughly proportional to parameter count because inference is [memory-bandwidth bound](https://cmanaha.github.io/tech-deep-dives/silicon-memory-inference/). A 3B model moves about 1.8GB of weights through memory per token. An 8B model moves about 4.5GB. The CPU spends most of its time waiting for data, not doing math.
+Bigger models are slower and more expensive to serve. On CPU (where Slemify deploys for inference), latency is roughly proportional to *active* parameter count because inference is [memory-bandwidth bound](https://cmanaha.github.io/tech-deep-dives/silicon-memory-inference/). A 3B model moves about 1.8GB of weights through memory per token. A dense 8B moves about 4.5GB. A 30B-A3B MoE moves roughly what a dense 3B does — that loophole is why MoE is the exception to "bigger is slower" on CPU, at the price of holding all 30B parameters in RAM. The CPU spends most of its time waiting for data, not doing math.
 
 Research from [Microsoft](https://arxiv.org/abs/2309.05463) and [NVIDIA](https://arxiv.org/abs/2506.02153) confirms that models under 10B parameters match or beat larger models on structured, repetitive tasks, especially when grounded by retrieval for the domain knowledge.
+
+One boundary worth knowing: a bigger or smarter model fixes *capability* gaps, not *behavior* gaps. In the k8s-autoscaling eval, the failure cases where the model invents problems with valid configs persisted almost unchanged across a 3.7x parameter increase — that kind of failure is addressed by training the behavior (fine-tuning for faithfulness), not by model selection.
 </details>
 
 ## Quantization and GGUF export
@@ -225,7 +230,9 @@ Slemify supports these quantization levels:
 | 8-bit | `q8_0` | Near-lossless; the safe choice for reasoning-heavy tasks. |
 | None | `f16` | Full precision; only useful for GPU serving. |
 
-**Pick the quant against your eval, not by reputation.** The default `q4_k_m` is fine for many tasks, but quantization hurts *reasoning* far more than it hurts perplexity, and a binary pass/fail eval over calibration-heavy cases exposes that. The k8s-autoscaling auditor is a clear example: on the demo's end-to-end scorecard, q8_0 held **15/18**, while q5_k_m and q4_k_m collapsed to **7/18** and **8/18** by losing calibration (inventing problems on valid configs). So the auditor is served at `q8_0` even though it is larger and slower. Always re-run the [report](report.md) scorecard after changing the quant.
+**Pick the quant against your eval, not by reputation.** The default `q4_k_m` is fine for many tasks, but quantization hurts *reasoning* far more than it hurts perplexity, and a binary pass/fail eval over calibration-heavy cases exposes that. The k8s-autoscaling auditor showed this with its original dense 8B: on the demo's end-to-end scorecard, q8_0 held accuracy while q5_k_m and q4_k_m roughly halved it by losing calibration (inventing problems on valid configs) — so that model had to be served at `q8_0` even though it was larger and slower.
+
+**Quant sensitivity is also architecture-specific — re-measure when you change models.** The same demo's current MoE auditor (Qwen3-30B-A3B) holds its accuracy at `q4_k_m` on the same scorecard, outscoring the dense 8B at q8_0. A tolerable quant for one model tells you nothing about another. Always re-run the [report](report.md) scorecard after changing either the model or the quant.
 
 <details>
 <summary>Can a smaller quant be made to hold accuracy?</summary>
