@@ -67,7 +67,7 @@ CPU; the gate is one LLM call per answer.
 | Retriever | Slemify retriever (`task: embedding`), ONNX | c8g (Graviton4 CPU) | Domain-tuned query/doc embeddings, 768d | **Yes** (fine-tuned encoder) |
 | Reranker | sentence-transformers cross-encoder | c8g (Graviton4 CPU) | Re-ranks candidates to the best few | No — stock |
 | OpenSearch | OpenSearch k-NN | CPU pod | Vector search over 3900+ doc chunks | — |
-| Auditor SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed | No — stock 8B (Slemify convert+quantize), grounded by RAG |
+| Auditor SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed | No — stock Qwen3-30B-A3B MoE at q4 (3.3B active params/token; only lever that raised accuracy AND speed together vs the previous dense 8B), grounded by RAG |
 | Faithfulness gate | Bedrock LLM | Managed | Judges whether the draft is supported by the evidence; drives accept/retry/escalate/abstain | No — LLM judge |
 | LLM API | Bedrock | Managed | Open-ended fallback / escalation | No — general model |
 
@@ -104,7 +104,7 @@ flowchart LR
         TRIAGE["triage-inference pod<br/>classifier-serving · ONNX"]
         RETR["retriever-inference pod<br/>classifier-serving · ONNX embed"]
         RERANK["reranker pod<br/>cross-encoder · torch"]
-        AUD["auditor-inference pod<br/>llama.cpp · GGUF 8B"]
+        AUD["auditor-inference pod<br/>llama.cpp · GGUF 30B-A3B MoE"]
         OS[("opensearch<br/>vector DB · StatefulSet")]
     end
 

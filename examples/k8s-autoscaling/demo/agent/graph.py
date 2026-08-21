@@ -202,8 +202,8 @@ async def n_generate(state: AgentState) -> dict:
         name, stream_fn, used_llm = "LLM API (Bedrock fallback)", generation.stream_llm, True
         writer({"type": "model", "name": "Claude Sonnet 4.5 (Bedrock)"})
     else:
-        name, stream_fn, used_llm = "Auditor SLM (8B, CPU)", generation.stream_slm, False
-        writer({"type": "model", "name": "Auditor SLM (8B, CPU)"})
+        name, stream_fn, used_llm = "Auditor SLM (30B-A3B MoE, CPU)", generation.stream_slm, False
+        writer({"type": "model", "name": "Auditor SLM (30B-A3B MoE, CPU)"})
 
     writer({"type": "step_start", "name": name, "note": "generating answer"})
     draft = await _stream_answer(writer, name, stream_fn(state["query"], context))

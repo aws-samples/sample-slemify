@@ -6,7 +6,7 @@ A complete example of training and deploying domain-specific SLMs for Kubernetes
 
 ```
 k8s-autoscaling/
-├── auditor/          # Auditor model config (8B generation, config analysis)
+├── auditor/          # Auditor model config (30B-A3B MoE generation, config analysis)
 ├── triage/           # Triage model config (encoder classifier, intent routing)
 ├── risk-scorer/      # Risk scorer config (encoder regression, 0.0-1.0 risk score)
 ├── retriever/        # Retriever config (embedding, domain-tuned RAG vectors)
@@ -33,7 +33,7 @@ k8s-autoscaling/
 | Triage | encoder (768d) | `classification` — intent routing + confidence | ~25ms |
 | Risk Scorer | encoder (768d) | `scoring` — operational risk 0.0-1.0 | ~25ms |
 | Retriever | encoder (768d) | `embedding` — domain-tuned RAG vectors | ~25ms |
-| Auditor | 8B (q8_0) | `generation` — structured config analysis | ~14s streaming |
+| Auditor | 30B-A3B MoE (q4_k_m, 3.3B active/token) | `generation` — structured config analysis | ~22-42 tok/s decode |
 
 All run on Graviton CPUs with no GPU anywhere in the pipeline. The auditor is served *stock*: Slemify downloads the base model, converts it to GGUF, and quantizes it on CPU (no fine-tuning), and its domain knowledge comes from RAG at serving time. The encoder-family models do train, on CPU: triage and risk scorer fit a head in seconds, the retriever contrastively fine-tunes in a few minutes. (The demo also runs a stock cross-encoder *reranker* on CPU — that's a serving pattern, not a Slemify-trained model; see the repo FAQ on why reranking isn't a task.)
 

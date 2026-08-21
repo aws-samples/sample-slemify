@@ -24,6 +24,9 @@
 set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-slemify}"
+# Which orchestrator service to evaluate (override to point the eval at an
+# experimental deployment, e.g. a model-candidate A/B).
+ORCHESTRATOR_SVC="${ORCHESTRATOR_SVC:-k8s-autoscaling-orchestrator}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 EVAL_DIR="$HERE/../eval"
 RESULTS_DIR="$EVAL_DIR/results"
@@ -96,7 +99,7 @@ spec:
             - name: AWS_DEFAULT_REGION
               value: "eu-west-1"
             - name: ORCHESTRATOR_URL
-              value: "http://k8s-autoscaling-orchestrator.$NAMESPACE"
+              value: "http://$ORCHESTRATOR_SVC.$NAMESPACE"
             - name: EMBEDDING_URL
               value: "http://k8s-autoscaling-retriever-inference.$NAMESPACE:8080"
             - name: KNOWLEDGE_URL
