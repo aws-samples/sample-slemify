@@ -2,7 +2,7 @@ boto3>=1.43.67
 numpy<3
 torch==2.13.0
 scikit-learn==1.9.0
-sentence-transformers[train]==5.7.0
+sentence-transformers[train]==6.0.0
 optimum[onnxruntime]==2.1.0
 transformers==4.57.6
 accelerate==1.14.0
