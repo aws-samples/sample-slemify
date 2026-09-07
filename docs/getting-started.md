@@ -164,7 +164,7 @@ project:
     dangerous, and how to fix it.
 
 model:
-  base: ""  # HuggingFace causal LM. A small-MoE (Qwen3-30B-A3B-Instruct class)
+  base: ""  # HuggingFace causal LM. A small-MoE (30B-total / ~3B-active class)
             # is the measured best fit for structured reasoning on CPU; a dense
             # 7-8B is the cheaper starting point. See deep-dive/training.md,
             # "Choosing a base model".
@@ -216,7 +216,7 @@ slemify report --config auditor/expert.yaml
 The HTML report shows:
 - Accuracy per label (does the model classify correctly?)
 - Confidence calibration (when it says "high confidence," is it right?)
-- SLM vs LLM comparison (how does it compare to Sonnet on the same queries?)
+- SLM vs LLM comparison (how does it compare to the Bedrock LLM on the same queries?)
 - Latency benchmarks (TTFT, tokens/second, throughput)
 - Cost projections (what does this cost at 1K, 10K, 100K queries/day?)
 
@@ -246,7 +246,7 @@ This deploys:
 ```
 
 Open `http://localhost:8000` and paste a Kubernetes config. You'll see:
-1. Triage classification (1.5s)
+1. Triage classification (~25ms on CPU)
 2. RAG retrieval from the knowledge base
 3. Auditor analysis streaming token by token
 

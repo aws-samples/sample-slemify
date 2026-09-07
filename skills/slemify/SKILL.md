@@ -62,11 +62,11 @@ Look for these signals:
 
 **Example discovery conversation:**
 
-User: "We call Claude 10,000 times a day to classify support tickets into 7 categories, then route them to the right team."
+User: "We call an LLM API 10,000 times a day to classify support tickets into 7 categories, then route them to the right team."
 
 Agent response: "That's a strong SLM candidate. It's high volume, structured output (7 fixed categories), and the same pattern every time with different ticket content. A `task: classification` model — a frozen text encoder plus a small trained head, all on CPU — would handle this at ~25ms/query with no per-token cost and no GPU. Want me to set this up?"
 
-User: "We also use Claude to write personalized responses to each ticket."
+User: "We also use the LLM to write personalized responses to each ticket."
 
 Agent response: "That's not an SLM candidate. Each response is unique and requires creative language. Keep that on the LLM. But the classification step before it? That's where Slemify fits. The SLM classifies and routes, the LLM generates the response for the tickets that need one."
 

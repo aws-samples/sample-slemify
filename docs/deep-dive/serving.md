@@ -158,7 +158,21 @@ This is why quantization matters so much for CPU inference. A Q4_K_M model (1.8G
 For a deeper treatment of this topic, see [Silicon, Memory, and Modern Inference](https://cmanaha.github.io/tech-deep-dives/silicon-memory-inference/).
 </details>
 
-### CPU architectures for inference
+### When you still want a GPU
+
+The honest counterpart to the section above. CPU serving is not a claim that GPUs are unnecessary; it is a claim about placing each job on the hardware it is best at. Two facts frame the decision:
+
+1. **Adding CPU replicas scales throughput, not latency.** Three replicas serve 3x the requests at 3x the cost, but a single request is exactly as fast on three replicas as on one. If your problem is aggregate demand, replicas solve it linearly and cheaply. If your problem is the speed of one request, they do nothing.
+2. **Quality is not the differentiator on grounded tasks.** We measured this directly: running a frontier LLM (the demo's Bedrock escalation model) as the auditor through the identical pipeline (same retrieved context, same faithfulness gate, same judge) scored the same as the CPU-served SLM. On RAG-grounded domain work, the model is not the bottleneck; retrieval and evaluation quality are. See the FAQ in the root README.
+
+With those two in hand, the cases where a GPU genuinely earns its 3-10x hourly cost:
+
+- **A single-request latency floor CPUs cannot meet.** Prefill of a long input is the CPU's weak axis, and the arithmetic is unforgiving: at our measured cold prefill rates (see the latency tables below), a multi-thousand-token context takes minutes, and no number of replicas changes that. If your product needs the first token in low single-digit seconds on a *cold* long context, that budget is below what this CPU stack delivers, and accelerator-class hardware is the remaining lever (prefill is the compute-bound phase, which is exactly the axis GPUs are built for). Before switching, check whether a warm prefix cache (`--cache-prompt`), a shorter retrieved context, or streaming-with-progress solves the perceived latency instead — those solved it for this demo.
+- **Routinely long contexts.** Same mechanism at larger scale: if typical requests carry tens of thousands of context tokens, prefill dominates everything and CPU serving stops being practical for interactive use. Batch and offline processing remain fine.
+- **Sustained high aggregate throughput.** The crossover is a utilization question. A GPU instance costs 3-10x a comparable CPU instance per hour, so it wins on cost per token only while it stays busy. If your sustained demand would keep a GPU at high utilization around the clock, its tokens-per-dollar beats a fleet of CPU replicas. If traffic is bursty, spiky, or low, the CPU fleet wins: Spot pricing, per-replica scale-out and scale-in, and no idle accelerator burning money. Do the math with your own numbers: N CPU replicas at ~$117/mo each versus one GPU instance at its on-demand or reserved rate at your actual duty cycle.
+- **Training and fine-tuning.** Weight updates stay on GPUs. Slemify's design keeps them out of the serving path entirely (encoder training is CPU-cheap; generation is served stock), but if your accuracy work requires fine-tuning a generative model, that is GPU work.
+
+What does not belong on this list: quality on grounded, in-domain tasks (measured at parity above), and throughput you can reach with a handful of replicas (linear scaling covers it).
 
 Since inference is memory-bandwidth bound, the CPU architecture that moves data fastest wins. All three major server CPU families work well with llama.cpp, but they have different strengths:
 
@@ -187,6 +201,19 @@ Prompt throughput: ~220 tokens/sec. Generation: ~51 ms/token.
 | Short query + RAG (2 docs) | 500 | 2.3s | 15.3s | **17.6s** |
 | Medium query + RAG (3 docs) | 800 | 3.6s | 15.3s | **18.9s** |
 | Long query + RAG (5 docs) | 1,500 | 6.8s | 15.3s | **22.1s** |
+
+### 30B-A3B MoE at q4 (measured on the k8s-autoscaling auditor, 8 Graviton4 threads)
+
+These are production measurements from the running demo auditor (a 30B-total/3B-active MoE at q4_k_m, llama.cpp, 8-thread pod on a c8g instance), not projections. The MoE profile is the reverse of a dense model's: decode is cheap (only ~3.3B active parameters stream per token, so it decodes near dense-3B speed at dense-30B-class quality) while prefill is the weak axis (a long prompt touches most experts collectively, so the sparse-activation saving does not apply).
+
+| Phase | Measured | Notes |
+|-------|----------|-------|
+| Decode | ~26-39 tokens/sec | 1.6-2.3x faster than the dense 8B it replaced |
+| Cold prefill | ~22-50 tokens/sec | Starts near 50 tok/s, slows as the processed context grows |
+| Cold TTFT, 2,400-token RAG context | ~1.5-2 minutes | The prefill wall: dominated entirely by prompt processing |
+| Warm TTFT (prompt cache hit) | sub-second | `--cache-prompt` reuses the shared prefix across requests |
+
+The practical consequence: for RAG generation on an MoE, the first request against a given context pays a large prefill cost, and repeat or prefix-sharing requests are fast. Design around it: keep the retrieved context as small as the task allows (every chunk you retrieve is prefill you pay for), warm the common prompts at startup, and stream the answer so the user sees progress during decode. Adding replicas does not reduce this latency; it only adds parallel capacity (see "When you still want a GPU" above for when that trade stops working).
 
 ### Formula
 
@@ -460,6 +487,11 @@ If inference latency is higher than expected, check these in order:
 4. **Input length.** Longer inputs take longer to process (the prompt phase scales linearly with token count). If possible, trim or preprocess inputs before sending them to the model.
 5. **Thread count.** Check that threads match physical cores. Too many threads cause contention. Too few leave CPU capacity unused.
 6. **Instance generation.** Newer CPU generations have higher memory bandwidth, which directly translates to faster inference. Graviton4 (12x DDR5-5600 channels) provides roughly 75% more bandwidth than Graviton3. AMD EPYC Turin (12x DDR5-6000 channels, up to 614 GB/s per socket) and Intel Xeon 6 Granite Rapids (8x DDR5-6400 channels, with optional MRDIMM at 8800 MT/s) are also strong choices. If you're on older instance types, newer generations will be meaningfully faster for the same or lower cost. See [Silicon, Memory, and Modern Inference](https://cmanaha.github.io/tech-deep-dives/silicon-memory-inference/) for a detailed comparison.
+
+**Two levers we measured that do not help here, so you can skip them:**
+
+- **Speculative decoding** (a small draft model proposing tokens the big model verifies) gave zero speedup on the 30B-A3B MoE auditor: measured decode was ~38.7 tok/s with and without a 0.6B same-family draft model. The mechanism only pays when decode is expensive; an A3B MoE's decode is already cheap (~3.3B active params/token), so the draft-and-verify overhead cancels the tokens it saves. On a *dense* 8B+ model the math may differ; measure before adopting.
+- **Chunk-level KV cache reuse** (precomputing KV for RAG chunks and stitching them per query, CacheBlend-style) is not available on llama.cpp. llama.cpp reuses KV only for a shared *prefix* (`--cache-prompt`), which does not help when the retrieved chunks differ per query. The chunk-level techniques live in the vLLM/LMCache GPU stack. So on this stack, the way to attack prefill cost is smaller retrieved context and prefix warming, not KV engineering.
 
 ## The OpenAI-compatible API
 

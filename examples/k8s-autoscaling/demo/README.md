@@ -67,7 +67,7 @@ CPU; the gate is one LLM call per answer.
 | Retriever | Slemify retriever (`task: embedding`), ONNX | c8g (Graviton4 CPU) | Domain-tuned query/doc embeddings, 768d | **Yes** (fine-tuned encoder) |
 | Reranker | sentence-transformers cross-encoder | c8g (Graviton4 CPU) | Re-ranks candidates to the best few | No — stock |
 | OpenSearch | OpenSearch k-NN | CPU pod | Vector search over 3900+ doc chunks | — |
-| Auditor SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed | No — stock Qwen3-30B-A3B MoE at q4 (3.3B active params/token; only lever that raised accuracy AND speed together vs the previous dense 8B), grounded by RAG |
+| Auditor SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed | No — a stock 30B-A3B MoE at q4 (3.3B active params/token; only lever that raised accuracy AND speed together vs the previous dense 8B), grounded by RAG |
 | Faithfulness gate | Bedrock LLM | Managed | Judges whether the draft is supported by the evidence; drives accept/retry/escalate/abstain | No — LLM judge |
 | LLM API | Bedrock | Managed | Open-ended fallback / escalation | No — general model |
 
@@ -247,8 +247,9 @@ code does — say "checks with the LLM every time, but the check is cheaper than
 full answer" instead.
 
 What actually differs from calling Bedrock directly is *which part* of a Bedrock
-call you pay for. A direct answer pays for a full generation (Sonnet 4.5:
-$3/1M input tokens, $15/1M output tokens — output is 5x the price). The gate
+call you pay for. A direct answer pays for a full generation (at this demo's
+Bedrock escalation model's rate: $3/1M input tokens, $15/1M output tokens —
+output is 5x the price). The gate
 pays the same input-token cost (it needs the same query + evidence + docs to
 judge the draft) but only a short verdict on the output side. Using this demo's
 actual context sizes (`gate.py` caps context at 12k chars):
@@ -264,9 +265,22 @@ Solving for the SLM's first-pass rate `p` where expected cost breaks even with
 calling Bedrock directly: **p needs to be roughly 87-92%** (depending on how
 failures resolve) before this architecture is actually cheaper. Below that
 threshold, a failed query pays for the same Bedrock input tokens two or three
-times over, and CPU-first loses to just asking the LLM. This demo does not yet
-measure and publish that pass rate — it should, since it's the number the whole
-economic argument rests on, not an assumption.
+times over, and CPU-first loses to just asking the LLM. The demo now measures
+this: the orchestrator logs every gate check and outcome (see `agent/metrics.py`
+and `GET /stats`), and on the current 8-case eval the SLM passes 8/8 first
+try. On an earlier, deliberately adversarial 18-case eval the first-pass rate
+was 66.7% — which is what an adversarial mix does to the economics, and why the
+eval you measure against should reflect your real traffic, not your hardest
+cases.
+
+One more caveat the breakeven table hides: the "SLM fails, escalation passes"
+row assumes escalation succeeds where the SLM failed. Measured, that assumption
+is weak: running the frontier LLM as the auditor through the identical pipeline
+scored the same as the SLM, and missed the same cases the same way. On grounded
+in-domain questions, what the SLM cannot answer from the retrieved evidence, the
+LLM usually cannot either — the failures are retrieval and eval issues, not
+model-capability ones. Escalation still buys an honest second opinion and the
+abstain backstop; it does not buy a fix for hard cases.
 
 **When the pass rate is low, the fix is usually not more compute.** The cheapest
 lever is almost always what the SLM is *shown*, not the model itself: bad or
@@ -279,6 +293,17 @@ a bare retry at temperature 0), and only then (5) an actual model-capability
 ceiling. Fixes at levels 1-4 are one-time engineering costs that improve every
 future query for free; more Bedrock calls or GPU capacity are recurring costs
 that scale with volume forever.
+
+**Level 5 has a built-in test.** Before concluding the model is the ceiling, set
+`FORCE_LLM_AUDITOR=1` on the orchestrator and re-run the eval: every query is
+answered by the Bedrock LLM through the identical graph, retrieved context,
+gate, and judge. If the LLM fails the same cases, the problem is at levels 1-4
+and no amount of model upgrading will fix it. When we ran this control, the
+frontier LLM scored exactly the same as the CPU-served SLM — which is how we
+know the residual failures on the adversarial eval were retrieval and eval
+issues, not the SLM being too small. Run the comparison after any significant
+change; it is the cheapest way to keep "the SLM is as good as the LLM here" an
+evidence-backed claim instead of a hope.
 
 ## Remediation (read-only → approve → autopilot)
 
@@ -776,10 +801,11 @@ python3 scripts/index-knowledge.py --append --source=karpenter
 
 1. **Right tool for the right task** — fine-tune where it earns it (retrieval), serve stock where the base is already capable (the generation auditor + RAG, the reranker), use plain code for glue (routing, extraction), and use a capable LLM to check answers (the faithfulness gate) and for the open-ended tail
 2. CPUs handle the full AI pipeline: classification, retrieval, reranking, generation, and tool use — no GPUs serve traffic
-3. An agent can route, gather live evidence, and self-correct on CPU; the LLM checks every answer (it is not skipped), but a passing check costs less than a full LLM answer — see "Cost model" above for the breakeven math
-4. RAG + live cluster state grounds the response in real evidence (reduces hallucinations)
-5. A stock SLM grounded by RAG handles the domain answer on CPU; the custom training pays off in the retriever, not the generator
-6. A domain-tuned retriever roughly doubles RAG retrieval quality (see "Why a Domain-Tuned Retriever")
-7. Read-only tools make the agent useful on real clusters without the risk of mutating them
-8. When you do want it to act, remediation is layered — read-only, approve-to-apply, then autopilot — with the write path gated by a field-level schema (not per-scenario code), bounded to a named resource, and dry-run + verified (see PERMISSIONS.md)
-9. Kubernetes-native: Karpenter provisions nodes, KEDA scales, OpenSearch runs in-cluster — everything on Spot with consolidation
+3. **The CPU-served SLM is at parity with a frontier LLM on this workload — measured, not assumed.** Swapping the Bedrock escalation LLM in as the auditor through the identical pipeline scored the same and missed the same cases; the reproducible control is one env var (`FORCE_LLM_AUDITOR=1`). Quality is not what you give up by serving on CPU here
+4. An agent can route, gather live evidence, and self-correct on CPU; the LLM checks every answer (it is not skipped), but a passing check costs less than a full LLM answer — see "Cost model" above for the breakeven math
+5. RAG + live cluster state grounds the response in real evidence (reduces hallucinations)
+6. A stock SLM grounded by RAG handles the domain answer on CPU; the custom training pays off in the retriever, not the generator
+7. A domain-tuned retriever roughly doubles RAG retrieval quality (see "Why a Domain-Tuned Retriever")
+8. Read-only tools make the agent useful on real clusters without the risk of mutating them
+9. When you do want it to act, remediation is layered — read-only, approve-to-apply, then autopilot — with the write path gated by a field-level schema (not per-scenario code), bounded to a named resource, and dry-run + verified (see PERMISSIONS.md)
+10. Kubernetes-native: Karpenter provisions nodes, KEDA scales, OpenSearch runs in-cluster — everything on Spot with consolidation
