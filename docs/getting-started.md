@@ -216,7 +216,7 @@ slemify report --config auditor/expert.yaml
 The HTML report shows:
 - Accuracy per label (does the model classify correctly?)
 - Confidence calibration (when it says "high confidence," is it right?)
-- SLM vs LLM comparison (how does it compare to Sonnet on the same queries?)
+- SLM vs LLM comparison (how does it compare to the Bedrock LLM on the same queries?)
 - Latency benchmarks (TTFT, tokens/second, throughput)
 - Cost projections (what does this cost at 1K, 10K, 100K queries/day?)
 

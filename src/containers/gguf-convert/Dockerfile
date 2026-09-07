@@ -3,7 +3,7 @@
 FROM python:3.12-slim@sha256:46cb7cc2877e60fbd5e21a9ae6115c30ace7a077b9f8772da879e4590c18c2e3 AS builder
 
 # Pin llama.cpp to a specific release tag for reproducible conversions. Must be
-# recent enough to support the base architectures we convert (e.g. Qwen3).
+# recent enough to support the base model architectures we convert.
 ARG LLAMA_CPP_TAG=b9789
 
 RUN apt-get update \

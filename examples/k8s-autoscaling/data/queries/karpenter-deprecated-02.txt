@@ -1,4 +1,4 @@
-hi all, we're migrating from karpenter 0.37 to the latest version (1.0.x). Claude gave me this AWSNodeTemplate to replace our old one:
+hi all, we're migrating from karpenter 0.37 to the latest version (1.0.x). an AI assistant gave me this AWSNodeTemplate to replace our old one:
 
 ```yaml
 apiVersion: karpenter.k8s.aws/v1alpha1
@@ -36,6 +36,6 @@ when i try to apply this i get:
 error: unable to recognize "nodetemplate.yaml": no matches for kind "AWSNodeTemplate" in version "karpenter.k8s.aws/v1alpha1"
 ```
 
-i also tried `v1alpha5` for the apiVersion but same error. the CRDs are installed, i can see `ec2nodeclasses.karpenter.k8s.aws` when i run `kubectl get crd`. Claude said AWSNodeTemplate is the correct resource for defining node configuration in karpenter. what am i missing here?
+i also tried `v1alpha5` for the apiVersion but same error. the CRDs are installed, i can see `ec2nodeclasses.karpenter.k8s.aws` when i run `kubectl get crd`. the assistant said AWSNodeTemplate is the correct resource for defining node configuration in karpenter. what am i missing here?
 
 we're on EKS 1.30 and just upgraded karpenter from 0.37.0 to 1.0.2 using the helm chart. the old AWSNodeTemplate was working fine before the upgrade.
