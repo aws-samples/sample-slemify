@@ -1,106 +1,84 @@
 # Dependabot configuration.
 #
-# Takes explicit control of dependency PRs (previously there was no config, so
-# updates arrived as uncoordinated single-package PRs — which is how a
-# transformers-only bump to 5.x landed and broke the classifier-trainer image,
-# since it conflicts with the pinned sentence-transformers/optimum).
+# Posture (chosen deliberately for this public sample repo): keep automatic
+# SECURITY coverage, but stop the steady drip of routine version-bump PRs.
 #
-# Two deliberate choices below:
-#   1. Group the ML/training libraries so they are proposed together in one
-#      coordinated, testable PR instead of conflicting single-package PRs.
-#   2. Defer the transformers 5.x major. The ONNX exporter (optimum-onnx — the
-#      package optimum 2.x split the exporters into) is at 0.1.0 and still caps
-#      transformers <4.58.0; it has not caught up to transformers 5.x. We run
-#      the maximum compatible set (transformers 4.57.x, which already carries
-#      the 4.x ReDoS fixes; optimum 2.1.0 + optimum-onnx; torch 2.8 for the
-#      torch.load guard / CVE-2025-32434). The transformers 5.x RCE fixes
-#      (CVE-2026-1839 v5.0, CVE-2026-4372 v5.3 — both require loading an
-#      UNTRUSTED model checkpoint) are blocked upstream until optimum-onnx
-#      supports 5.x, so ignore transformers >=4.58.0 (the optimum-onnx cap) to
-#      stop recreated, unbuildable PRs. This pipeline only loads trusted, pinned
-#      models (BAAI/bge-* + its own artifacts), so that exposure is low. Lift this
-#      ignore once optimum-onnx supports transformers 5.x.
+#   - open-pull-requests-limit: 0 on the dependency ecosystems disables
+#     *version-update* PRs (the "bump X from 1.2 to 1.3" noise) while leaving
+#     Dependabot *security-update* PRs unaffected — those are governed
+#     separately and still open automatically when a CVE affects a pinned dep.
+#     Net effect: we hear about vulnerabilities, not about being one patch
+#     behind on boto3.
+#   - schedule is monthly (applies to security PR grouping/rebase cadence and
+#     to github-actions, the one ecosystem we still take routine updates on).
+#
+# History / why the ignores below still matter: this repo previously had no
+# config, so uncoordinated single-package PRs arrived (that is how a
+# transformers-only bump to 5.x landed and broke the classifier-trainer image
+# against the pinned sentence-transformers/optimum). The optimum-onnx exporter
+# (0.1.0) still caps transformers <4.58.0 and pins optimum~=2.1.0, so any bump
+# past those is unbuildable here. We run the maximum compatible set
+# (transformers 4.57.x with the 4.x ReDoS fixes; optimum 2.1.0 + optimum-onnx;
+# torch 2.8 for CVE-2025-32434). The transformers 5.x RCE fixes (CVE-2026-1839,
+# CVE-2026-4372 — both require loading an UNTRUSTED checkpoint) are blocked
+# upstream until optimum-onnx supports 5.x; this pipeline only loads trusted,
+# pinned models (BAAI/bge-* + its own artifacts), so exposure is low. The
+# ignores keep those specific caps in force even for security PRs so Dependabot
+# stops recreating unbuildable ones. Lift the ignores once optimum-onnx
+# supports transformers 5.x / optimum 2.2.
 version: 2
 updates:
-  # Encoder-head trainer (exact pins; the sensitive one).
+  # Encoder-head trainer (exact pins; the sensitive one). Security-only.
   - package-ecosystem: "pip"
     directory: "/src/containers/classifier-trainer"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    groups:
-      ml-training-stack:
-        patterns:
-          - "torch"
-          - "transformers"
-          - "sentence-transformers"
-          - "optimum*"
-          - "accelerate"
-          - "scikit-learn"
-          - "numpy"
-          - "onnx*"
+      interval: "monthly"
+    open-pull-requests-limit: 0
     ignore:
-      # optimum-onnx 0.1.0 (the ONNX exporter) caps transformers <4.58.0, so any
-      # bump to 4.58.0+ (including the 5.x line) is unbuildable here. Block the
-      # whole range, not just 5.x, so Dependabot stops proposing PRs that fail to
-      # install. Lift to track the cap once optimum-onnx supports newer ranges.
+      # optimum-onnx 0.1.0 caps transformers <4.58.0, so any bump to 4.58.0+
+      # (incl. the 5.x line) is unbuildable here — hold even for security PRs.
       - dependency-name: "transformers"
         versions: [">=4.58.0"]
-      # optimum-onnx 0.1.0 (the ONNX exporter) pins optimum~=2.1.0, so optimum
-      # 2.2.0 is unresolvable and breaks the build. Hold optimum at 2.1.x until
-      # optimum-onnx supports 2.2.0; lift alongside the transformers 5.x ignore.
+      # optimum-onnx 0.1.0 pins optimum~=2.1.0, so 2.2.0+ is unresolvable.
       - dependency-name: "optimum"
         versions: [">=2.2.0"]
 
-  # Data pipeline (range pins).
+  # Data pipeline (range pins). Security-only.
   - package-ecosystem: "pip"
     directory: "/src/containers/data-pipeline"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    groups:
-      data-pipeline-deps:
-        patterns:
-          - "*"
+      interval: "monthly"
+    open-pull-requests-limit: 0
 
-  # GGUF conversion (exact pins). Group so a torch/transformers/protobuf/
-  # sentencepiece bump lands as one coordinated PR instead of four
-  # conflicting single-package ones.
+  # GGUF conversion (exact pins). Security-only.
   - package-ecosystem: "pip"
     directory: "/src/containers/gguf-convert"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    groups:
-      gguf-convert-deps:
-        patterns:
-          - "*"
+      interval: "monthly"
+    open-pull-requests-limit: 0
 
-  # Classifier serving (range pins).
+  # Classifier serving (range pins). Security-only.
   - package-ecosystem: "pip"
     directory: "/src/containers/classifier-serving"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    groups:
-      classifier-serving-deps:
-        patterns:
-          - "*"
+      interval: "monthly"
+    open-pull-requests-limit: 0
 
-  # Go module (single go.mod at /src covers the CLI and its indirect deps).
+  # Go module (single go.mod at /src). Security-only.
   - package-ecosystem: "gomod"
     directory: "/src"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    groups:
-      go-deps:
-        patterns:
-          - "*"
+      interval: "monthly"
+    open-pull-requests-limit: 0
 
-  # Keep CI actions current (low volume, low risk).
+  # CI actions — low volume, low risk; keep routine updates but monthly and
+  # grouped so it is at most one quiet PR a month.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
