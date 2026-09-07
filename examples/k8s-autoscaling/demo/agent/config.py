@@ -50,6 +50,12 @@ MAX_TOOL_CALLS = 3
 # Retries the critic may request before escalating.
 MAX_CRITIC_RETRIES = 1
 
+# Control-experiment flag (NOT for production): when true, the LLM is the auditor
+# for every query instead of the SLM, so the same eval measures LLM-as-auditor
+# through the identical graph/context/gate/judge. Isolates whether hard cases are
+# an SLM-capability problem or a domain/agent/eval problem.
+FORCE_LLM_AUDITOR = os.environ.get("FORCE_LLM_AUDITOR", "").lower() in ("1", "true", "yes")
+
 # --- Tools ---
 # Read-only cluster tools are enabled by default; set TOOLS_ENABLED=false (or run
 # without cluster credentials) to answer from documentation only.

@@ -31,7 +31,7 @@ User question or YAML config
 Two specialists, one pipeline — and they use two different model families:
 - **Triage** (`task: classification`): a frozen encoder + logistic head that
   classifies intent in ~25ms. CPU-trained in seconds, deterministic.
-- **Auditor** (`task: generation`): an 8B causal LM served stock and grounded by
+- **Auditor** (`task: generation`): a causal LM (small-MoE, ~3B active params/token) served stock and grounded by
   RAG that produces structured config analysis, streamed.
 
 Both run on Graviton4 CPUs at inference time, and no GPU is used anywhere in the
@@ -164,10 +164,14 @@ project:
     dangerous, and how to fix it.
 
 model:
-  base: ""  # HuggingFace causal LM (8B recommended for structured reasoning)
-  # q8_0 held accuracy on this reasoning task in our eval; smaller quants lost
-  # calibration. Re-check your own scorecard before going lower.
-  quantize: q8_0
+  base: ""  # HuggingFace causal LM. A small-MoE (Qwen3-30B-A3B-Instruct class)
+            # is the measured best fit for structured reasoning on CPU; a dense
+            # 7-8B is the cheaper starting point. See deep-dive/training.md,
+            # "Choosing a base model".
+  # Quant tolerance is model-specific: the dense 8B we started with needed q8_0
+  # (smaller quants lost calibration), while the MoE that replaced it holds
+  # accuracy at q4_k_m. Re-check your own scorecard whenever either changes.
+  quantize: q4_k_m
 
 data:
   # Generation is served stock and grounded by RAG, so there is no synthetic data
@@ -181,7 +185,7 @@ Key choices:
   downloaded, converted to GGUF, and quantized on CPU (no fine-tuning), then
   served on CPU and grounded by RAG. Unlike triage, the auditor must *write* a
   report, which only a generative model can do.
-- **8B model**: large enough for structured reasoning with YAML output
+- **Small-MoE model**: stores 30B parameters of quality but activates only ~3B per token, so on CPU it answers better than a dense 8B while decoding faster — at the cost of more RAM. Start with a dense 7-8B if memory is tight; the eval scorecard decides (see [choosing a base model](deep-dive/training.md#choosing-a-base-model))
 - **`output_format: free_form`**: the auditor generates paragraphs, not labels
 - **no synthetic data or labels**: the auditor isn't trained; its knowledge comes from RAG at serving time
 

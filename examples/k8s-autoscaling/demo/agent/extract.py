@@ -96,6 +96,62 @@ def extract_namespace(text: str) -> str | None:
     return None
 
 
+# Keys that carry no domain meaning on their own — walking a manifest's spec
+# collects FIELD names worth defining, not structural/metadata noise.
+_GENERIC_KEYS = {
+    "apiversion", "kind", "metadata", "name", "namespace", "labels",
+    "annotations", "spec", "status", "key", "operator", "values", "value",
+    "tags", "matchlabels", "matchexpressions", "template", "items",
+    # Common-word leaf keys: not discriminative as a BM25 term, and their
+    # parent field's definition chunk (limits, resources, nodeClassRef)
+    # already covers them.
+    "cpu", "memory", "nodes", "group", "type", "target", "resource",
+}
+
+
+def manifest_fields(text: str) -> list[str]:
+    """Field names used by a pasted manifest, for field-aware retrieval.
+
+    Walks the YAML and collects the spec's field names (consolidateAfter,
+    minValues, limits, ...) so retrieval can fetch each field's authoritative
+    definition. Root cause this serves (proven, tmp/lessons-learned.md section
+    20): global top-k retrieval surfaces chunks that LOOK like the query
+    (example YAML, blogs) and can miss the one chunk that DEFINES a specific
+    field — the model then fabricates about that field. Order preserved from
+    the manifest; generic/structural keys skipped."""
+    import yaml as _yaml
+    manifest = extract_manifest(text)
+    if not manifest:
+        return []
+    fields, seen = [], set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                kl = str(k).lower()
+                if kl not in _GENERIC_KEYS and kl not in seen:
+                    seen.add(kl)
+                    fields.append(str(k))
+                walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    try:
+        for doc in _yaml.safe_load_all(manifest):
+            if isinstance(doc, dict):
+                walk(doc.get("spec", doc))
+    except Exception:
+        # Fall back to a key-looking-line scan; a malformed paste still names
+        # its fields even if it does not parse.
+        for m in re.finditer(r"^\s*([A-Za-z][A-Za-z0-9]*):", manifest, re.MULTILINE):
+            kl = m.group(1).lower()
+            if kl not in _GENERIC_KEYS and kl not in seen:
+                seen.add(kl)
+                fields.append(m.group(1))
+    return fields
+
+
 def is_operational(text: str) -> bool:
     low = text.lower()
     return any(sig in low for sig in _OPERATIONAL_SIGNALS)

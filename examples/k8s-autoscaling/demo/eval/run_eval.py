@@ -18,7 +18,13 @@ prints per-case regressions/improvements so a change that fixes one case and
 breaks another is caught immediately.
 
 Usage:
-  # port-forward the orchestrator first:
+  # PREFERRED — in-cluster (multi-minute escalate/abstain cases do not survive
+  # local port-forwards; see tmp/lessons-learned.md section 17):
+  ../scripts/run-eval-incluster.sh                 # full run, repeat=4
+  ../scripts/run-eval-incluster.sh --repeat 1      # quick smoke check
+  ../scripts/run-eval-incluster.sh --only drift,minvalues-valid
+
+  # Local (short runs only; port-forward the orchestrator first):
   #   kubectl port-forward -n slemify svc/k8s-autoscaling-orchestrator 8000:80
   python3 run_eval.py                      # run all cases, print scorecard
   python3 run_eval.py --save-baseline      # also store as the comparison baseline
@@ -297,11 +303,25 @@ def score_case(case: dict, result: dict) -> dict:
 # --- Runner ---
 
 def _aggregate(statuses: list) -> str:
-    """Collapse repeated-run statuses into one, breaking ties toward the worse
-    outcome so flaky cases are not reported as clean."""
+    """Collapse repeated-run statuses into one by MAJORITY vote.
+
+    Two deliberate choices, both learned the hard way (tmp/lessons-learned.md
+    section 19):
+    - "error" runs are infra failures (dropped connections, timeouts), not
+      model failures. They are excluded from the vote whenever at least one
+      run completed, so a flaky network cannot fail a healthy case. A case
+      where EVERY run errored is reported as error.
+    - Genuine ties (e.g. 2 pass / 2 fail at repeat=4) break toward the worse
+      outcome — a case that fails half the time is not a pass — but majority
+      wins otherwise: the old ties-to-worse-always rule marked a case that
+      passed 3/4 runs as FAIL, systematically undercounting a nondeterministic
+      model."""
     order = {"error": 0, "fail": 1, "partial": 2, "pass": 3}
+    scored = [s for s in statuses if s != "error"]
+    if not scored:
+        return "error"
     counts = {}
-    for s in statuses:
+    for s in scored:
         counts[s] = counts.get(s, 0) + 1
     best = max(counts.values())
     tied = [s for s, c in counts.items() if c == best]
@@ -309,17 +329,24 @@ def _aggregate(statuses: list) -> str:
 
 
 def run_case(case: dict, repeat: int) -> dict:
-    """Run a case `repeat` times; return aggregated status + per-run detail."""
-    runs, judges, secs = [], [], []
+    """Run a case `repeat` times; return aggregated status + per-run detail.
+
+    Every run's raw answer, model, status, and judge verdict are captured —
+    reading the actual answers (not just the grader's labels) is how both a
+    real regression and an eval mislabel were caught in the same session
+    (tmp/lessons-learned.md section 19). Never discard them."""
+    runs, judges, secs, answers, models = [], [], [], [], []
     last = {}
-    last_answer, last_model = "", ""
     for _ in range(repeat):
         t0 = time.perf_counter()
         try:
             result = query_agent(case["query"])
-            last_answer, last_model = result.get("answer", ""), result.get("model", "")
+            answers.append(result.get("answer", ""))
+            models.append(result.get("model", ""))
             sc = score_case(case, result)
         except Exception as e:
+            answers.append("")
+            models.append("")
             sc = {"status": "error", "checks": {}, "violations": [],
                   "judge": {"reason": str(e)[:160]}}
         secs.append(time.perf_counter() - t0)
@@ -327,21 +354,29 @@ def run_case(case: dict, repeat: int) -> dict:
         judges.append(sc.get("judge", {}))
         last = sc
     status = _aggregate(runs)
-    passes = sum(1 for s in runs if s == "pass")
+    scored = [s for s in runs if s != "error"]
+    passes = sum(1 for s in scored if s == "pass")
+    denom = len(scored) or repeat
+    last_answer = next((a for a in reversed(answers) if a), "")
+    last_model = next((m for m in reversed(models) if m), "")
     return {"id": case["id"], "topic": case.get("topic", ""),
-            "status": status, "runs": runs, "pass_rate": f"{passes}/{repeat}",
+            "status": status, "runs": runs, "pass_rate": f"{passes}/{denom}",
+            "errors": runs.count("error"),
             "violations": last.get("violations", []),
-            "judge": judges[-1], "seconds": round(sum(secs), 1),
-            "model": last_model, "answer": last_answer}
+            "judge": judges[-1], "judges": judges, "seconds": round(sum(secs), 1),
+            "model": last_model, "answer": last_answer, "answers": answers}
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cases", default=os.path.join(HERE, "cases.yaml"))
     ap.add_argument("--only", default="", help="comma-separated case ids to run")
-    ap.add_argument("--repeat", type=int, default=1,
-                    help="runs per case; status is the majority (ties -> worse). "
-                         "Use >1 to average out the auditor's run-to-run variance.")
+    ap.add_argument("--repeat", type=int, default=4,
+                    help="runs per case; status is the majority vote, infra "
+                         "errors excluded, genuine ties break toward worse. "
+                         "Default 4: repeat=2 was measurably too noisy to "
+                         "detect 1-2 case effects on this nondeterministic "
+                         "pipeline. Use 1 only for quick smoke checks.")
     ap.add_argument("--save-baseline", action="store_true")
     args = ap.parse_args()
 
@@ -375,13 +410,20 @@ def main():
           f"{counts['error']} error ===")
 
     scorecard = {"timestamp": datetime.now(timezone.utc).isoformat(),
-                 "orchestrator": ORCHESTRATOR_URL, "counts": counts,
-                 "n": n, "rows": rows}
+                 "orchestrator": ORCHESTRATOR_URL, "repeat": args.repeat,
+                 "counts": counts, "n": n, "rows": rows}
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = os.path.join(RESULTS_DIR, f"scorecard-{stamp}.json")
     with open(out, "w", encoding="utf-8") as f:
         json.dump(scorecard, f, indent=2)
     print(f"Wrote {out}")
+
+    # In-cluster runs have no shared filesystem: emit the full scorecard between
+    # markers on stdout so the wrapper script can extract it from the Job logs.
+    if os.environ.get("SCORECARD_STDOUT", "").lower() in ("1", "true", "yes"):
+        print("===SCORECARD_JSON_BEGIN===")
+        print(json.dumps(scorecard))
+        print("===SCORECARD_JSON_END===")
 
     # Diff vs baseline
     baseline_path = os.path.join(RESULTS_DIR, "baseline.json")
