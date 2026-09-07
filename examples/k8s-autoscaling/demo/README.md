@@ -67,7 +67,7 @@ CPU; the gate is one LLM call per answer.
 | Retriever | Slemify retriever (`task: embedding`), ONNX | c8g (Graviton4 CPU) | Domain-tuned query/doc embeddings, 768d | **Yes** (fine-tuned encoder) |
 | Reranker | sentence-transformers cross-encoder | c8g (Graviton4 CPU) | Re-ranks candidates to the best few | No — stock |
 | OpenSearch | OpenSearch k-NN | CPU pod | Vector search over 3900+ doc chunks | — |
-| Auditor SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed | No — stock Qwen3-30B-A3B MoE at q4 (3.3B active params/token; only lever that raised accuracy AND speed together vs the previous dense 8B), grounded by RAG |
+| Auditor SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed | No — a stock 30B-A3B MoE at q4 (3.3B active params/token; only lever that raised accuracy AND speed together vs the previous dense 8B), grounded by RAG |
 | Faithfulness gate | Bedrock LLM | Managed | Judges whether the draft is supported by the evidence; drives accept/retry/escalate/abstain | No — LLM judge |
 | LLM API | Bedrock | Managed | Open-ended fallback / escalation | No — general model |
 
@@ -247,8 +247,9 @@ code does — say "checks with the LLM every time, but the check is cheaper than
 full answer" instead.
 
 What actually differs from calling Bedrock directly is *which part* of a Bedrock
-call you pay for. A direct answer pays for a full generation (Sonnet 4.5:
-$3/1M input tokens, $15/1M output tokens — output is 5x the price). The gate
+call you pay for. A direct answer pays for a full generation (at this demo's
+Bedrock escalation model's rate: $3/1M input tokens, $15/1M output tokens —
+output is 5x the price). The gate
 pays the same input-token cost (it needs the same query + evidence + docs to
 judge the draft) but only a short verdict on the output side. Using this demo's
 actual context sizes (`gate.py` caps context at 12k chars):
@@ -800,7 +801,7 @@ python3 scripts/index-knowledge.py --append --source=karpenter
 
 1. **Right tool for the right task** — fine-tune where it earns it (retrieval), serve stock where the base is already capable (the generation auditor + RAG, the reranker), use plain code for glue (routing, extraction), and use a capable LLM to check answers (the faithfulness gate) and for the open-ended tail
 2. CPUs handle the full AI pipeline: classification, retrieval, reranking, generation, and tool use — no GPUs serve traffic
-3. **The CPU-served SLM is at parity with a frontier LLM on this workload — measured, not assumed.** Swapping Claude Sonnet 4.5 in as the auditor through the identical pipeline scored the same and missed the same cases; the reproducible control is one env var (`FORCE_LLM_AUDITOR=1`). Quality is not what you give up by serving on CPU here
+3. **The CPU-served SLM is at parity with a frontier LLM on this workload — measured, not assumed.** Swapping the Bedrock escalation LLM in as the auditor through the identical pipeline scored the same and missed the same cases; the reproducible control is one env var (`FORCE_LLM_AUDITOR=1`). Quality is not what you give up by serving on CPU here
 4. An agent can route, gather live evidence, and self-correct on CPU; the LLM checks every answer (it is not skipped), but a passing check costs less than a full LLM answer — see "Cost model" above for the breakeven math
 5. RAG + live cluster state grounds the response in real evidence (reduces hallucinations)
 6. A stock SLM grounded by RAG handles the domain answer on CPU; the custom training pays off in the retriever, not the generator

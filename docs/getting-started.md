@@ -164,7 +164,7 @@ project:
     dangerous, and how to fix it.
 
 model:
-  base: ""  # HuggingFace causal LM. A small-MoE (Qwen3-30B-A3B-Instruct class)
+  base: ""  # HuggingFace causal LM. A small-MoE (30B-total / ~3B-active class)
             # is the measured best fit for structured reasoning on CPU; a dense
             # 7-8B is the cheaper starting point. See deep-dive/training.md,
             # "Choosing a base model".
