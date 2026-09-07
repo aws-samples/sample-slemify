@@ -198,7 +198,12 @@ async def n_generate(state: AgentState) -> dict:
         writer({"type": "answer_reset", "reason": "refining"})
 
     unclassified = state.get("category", "unknown") in (None, "unknown")
-    if unclassified:
+    # Control-experiment switch: FORCE_LLM_AUDITOR makes the LLM the auditor for
+    # EVERY query (same graph, context, gate, and judge as the SLM path). Used to
+    # test whether the hard eval cases are an SLM-capability problem or a
+    # domain/agent/eval problem — if the LLM fails the same cases here, tuning the
+    # SLM is chasing the wrong layer. Not for production use.
+    if config.FORCE_LLM_AUDITOR or unclassified:
         name, stream_fn, used_llm = "LLM API (Bedrock fallback)", generation.stream_llm, True
         writer({"type": "model", "name": "Claude Sonnet 4.5 (Bedrock)"})
     else:
