@@ -246,7 +246,7 @@ This deploys:
 ```
 
 Open `http://localhost:8000` and paste a Kubernetes config. You'll see:
-1. Triage classification (1.5s)
+1. Triage classification (~25ms on CPU)
 2. RAG retrieval from the knowledge base
 3. Auditor analysis streaming token by token
 

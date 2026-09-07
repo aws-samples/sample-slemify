@@ -160,7 +160,7 @@ Generation no longer uses a GPU: it is downloaded, converted to GGUF, and quanti
 
 ## Examples
 
-- [K8s Autoscaling Auditor](examples/k8s-autoscaling/). Tiered SLM system: a triage classifier routes queries, an 8B auditor produces structured reasoning about Karpenter/KEDA/HPA misconfigurations
+- [K8s Autoscaling Auditor](examples/k8s-autoscaling/). Tiered SLM system: a triage classifier routes queries, a 30B-A3B MoE auditor (~3B active params/token, served on CPU) produces structured reasoning about Karpenter/KEDA/HPA misconfigurations
 - [K8s Autoscaling Risk Scorer](examples/k8s-autoscaling/risk-scorer/). A `task: scoring` encoder-head model that rates a config change's operational risk 0.0–1.0 on CPU — a cheap guardrail that auto-approves low-risk changes and escalates high-risk ones to the auditor
 - [K8s Autoscaling Retriever](examples/k8s-autoscaling/retriever/). A `task: embedding` model contrastively fine-tuned on in-domain (question, document) pairs — a domain-tuned RAG retriever that beats a stock encoder on recall, trained and served on CPU
 - [Support Ticket Extractor](examples/support-tickets/entity-extraction/). A `task: extraction` token tagger that pulls service, error, version, and environment entities out of free-form support tickets on CPU — and a worked demonstration of *when* extraction earns ML over a regex baseline (open-vocabulary prose) and when it doesn't (structured configs)
@@ -205,8 +205,11 @@ The reference serving deployment (llama.cpp on CPU) is included for validation a
 **Q: When should I use an SLM vs just calling an LLM API?**
 A: If the task is repetitive, structured, and runs more than ~1,000 times/day, or if data can't leave your VPC. Below that volume, an LLM API is simpler and fine. This threshold applies to the encoder-family tasks (classification, scoring, extraction, embedding) — training and serving them on CPU costs cents regardless of volume, so there's little downside to starting early. `task: generation` is a different calculation: you're comparing a self-hosted CPU (or GPU) deployment against an LLM API's per-token price, and that comparison only favors self-hosting past real volume (industry self-hosting break-even estimates for generative models commonly land in the millions of tokens/day). Below that, keep generation on the LLM API even if you've already adopted Slemify for routing/classification around it.
 
-**Q: Can a 3B model really match a frontier LLM?**
-A: For general tasks, no. For YOUR specific structured task with YOUR categories, a fine-tuned 3B model matches or beats general-purpose LLMs. [Salesforce's xLAM-2-8B](https://huggingface.co/Salesforce/Llama-xLAM-2-8b-fc-r) beat GPT-4o and Claude 3.5 at tool calling on the [Berkeley Function-Calling Leaderboard](https://gorilla.cs.berkeley.edu/leaderboard.html). Specialization beats size.
+**Q: Can a small model really match a frontier LLM?**
+A: For general, open-ended tasks, no. For a scoped task with the right grounding, yes, and we measured it rather than assuming it. In the k8s-autoscaling example we ran a control experiment: swap the CPU-served SLM auditor for Claude Sonnet 4.5 as the auditor, through the *identical* pipeline (same retrieved context, same faithfulness gate, same judge, same eval). The frontier LLM scored the same as the SLM. On the cases both missed, they missed the same way, which points at retrieval and eval quality as the bottleneck, not model capability. The demo keeps this experiment reproducible: set `FORCE_LLM_AUDITOR=1` on the orchestrator and re-run the eval to compare any change against the LLM baseline yourself. External evidence agrees: [Salesforce's xLAM-2-8B](https://huggingface.co/Salesforce/Llama-xLAM-2-8b-fc-r) beat GPT-4o and Claude 3.5 at tool calling on the [Berkeley Function-Calling Leaderboard](https://gorilla.cs.berkeley.edu/leaderboard.html). Specialization plus grounding beats size.
+
+**Q: If adding CPU replicas gives me the throughput, when would I still want a GPU?**
+A: Replicas scale *throughput* linearly (3 replicas = 3x requests at 3x cost), but they never make a *single request* faster. That distinction decides it. A GPU earns its 3-10x hourly premium in three situations: (1) a single-request latency floor CPUs cannot meet, which in practice means cold prefill of long contexts (on the demo's MoE auditor, a 2,400-token RAG context takes 1.5-2 minutes of prompt processing cold, sub-second warm); (2) sustained aggregate demand high enough to keep a GPU busy around the clock, where its tokens-per-dollar beats a fleet of CPU replicas — this is a utilization crossover you should compute with your own traffic, not a rule; and (3) training and fine-tuning, which stay on GPUs. What a GPU does *not* buy on grounded, in-domain tasks is quality (see the previous question — measured at parity). Bursty or modest traffic, output-heavy tasks, and anything a warm prompt cache serves fast are the CPU fleet's home turf. See [When you still want a GPU](docs/deep-dive/serving.md#when-you-still-want-a-gpu) for the full breakdown.
 
 **Q: Does fine-tuning always improve quality? When doesn't it help?**
 A: No, and Slemify is deliberate about this. Fine-tuning helps most when the model has to learn something it doesn't already know, and it backfires when the model already has the skill and only lacks the facts:
@@ -246,7 +249,7 @@ Or reference the skill directly:
 
 The skill includes templates for two patterns:
 - **Router Agent** (`task: classification`): a CPU encoder classifier for fast routing and intent decisions
-- **Analyst Agent** (`task: generation`, 7-8B): structured reasoning grounded by RAG
+- **Analyst Agent** (`task: generation`, dense 7-8B or small-MoE): structured reasoning grounded by RAG
 
 ## References
 
