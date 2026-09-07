@@ -205,7 +205,7 @@ async def n_generate(state: AgentState) -> dict:
     # SLM is chasing the wrong layer. Not for production use.
     if config.FORCE_LLM_AUDITOR or unclassified:
         name, stream_fn, used_llm = "LLM API (Bedrock fallback)", generation.stream_llm, True
-        writer({"type": "model", "name": "Claude Sonnet 4.5 (Bedrock)"})
+        writer({"type": "model", "name": "LLM (Bedrock)"})
     else:
         name, stream_fn, used_llm = "Auditor SLM (30B-A3B MoE, CPU)", generation.stream_slm, False
         writer({"type": "model", "name": "Auditor SLM (30B-A3B MoE, CPU)"})
@@ -292,7 +292,7 @@ async def n_escalate(state: AgentState) -> dict:
     writer = get_stream_writer()
     context = _build_context(state)
     writer({"type": "answer_reset", "reason": "escalating"})
-    writer({"type": "model", "name": "Claude Sonnet 4.5 (Bedrock)"})
+    writer({"type": "model", "name": "LLM (Bedrock)"})
     writer({"type": "step_start", "name": "LLM API (Bedrock escalation)", "note": "CPU answer not supported \u2014 escalating"})
     await _stream_answer(writer, "LLM API (Bedrock escalation)", generation.stream_llm(state["query"], context))
     return {"used_llm": True}
@@ -306,7 +306,7 @@ async def n_abstain(state: AgentState) -> dict:
     writer = get_stream_writer()
     context = _build_context(state)
     writer({"type": "answer_reset", "reason": "calibrating"})
-    writer({"type": "model", "name": "Claude Sonnet 4.5 (Bedrock)"})
+    writer({"type": "model", "name": "LLM (Bedrock)"})
     writer({"type": "step_start", "name": "Calibrated answer (LLM)",
             "note": "evidence did not fully support the draft \u2014 answering with calibrated confidence"})
     await _stream_answer(writer, "Calibrated answer (LLM)",
