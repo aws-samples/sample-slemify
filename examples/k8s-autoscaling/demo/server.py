@@ -81,13 +81,12 @@ async def warmup():
         )
     for (name, _), r in zip(cpu_pods, results):
         print(f"  Warmup {name}: {'ok' if not isinstance(r, Exception) else f'failed ({r})'}")
-    loop = asyncio.get_event_loop()
     warm = [("embedding", lambda: retrieval.embed_query("warmup"))]
     if config.RERANK == "on":
         warm.append(("reranker", lambda: retrieval.rerank_docs("warmup", ["warmup doc"], 1)))
     for name, fn in warm:
         try:
-            await loop.run_in_executor(None, fn)
+            await asyncio.to_thread(fn)
             print(f"  Warmup {name}: ok")
         except Exception as e:
             print(f"  Warmup {name}: failed ({e})")
@@ -100,11 +99,28 @@ async def warmup():
 async def query_endpoint(q: Query):
     async def event_stream():
         t0 = time.perf_counter()
+        # One meter per query. Every Bedrock call site charges it (through the
+        # context variable, copied into worker threads by asyncio.to_thread),
+        # and step_done events feed the per-step timings.
+        meter = metrics.open_meter()
+        escalated = False
         # stream_mode="custom" yields exactly the dicts each node writes, so the
         # UI's SSE contract is preserved without LangChain message plumbing.
         async for event in agent.astream({"query": q.text, "autopilot": q.autopilot}, stream_mode="custom"):
+            if event.get("type") == "step_done":
+                meter.step(event.get("name", ""), int(event.get("ms", 0)))
+            elif event.get("type") == "answer_reset" and event.get("reason") == "escalating":
+                escalated = True
             yield f"data: {json.dumps(event)}\n\n"
-        yield sse("total", ms=round((time.perf_counter() - t0) * 1000))
+        total_ms = round((time.perf_counter() - t0) * 1000)
+        cost = meter.summary()
+        metrics.record_query(config.seats(), meter, total_ms, escalated)
+        # The scoreboard row for this query, so the UI and the eval can show
+        # what it cost without scraping logs.
+        yield sse("cost", usd=cost["usd"], bedrock_calls=cost["bedrock_calls"],
+                  tokens_in=cost["tokens_in"], tokens_out=cost["tokens_out"],
+                  by_purpose=cost["by_purpose"], seats=config.seats())
+        yield sse("total", ms=total_ms)
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -143,15 +159,14 @@ async def apply_endpoint(req: ApplyRequest):
             yield sse("response", text="Apply is disabled on this server.")
             yield "data: [DONE]\n\n"
             return
-        loop = asyncio.get_event_loop()
         yield sse("step_start", name="Apply fix", note=f"{req.kind} {req.target}: {req.field} -> {req.value}")
         t = time.perf_counter()
-        result = await loop.run_in_executor(None, toolclient.apply_fix, req.kind, req.target, req.field, req.value)
+        result = await asyncio.to_thread(toolclient.apply_fix, req.kind, req.target, req.field, req.value)
         yield sse("step_done", name="Apply fix", ms=round((time.perf_counter() - t) * 1000), detail=result["message"])
         if result["ok"]:
             yield sse("step_start", name="Verify (CPU)", note=f"re-checking {req.target}")
             t = time.perf_counter()
-            check = await loop.run_in_executor(None, toolclient.verify_fix, req.kind, req.target, req.field, req.value)
+            check = await asyncio.to_thread(toolclient.verify_fix, req.kind, req.target, req.field, req.value)
             yield sse("step_done", name="Verify (CPU)", ms=round((time.perf_counter() - t) * 1000), detail=check["message"])
             status = "Applied and verified" if check["ok"] else "Applied, but verification failed"
             yield sse("response", text=f"**{status}.** {check['message']}")

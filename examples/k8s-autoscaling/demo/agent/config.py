@@ -75,6 +75,39 @@ GATE_MODEL = os.environ.get("GATE_MODEL", LLM_MODEL)
 BEDROCK_EMBED_MODEL = os.environ.get("BEDROCK_EMBED_MODEL", "amazon.titan-embed-text-v2:0")
 BEDROCK_EMBED_DIM = int(os.environ.get("BEDROCK_EMBED_DIM", "1024"))
 
+# --- Cost accounting (the scoreboard) ---
+# USD per 1M tokens, (input, output), matched by substring of the model id.
+# List prices at time of writing; override with BEDROCK_PRICE_<NAME>_IN/OUT or
+# add rows for other models. Only Bedrock is metered per query. CPU pods are
+# capacity you pay for by the hour whether or not a query arrives, so their
+# cost is reported separately (CPU_POOL_USD_PER_HOUR, informational) and never
+# folded into the per-query number. Mixing the two would hide the difference
+# between a variable cost and a fixed one, which is the actual trade-off.
+_PRICE_TABLE = {
+    "sonnet": (3.00, 15.00),
+    "haiku": (0.80, 4.00),
+    "titan-embed": (0.02, 0.0),
+}
+for _name in list(_PRICE_TABLE):
+    _in = os.environ.get(f"BEDROCK_PRICE_{_name.upper().replace('-', '_')}_IN")
+    _out = os.environ.get(f"BEDROCK_PRICE_{_name.upper().replace('-', '_')}_OUT")
+    if _in or _out:
+        _PRICE_TABLE[_name] = (float(_in or _PRICE_TABLE[_name][0]),
+                               float(_out or _PRICE_TABLE[_name][1]))
+
+
+def price_per_million(model_id: str) -> tuple[float, float]:
+    """(input, output) USD per 1M tokens for a Bedrock model id; (0, 0) if unknown."""
+    low = model_id.lower()
+    for key, prices in _PRICE_TABLE.items():
+        if key in low:
+            return prices
+    return (0.0, 0.0)
+
+
+# Informational: what the CPU node pool costs per hour, for the worksheet.
+CPU_POOL_USD_PER_HOUR = float(os.environ.get("CPU_POOL_USD_PER_HOUR", "0") or 0)
+
 # --- Retrieval ---
 # Wide candidate pools give the reranker a real set to choose from; dense (kNN)
 # captures semantics, lexical (BM25) catches exact identifiers (API versions,

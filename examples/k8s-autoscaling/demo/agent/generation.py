@@ -7,6 +7,7 @@ import json
 import httpx
 
 from . import config
+from . import metrics
 from . import prompts
 
 
@@ -61,7 +62,7 @@ async def propose_fix(prompt: str, json_schema: dict) -> dict | None:
 
 async def stream_llm(text: str, context: str = ""):
     """Stream tokens from the Bedrock LLM (Converse API)."""
-    async for tok in _converse_stream(prompts.llm_prompt(text, context)):
+    async for tok in _converse_stream(prompts.llm_prompt(text, context), "analyst"):
         yield tok
 
 
@@ -69,22 +70,25 @@ async def stream_calibrated(text: str, context: str = "", reason: str = ""):
     """Stream a calibrated, abstention-aware answer when the gate could not
     confirm the draft (the top-of-ladder LLM answer included). Asserts only what
     the evidence supports and flags what it could not verify."""
-    async for tok in _converse_stream(prompts.calibration_prompt(text, context, reason)):
+    async for tok in _converse_stream(prompts.calibration_prompt(text, context, reason), "calibrate"):
         yield tok
 
 
-async def _converse_stream(user_content: str):
+async def _converse_stream(user_content: str, purpose: str):
     resp = config.bedrock.converse_stream(
         modelId=config.LLM_MODEL,
         messages=[{"role": "user", "content": [{"text": user_content}]}],
         inferenceConfig={"maxTokens": 2048, "temperature": 0.2},
     )
-    loop = asyncio.get_event_loop()
     stream_iter = iter(resp["stream"])
     while True:
-        event = await loop.run_in_executor(None, lambda: next(stream_iter, None))
+        event = await asyncio.to_thread(next, stream_iter, None)
         if event is None:
             break
         delta = event.get("contentBlockDelta", {}).get("delta", {})
         if "text" in delta:
             yield delta["text"]
+        # The stream ends with a metadata event carrying token usage.
+        if "metadata" in event:
+            metrics.charge(config.LLM_MODEL, purpose,
+                           *metrics.usage_from_converse(event["metadata"]))

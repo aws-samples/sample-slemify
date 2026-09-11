@@ -20,6 +20,7 @@ import httpx
 
 from . import config
 from . import extract
+from . import metrics
 from . import prompts
 
 _VALID_CATEGORIES = {
@@ -68,6 +69,7 @@ def _classify_llm(text: str) -> str:
         messages=[{"role": "user", "content": [{"text": prompts.triage_prompt(text)}]}],
         inferenceConfig={"maxTokens": 32, "temperature": 0},
     )
+    metrics.charge(config.LLM_MODEL, "triage", *metrics.usage_from_converse(resp))
     return resp["output"]["message"]["content"][0]["text"]
 
 
@@ -105,6 +107,7 @@ def classify_intent(text: str) -> str:
             messages=[{"role": "user", "content": [{"text": _INTENT_PROMPT.format(text=text[:2000])}]}],
             inferenceConfig={"maxTokens": 5, "temperature": 0},
         )
+        metrics.charge(config.LLM_MODEL, "intent", *metrics.usage_from_converse(resp))
         out = resp["output"]["message"]["content"][0]["text"].lower()
         return "action" if re.search(r"\baction\b", out) else "answer"
     except Exception:

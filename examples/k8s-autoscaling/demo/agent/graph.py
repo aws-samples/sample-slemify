@@ -98,10 +98,9 @@ async def _stream_answer(writer, name: str, token_stream) -> str:
 
 async def n_triage(state: AgentState) -> dict:
     writer = get_stream_writer()
-    loop = asyncio.get_event_loop()
     writer({"type": "step_start", "name": LBL_TRIAGE, "note": "classifying intent"})
     t = time.perf_counter()
-    result = await loop.run_in_executor(None, classify.classify, state["query"])
+    result = await asyncio.to_thread(classify.classify, state["query"])
     cat = result["category"].replace("_", " ")
     detail = (f"off-topic \u00b7 {result['confidence']} confidence \u2192 reject"
               if result["category"] == "noise"
@@ -120,10 +119,9 @@ async def n_intent(state: AgentState) -> dict:
     """Did the user explicitly ask to act on the live cluster? If so (and tools
     are available), queue the cluster tools; otherwise stay doc-first."""
     writer = get_stream_writer()
-    loop = asyncio.get_event_loop()
     writer({"type": "step_start", "name": LBL_INTENT, "note": "answer from docs, or act on the cluster?"})
     t = time.perf_counter()
-    intent = await loop.run_in_executor(None, classify.classify_intent, state["query"])
+    intent = await asyncio.to_thread(classify.classify_intent, state["query"])
     use_tools = intent == "action" and toolclient.available()
     pending = extract.select_cluster_tools(state["query"]) if use_tools else []
     detail = ("explicit cluster request \u2192 " + ", ".join(pending)) if pending else "answer from documentation"
@@ -134,7 +132,6 @@ async def n_intent(state: AgentState) -> dict:
 async def n_gather(state: AgentState) -> dict:
     """Run the queued read-only cluster tools and collect their evidence."""
     writer = get_stream_writer()
-    loop = asyncio.get_event_loop()
     results = list(state.get("tool_results", []))
     for tool in state.get("pending_tools", []):
         if len(results) >= config.MAX_TOOL_CALLS:
@@ -142,7 +139,7 @@ async def n_gather(state: AgentState) -> dict:
         args = extract.extract_args(state["query"], tool)
         writer({"type": "step_start", "name": f"Tool \u00b7 {tool}", "note": extract.args_summary(tool, args)})
         t = time.perf_counter()
-        output = await loop.run_in_executor(None, toolclient.run_tool, tool, args)
+        output = await asyncio.to_thread(toolclient.run_tool, tool, args)
         writer({"type": "step_done", "name": f"Tool \u00b7 {tool}", "ms": _ms(t), "detail": tools.tool_detail(output)})
         results.append({"tool": tool, "args": args, "output": output})
     return {"tool_results": results, "pending_tools": []}
@@ -153,27 +150,25 @@ async def n_lint(state: AgentState) -> dict:
     if not extract.looks_like_yaml(state["query"]):
         return {}
     writer = get_stream_writer()
-    loop = asyncio.get_event_loop()
     writer({"type": "step_start", "name": "Config validator (CPU)", "note": "linting pasted manifest"})
     t = time.perf_counter()
-    result = await loop.run_in_executor(None, validate_config, {"yaml": extract.extract_manifest(state["query"])})
+    result = await asyncio.to_thread(validate_config, {"yaml": extract.extract_manifest(state["query"])})
     writer({"type": "step_done", "name": "Config validator (CPU)", "ms": _ms(t), "detail": result})
     return {"evidence": [f"[validate_config] {result}"]}
 
 
 async def n_retrieve(state: AgentState) -> dict:
     writer = get_stream_writer()
-    loop = asyncio.get_event_loop()
     query = state["query"]
     broaden = state.get("broaden", False)
     writer({"type": "step_start", "name": LBL_EMBED, "note": "embedding query"})
     t = time.perf_counter()
-    embedding = await loop.run_in_executor(None, retrieval.embed_query, query)
+    embedding = await asyncio.to_thread(retrieval.embed_query, query)
     writer({"type": "step_done", "name": LBL_EMBED, "ms": _ms(t), "detail": LBL_EMBED_DETAIL})
 
     writer({"type": "step_start", "name": "OpenSearch (vector DB)", "note": "hybrid k-NN + BM25"})
     t = time.perf_counter()
-    candidates = await loop.run_in_executor(None, retrieval.hybrid_candidates, embedding, query, broaden)
+    candidates = await asyncio.to_thread(retrieval.hybrid_candidates, embedding, query, broaden)
     writer({"type": "step_done", "name": "OpenSearch (vector DB)", "ms": _ms(t), "detail": f"{len(candidates)} candidates"})
 
     keep = config.KEEP_DOCS + (config.BROADEN_EXTRA if broaden else 0)
@@ -181,7 +176,7 @@ async def n_retrieve(state: AgentState) -> dict:
             else f"scoring {len(candidates)} \u2192 top {keep}")
     writer({"type": "step_start", "name": LBL_RERANK, "note": note})
     t = time.perf_counter()
-    docs = await loop.run_in_executor(None, retrieval.rerank_docs, query[:config.RERANK_QUERY_CHARS], candidates, keep)
+    docs = await asyncio.to_thread(retrieval.rerank_docs, query[:config.RERANK_QUERY_CHARS], candidates, keep)
     writer({"type": "step_done", "name": LBL_RERANK, "ms": _ms(t), "detail": f"kept top {len(docs)}"})
 
     # Field-aware guarantee for pasted configs: similarity ranking can bury the
@@ -194,7 +189,7 @@ async def n_retrieve(state: AgentState) -> dict:
         writer({"type": "step_start", "name": "Field definitions (OpenSearch)",
                 "note": f"authoritative docs for: {', '.join(fields[:6])}"})
         t = time.perf_counter()
-        extra = await loop.run_in_executor(None, retrieval.field_definition_docs, fields, docs)
+        extra = await asyncio.to_thread(retrieval.field_definition_docs, fields, docs)
         writer({"type": "step_done", "name": "Field definitions (OpenSearch)", "ms": _ms(t),
                 "detail": f"added {len(extra)} definition chunk(s)" if extra else "already covered"})
         docs = docs + extra
@@ -238,18 +233,17 @@ async def n_critic(state: AgentState) -> dict:
     accept, retry a deprecated fix, gather live evidence for a runtime claim, or
     escalate to the LLM."""
     writer = get_stream_writer()
-    loop = asyncio.get_event_loop()
     draft = state.get("draft", "")
     context = _build_context(state)
     used_llm = state.get("used_llm", False)
     attempts = state.get("attempts", 0)
     writer({"type": "step_start", "name": "Faithfulness gate (LLM)", "note": "is the draft supported by the evidence?"})
     t = time.perf_counter()
-    fix_issues = await loop.run_in_executor(None, validate_draft_fix, draft)
+    fix_issues = await asyncio.to_thread(validate_draft_fix, draft)
     # Gate every answer, including the escalated LLM's: the top of the ladder is
     # not exempt. If even the LLM answer isn't supported, we abstain rather than
     # ship a confidently-wrong answer.
-    escalate, reason = await loop.run_in_executor(None, gate.llm_gate, state["query"], draft, context)
+    escalate, reason = await asyncio.to_thread(gate.llm_gate, state["query"], draft, context)
 
     passed = (not escalate) and (not fix_issues)
     can_retry = attempts <= config.MAX_CRITIC_RETRIES
@@ -332,7 +326,7 @@ async def n_abstain(state: AgentState) -> dict:
     return {}
 
 
-async def _find_fix(state: AgentState, writer, loop) -> dict | None:
+async def _find_fix(state: AgentState, writer) -> dict | None:
     """Two ways to find a fix, in order:
       1. detect_remediation: cheap, evidence-checked heuristics for the known
          problem shapes this demo ships scenarios for (no model call).
@@ -346,11 +340,11 @@ async def _find_fix(state: AgentState, writer, loop) -> dict | None:
     summary, manual}. Returns None if no fix is found or a proposal fails to
     validate -- never a best-effort guess.
     """
-    rem = await loop.run_in_executor(None, toolclient.detect_remediation, state["query"])
+    rem = await asyncio.to_thread(toolclient.detect_remediation, state["query"])
     if rem:
         return rem
 
-    target_info = await loop.run_in_executor(None, toolclient.named_target, state["query"])
+    target_info = await asyncio.to_thread(toolclient.named_target, state["query"])
     if not target_info:
         return None
     kind, target = target_info["kind"], target_info["target"]
@@ -366,7 +360,7 @@ async def _find_fix(state: AgentState, writer, loop) -> dict | None:
                 "detail": "no safe fix proposed"})
         return None
     field, value = proposal.get("field", ""), proposal.get("value", "")
-    plan = await loop.run_in_executor(None, toolclient.plan_fix, kind, target, field, value)
+    plan = await asyncio.to_thread(toolclient.plan_fix, kind, target, field, value)
     if not plan.get("ok"):
         writer({"type": "step_done", "name": "Fix proposal (Analyst SLM, CPU)", "ms": _ms(t),
                 "detail": f"proposal rejected by schema: {plan.get('message')}"})
@@ -390,8 +384,7 @@ async def n_remediate(state: AgentState) -> dict:
     what this can ever touch and why.
     """
     writer = get_stream_writer()
-    loop = asyncio.get_event_loop()
-    rem = await _find_fix(state, writer, loop)
+    rem = await _find_fix(state, writer)
     if not rem:
         return {}
     kind, target, field, value = rem["kind"], rem["target"], rem["field"], rem["value"]
@@ -407,14 +400,14 @@ async def n_remediate(state: AgentState) -> dict:
         f"({rem['summary']}); it dry-runs first, then I re-read `{target}` to verify.")})
     writer({"type": "step_start", "name": "Apply fix (autopilot)", "note": rem["summary"]})
     t = time.perf_counter()
-    result = await loop.run_in_executor(None, toolclient.apply_fix, kind, target, field, value)
+    result = await asyncio.to_thread(toolclient.apply_fix, kind, target, field, value)
     writer({"type": "step_done", "name": "Apply fix (autopilot)", "ms": _ms(t), "detail": result["message"]})
     if not result["ok"]:
         writer({"type": "response", "text": f"**Autopilot could not apply the fix:** {result['message']}"})
         return {}
     writer({"type": "step_start", "name": "Verify (CPU)", "note": f"re-checking {target}"})
     t = time.perf_counter()
-    check = await loop.run_in_executor(None, toolclient.verify_fix, kind, target, field, value)
+    check = await asyncio.to_thread(toolclient.verify_fix, kind, target, field, value)
     writer({"type": "step_done", "name": "Verify (CPU)", "ms": _ms(t), "detail": check["message"]})
     status = "applied and verified" if check["ok"] else "applied, but verification failed"
     writer({"type": "response", "text": f"**Autopilot {status}.** {check['message']}"})

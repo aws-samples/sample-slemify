@@ -101,6 +101,24 @@ changed. Step names in the UI and logs say who actually filled each seat.
 Both indexes come from the same corpus; build the Bedrock one with
 `scripts/index-knowledge.py --embedder=bedrock`.
 
+### The scoreboard
+
+Every query is metered: each Bedrock call records its model, purpose (triage,
+intent, embed, gate, analyst, calibrate) and token usage, priced from a small
+table in `agent/config.py` (list prices; override with
+`BEDROCK_PRICE_<MODEL>_IN/OUT`), and every step's wall-clock is kept. The
+stream ends with a `cost` event carrying the query's USD and tokens, and
+`GET /stats` aggregates per seat configuration: queries seen, Bedrock $/query
+(mean and p50), total latency p50/p95, escalation rate, per-step p50.
+`make eval` prints one scoreboard row (quality, Bedrock $/query, p50 latency)
+for the active seats; `make scoreboard` prints the live aggregate.
+
+Only Bedrock is metered per query. CPU pods are capacity billed by the hour
+whether or not a query arrives, so their cost is reported separately
+(`CPU_POOL_USD_PER_HOUR`, informational) and never folded into the per-query
+number. Keeping the variable cost and the fixed cost apart is the point: that
+difference is the trade-off you are actually making when you move a seat.
+
 ## Pods & How They Interact
 
 Every model runs in its own pod; the orchestrator holds no model and is a thin

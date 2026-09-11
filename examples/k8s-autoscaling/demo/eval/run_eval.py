@@ -129,6 +129,7 @@ def _query_once(text: str) -> dict:
     answer is scored.
     """
     triage, model, buf = "", "", []
+    cost, total_ms = {}, None
     autopilot = os.environ.get("EVAL_AUTOPILOT", "false").lower() in ("1", "true", "yes")
     with httpx.Client(timeout=300) as c:
         with c.stream("POST", f"{ORCHESTRATOR_URL}/query",
@@ -154,7 +155,12 @@ def _query_once(text: str) -> dict:
                     buf = []
                 elif t == "step_done" and "Triage" in ev.get("name", ""):
                     triage = ev.get("detail", "")
-    return {"triage": triage, "model": model, "answer": "".join(buf).strip()}
+                elif t == "cost":
+                    cost = ev
+                elif t == "total":
+                    total_ms = ev.get("ms")
+    return {"triage": triage, "model": model, "answer": "".join(buf).strip(),
+            "usd": cost.get("usd"), "seats": cost.get("seats"), "total_ms": total_ms}
 
 
 # --- Judge ---
@@ -336,6 +342,7 @@ def run_case(case: dict, repeat: int) -> dict:
     real regression and an eval mislabel were caught in the same session
     (tmp/lessons-learned.md section 19). Never discard them."""
     runs, judges, secs, answers, models = [], [], [], [], []
+    usds, totals, seats = [], [], None
     last = {}
     for _ in range(repeat):
         t0 = time.perf_counter()
@@ -343,6 +350,11 @@ def run_case(case: dict, repeat: int) -> dict:
             result = query_agent(case["query"])
             answers.append(result.get("answer", ""))
             models.append(result.get("model", ""))
+            if result.get("usd") is not None:
+                usds.append(result["usd"])
+            if result.get("total_ms") is not None:
+                totals.append(result["total_ms"])
+            seats = result.get("seats") or seats
             sc = score_case(case, result)
         except Exception as e:
             answers.append("")
@@ -364,6 +376,9 @@ def run_case(case: dict, repeat: int) -> dict:
             "errors": runs.count("error"),
             "violations": last.get("violations", []),
             "judge": judges[-1], "judges": judges, "seconds": round(sum(secs), 1),
+            "usd_per_query": round(sum(usds) / len(usds), 6) if usds else None,
+            "total_ms_p50": sorted(totals)[len(totals) // 2] if totals else None,
+            "seats": seats,
             "model": last_model, "answer": last_answer, "answers": answers}
 
 
@@ -408,10 +423,28 @@ def main():
     print(f"\n=== Scorecard: {counts['pass']}/{n} pass, "
           f"{counts['partial']} partial, {counts['fail']} fail, "
           f"{counts['error']} error ===")
+    # The scoreboard row: the three numbers the workshop worksheet asks for,
+    # for the seat configuration that produced them. Cost is Bedrock tokens
+    # only (CPU pods are hourly capacity, see /stats cpu_pool_usd_per_hour).
+    usds = [r["usd_per_query"] for r in rows if r.get("usd_per_query") is not None]
+    p50s = [r["total_ms_p50"] for r in rows if r.get("total_ms_p50") is not None]
+    seats = next((r["seats"] for r in rows if r.get("seats")), None)
+    scoreboard = {
+        "seats": seats,
+        "quality": f"{counts['pass']}/{n}",
+        "bedrock_usd_per_query": round(sum(usds) / len(usds), 5) if usds else None,
+        "latency_p50_ms": sorted(p50s)[len(p50s) // 2] if p50s else None,
+    }
+    if seats:
+        seat_str = " ".join(f"{k}={v}" for k, v in seats.items())
+        usd_str = f"${scoreboard['bedrock_usd_per_query']:.4f}" if usds else "n/a"
+        lat_str = f"{scoreboard['latency_p50_ms'] / 1000:.1f}s" if p50s else "n/a"
+        print(f"=== Scoreboard [{seat_str}]: quality {scoreboard['quality']}  "
+              f"bedrock {usd_str}/query  latency p50 {lat_str} ===")
 
     scorecard = {"timestamp": datetime.now(timezone.utc).isoformat(),
                  "orchestrator": ORCHESTRATOR_URL, "repeat": args.repeat,
-                 "counts": counts, "n": n, "rows": rows}
+                 "counts": counts, "n": n, "scoreboard": scoreboard, "rows": rows}
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = os.path.join(RESULTS_DIR, f"scorecard-{stamp}.json")
     with open(out, "w", encoding="utf-8") as f:

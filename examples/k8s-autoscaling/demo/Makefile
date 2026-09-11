@@ -3,7 +3,7 @@
 
 SCRIPTS := ./scripts
 
-.PHONY: demo reset clean infra
+.PHONY: demo reset clean infra eval scoreboard
 
 # One command to start a demo session: reset the scenarios to their broken
 # state, then port-forward the orchestrator, open the browser, and launch the
@@ -23,3 +23,17 @@ clean:
 # Live infra view (CPU-only nodes + demo pods) in a separate terminal.
 infra:
 	$(SCRIPTS)/show-infra.sh
+
+# Run the eval against the orchestrator (port-forwarded to localhost:8000 by
+# default; override with ORCHESTRATOR_URL) and print the scoreboard row for the
+# active seat configuration: quality, Bedrock $/query, p50 latency. REPEAT=1 is
+# a quick smoke check; the default 4 is what the noise level needs.
+REPEAT ?= 4
+eval:
+	python3 eval/run_eval.py --repeat $(REPEAT)
+
+# Print the live scoreboard from /stats: per seat configuration, queries seen,
+# Bedrock $/query, p50/p95 latency, escalation rate, per-step p50.
+scoreboard:
+	@curl -s $${ORCHESTRATOR_URL:-http://localhost:8000}/stats | python3 -c \
+	  'import json,sys; d=json.load(sys.stdin); print(json.dumps({"seats": d["seats"], "slm_first_pass_rate": d["slm_first_pass_rate"], "scoreboard": d["scoreboard"]}, indent=2))'

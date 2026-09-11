@@ -6,7 +6,7 @@ check (auto in autopilot, otherwise proposed to the user).
 """
 import re
 
-from . import config
+from . import config, metrics
 from .prompts import GATE_PROMPT
 
 
@@ -23,6 +23,7 @@ def llm_gate(query: str, draft: str, context: str) -> tuple[bool, str]:
             messages=[{"role": "user", "content": [{"text": prompt}]}],
             inferenceConfig={"maxTokens": 200, "temperature": 0},
         )
+        metrics.charge(config.GATE_MODEL, "gate", *metrics.usage_from_converse(resp))
         text = resp["output"]["message"]["content"][0]["text"]
         verdict_m = re.search(r'"verdict"\s*:\s*"(\w+)"', text)
         reason_m = re.search(r'"reason"\s*:\s*"([^"]*)"', text)

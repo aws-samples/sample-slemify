@@ -13,7 +13,7 @@ import json
 
 import httpx
 
-from . import config
+from . import config, metrics
 
 
 def _embed_slemify(text: str) -> list[float]:
@@ -32,7 +32,9 @@ def _embed_bedrock(text: str) -> list[float]:
                          "normalize": True}),
         contentType="application/json", accept="application/json",
     )
-    return json.loads(resp["body"].read())["embedding"]
+    out = json.loads(resp["body"].read())
+    metrics.charge(config.BEDROCK_EMBED_MODEL, "embed", int(out.get("inputTextTokenCount", 0)), 0)
+    return out["embedding"]
 
 
 def embed_query(text: str) -> list[float]:
