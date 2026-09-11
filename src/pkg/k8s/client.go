@@ -146,7 +146,6 @@ func isClusterScoped(kind string) bool {
 		"NodePool":           true,
 		"EC2NodeClass":       true,
 		"NodeClass":          true,
-		"NodeOverlay":        true,
 		"PersistentVolume":   true,
 		"ClusterRole":        true,
 		"ClusterRoleBinding": true,
@@ -812,18 +811,6 @@ func (c *Client) RunEphemeralPod(ctx context.Context, name, image string, comman
 		return "", fmt.Errorf("reading pod logs: %w", err)
 	}
 	return string(logData), nil
-}
-
-// IsNodeOverlayEnabled checks if the Karpenter NodeOverlay feature gate is enabled
-// by verifying the nodeoverlays.karpenter.sh CRD exists in the cluster.
-func (c *Client) IsNodeOverlayEnabled(ctx context.Context) bool {
-	gvr := schema.GroupVersionResource{
-		Group:    "karpenter.sh",
-		Version:  "v1alpha1",
-		Resource: "nodeoverlays",
-	}
-	_, err := c.dynamicClient.Resource(gvr).List(ctx, metav1.ListOptions{Limit: 1})
-	return err == nil
 }
 
 // IsAutoMode reports whether the cluster is EKS Auto Mode, detected by the

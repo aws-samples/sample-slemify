@@ -199,9 +199,9 @@ func deploySingleExpert(ctx context.Context, cmd *cobra.Command, cfg *config.Exp
 	return nil
 }
 
-// setupClusterInfrastructure creates the namespace, Pod Identity, the CPU NodePool
-// (for EKS Auto Mode or self-managed Karpenter, whichever the cluster runs),
-// NodeOverlays, and detects CSI driver availability.
+// setupClusterInfrastructure creates the namespace, Pod Identity, the CPU
+// NodePools (for EKS Auto Mode or self-managed Karpenter, whichever the cluster
+// runs), and detects CSI driver availability.
 func setupClusterInfrastructure(ctx context.Context, client *k8s.Client, cfg *config.ExpertConfig, sized config.SizedConfig, pc *pipeline.PipelineContext) error {
 	if err := client.EnsureNamespace(ctx); err != nil {
 		return fmt.Errorf("creating namespace %s: %w", namespace, err)
@@ -230,48 +230,35 @@ func setupClusterInfrastructure(ctx context.Context, client *k8s.Client, cfg *co
 	fmt.Println()
 
 	// Who provisions nodes decides what Slemify creates. Both self-managed
-	// Karpenter and EKS Auto Mode take a karpenter.sh/v1 NodePool; only Karpenter
-	// needs Slemify's own EC2NodeClass and supports NodeOverlays.
+	// Karpenter and EKS Auto Mode take karpenter.sh/v1 NodePools; only Karpenter
+	// needs Slemify's own EC2NodeClass. Two pools either way: the current
+	// instance generation (preferred, weight 100) and the two before it
+	// (fallback, weight 50), so the provisioner reaches for the newest silicon
+	// first and still launches when that generation has no capacity.
+	var opts serving.NodePoolOptions
 	if client.IsAutoMode(ctx) {
-		fmt.Println("Setting up NodePool (EKS Auto Mode)...")
+		fmt.Println("Setting up NodePools (EKS Auto Mode)...")
 		nodeClass := autoModeNodeClass
 		if !client.AutoModeNodeClassExists(ctx, nodeClass) {
 			return fmt.Errorf("EKS Auto Mode detected but NodeClass %q not found; "+
 				"set --auto-mode-nodeclass to an existing eks.amazonaws.com NodeClass", nodeClass)
 		}
-		opts := serving.NodePoolOptions{Provisioner: serving.ProvisionerAutoMode, NodeClassName: nodeClass}
-		if err := client.ApplyYAML(ctx, []byte(serving.SLMNodePoolManifest(sized, opts))); err != nil {
-			return fmt.Errorf("applying slemify-slm NodePool: %w", err)
-		}
-		fmt.Printf("  NodePool slemify-slm references NodeClass %s (AWS-managed AMI and lifecycle)\n", nodeClass)
-		fmt.Println("  NodeOverlays are not available on Auto Mode; the pool's generation floor (gen 5+) applies")
+		opts = serving.NodePoolOptions{Provisioner: serving.ProvisionerAutoMode, NodeClassName: nodeClass}
+		fmt.Printf("  Pools reference NodeClass %s (AWS-managed AMI and lifecycle)\n", nodeClass)
 	} else {
-		fmt.Println("Setting up Karpenter NodePools...")
+		fmt.Println("Setting up NodePools (Karpenter)...")
+		opts = serving.NodePoolOptions{Provisioner: serving.ProvisionerKarpenter}
 		slmNodeClass := serving.SLMEC2NodeClassManifest(clusterName, nodeRole, cfg.Project.Name)
-		opts := serving.NodePoolOptions{Provisioner: serving.ProvisionerKarpenter}
 		if err := client.ApplyYAML(ctx, []byte(slmNodeClass)); err != nil {
 			return fmt.Errorf("applying slemify-slm EC2NodeClass: %w", err)
 		}
-		if err := client.ApplyYAML(ctx, []byte(serving.SLMNodePoolManifest(sized, opts))); err != nil {
-			return fmt.Errorf("applying slemify-slm NodePool: %w", err)
-		}
-
-		fmt.Println("Setting up NodeOverlays...")
-		if client.IsNodeOverlayEnabled(ctx) {
-			nodeOverlays := serving.NodeOverlayManifests()
-			for _, doc := range pipeline.SplitYAMLDocs(nodeOverlays) {
-				if err := client.ApplyYAML(ctx, []byte(doc)); err != nil {
-					fmt.Printf("  ⚠ Failed to apply NodeOverlay: %v\n", err)
-					break
-				}
-			}
-			fmt.Println("  NodeOverlays applied (preferring latest generation instances)")
-		} else {
-			fmt.Println("  ⚠ NodeOverlay feature gate not enabled in Karpenter")
-			fmt.Println("  Enable it with: helm upgrade karpenter oci://public.ecr.aws/karpenter/karpenter --set \"settings.featureGates.nodeOverlay=true\" --reuse-values -n karpenter")
-			fmt.Println("  Without NodeOverlays, Karpenter selects instances by lowest price (any generation)")
+	}
+	for _, doc := range pipeline.SplitYAMLDocs(serving.SLMNodePoolManifests(sized, opts)) {
+		if err := client.ApplyYAML(ctx, []byte(doc)); err != nil {
+			return fmt.Errorf("applying NodePool: %w", err)
 		}
 	}
+	fmt.Println("  slemify-slm (gen 8, preferred) and slemify-slm-fallback (gen 6-7) applied")
 	fmt.Println()
 
 	fmt.Println("Checking Mountpoint for S3 CSI driver...")

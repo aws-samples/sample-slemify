@@ -1,153 +1,121 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: MIT-0
-
 package serving
 
 import (
 	"strings"
 	"testing"
+
+	"github.com/aws-samples/sample-slemify/pkg/pipeline"
 )
-
-func TestSLMNodePoolArchFlexible(t *testing.T) {
-	sized := sized7B()
-	manifest := SLMNodePoolManifest(sized, karpenterOpts())
-
-	if !strings.Contains(manifest, `"arm64"`) {
-		t.Error("SLM NodePool should allow arm64")
-	}
-	if !strings.Contains(manifest, `"amd64"`) {
-		t.Error("SLM NodePool should allow amd64")
-	}
-}
-
-func TestSLMNodePoolCapacityTypes(t *testing.T) {
-	sized := sized7B()
-	manifest := SLMNodePoolManifest(sized, karpenterOpts())
-
-	if !strings.Contains(manifest, `"on-demand"`) {
-		t.Error("SLM NodePool should use on-demand for deterministic NodeOverlay behavior")
-	}
-	if strings.Contains(manifest, `"spot"`) {
-		t.Error("SLM NodePool should not include spot (NodeOverlay price adjustments need on-demand)")
-	}
-}
-
-func TestSLMNodePoolInstanceCategory(t *testing.T) {
-	sized := sized7B()
-	manifest := SLMNodePoolManifest(sized, karpenterOpts())
-
-	if !strings.Contains(manifest, "instance-category") {
-		t.Error("should use instance-category for flexibility")
-	}
-	if !strings.Contains(manifest, `"c"`) || !strings.Contains(manifest, `"r"`) {
-		t.Error("should allow c and r families")
-	}
-}
-
-func TestSLMNodePoolExcludesSmallAndMetal(t *testing.T) {
-	sized := sized7B()
-	manifest := SLMNodePoolManifest(sized, karpenterOpts())
-
-	if !strings.Contains(manifest, `"metal"`) {
-		t.Error("should exclude metal instances")
-	}
-	if !strings.Contains(manifest, `"nano"`) {
-		t.Error("should exclude nano instances")
-	}
-}
-
-func TestSLMNodePoolTaint(t *testing.T) {
-	sized := sized7B()
-	manifest := SLMNodePoolManifest(sized, karpenterOpts())
-
-	if !strings.Contains(manifest, "slemify.io/slm") {
-		t.Error("should have slemify.io/slm taint")
-	}
-}
-
-func TestSLMNodePoolName(t *testing.T) {
-	sized := sized7B()
-	manifest := SLMNodePoolManifest(sized, karpenterOpts())
-
-	if !strings.Contains(manifest, "name: slemify-slm") {
-		t.Error("should be named slemify-slm")
-	}
-}
-
-func TestSLMNodePoolReferencesOwnNodeClass(t *testing.T) {
-	sized := sized7B()
-	manifest := SLMNodePoolManifest(sized, karpenterOpts())
-
-	if !strings.Contains(manifest, "group: karpenter.k8s.aws") || !strings.Contains(manifest, "kind: EC2NodeClass") {
-		t.Error("Karpenter pool should reference a karpenter.k8s.aws EC2NodeClass")
-	}
-	if !strings.Contains(manifest, "name: slemify-slm") {
-		t.Error("should reference slemify-slm EC2NodeClass")
-	}
-	if !strings.Contains(manifest, "karpenter.k8s.aws/instance-category") {
-		t.Error("Karpenter pool should use karpenter.k8s.aws instance labels")
-	}
-	if strings.Contains(manifest, "eks.amazonaws.com") {
-		t.Error("Karpenter pool must not reference Auto Mode groups")
-	}
-}
 
 func karpenterOpts() NodePoolOptions {
 	return NodePoolOptions{Provisioner: ProvisionerKarpenter}
 }
 
-func TestSLMNodePoolAutoModeReferencesClusterNodeClass(t *testing.T) {
-	manifest := SLMNodePoolManifest(sized7B(), NodePoolOptions{Provisioner: ProvisionerAutoMode, NodeClassName: "default"})
-
-	if !strings.Contains(manifest, "group: eks.amazonaws.com") || !strings.Contains(manifest, "kind: NodeClass") {
-		t.Error("Auto Mode pool should reference an eks.amazonaws.com NodeClass")
-	}
-	if !strings.Contains(manifest, "name: default") {
-		t.Error("Auto Mode pool should reference the named cluster NodeClass")
-	}
-	if strings.Contains(manifest, "EC2NodeClass") || strings.Contains(manifest, "karpenter.k8s.aws") {
-		t.Error("Auto Mode pool must not reference self-managed Karpenter types or labels")
-	}
+func autoModeOpts() NodePoolOptions {
+	return NodePoolOptions{Provisioner: ProvisionerAutoMode, NodeClassName: "default"}
 }
 
-func TestSLMNodePoolAutoModeInstanceLabels(t *testing.T) {
-	manifest := SLMNodePoolManifest(sized7B(), NodePoolOptions{Provisioner: ProvisionerAutoMode})
+// pools splits the two-document manifest into (preferred, fallback).
+func pools(t *testing.T, opts NodePoolOptions) (string, string) {
+	t.Helper()
+	docs := pipeline.SplitYAMLDocs(SLMNodePoolManifests(sized7B(), opts))
+	if len(docs) != 2 {
+		t.Fatalf("expected 2 NodePool documents, got %d", len(docs))
+	}
+	return docs[0], docs[1]
+}
 
-	for _, key := range []string{"eks.amazonaws.com/instance-category", "eks.amazonaws.com/instance-generation", "eks.amazonaws.com/instance-size"} {
-		if !strings.Contains(manifest, key) {
-			t.Errorf("Auto Mode pool should use %s", key)
+func TestSLMNodePoolsTwoWeightedPools(t *testing.T) {
+	for _, opts := range []NodePoolOptions{karpenterOpts(), autoModeOpts()} {
+		preferred, fallback := pools(t, opts)
+		if !strings.Contains(preferred, "name: slemify-slm\n") || !strings.Contains(preferred, "weight: 100") {
+			t.Errorf("%s: preferred pool should be slemify-slm with weight 100", opts.Provisioner)
+		}
+		if !strings.Contains(fallback, "name: slemify-slm-fallback") || !strings.Contains(fallback, "weight: 50") {
+			t.Errorf("%s: fallback pool should be slemify-slm-fallback with weight 50", opts.Provisioner)
 		}
 	}
-	if !strings.Contains(manifest, "name: default") {
-		t.Error("Auto Mode pool should default to the NodeClass named default")
+}
+
+func TestSLMNodePoolsGenerations(t *testing.T) {
+	preferred, fallback := pools(t, karpenterOpts())
+	if !strings.Contains(preferred, `values: ["8"]`) {
+		t.Error("preferred pool should be generation 8 only")
+	}
+	if !strings.Contains(fallback, `values: ["6", "7"]`) {
+		t.Error("fallback pool should allow generations 6 and 7")
+	}
+	for _, m := range []string{preferred, fallback} {
+		if strings.Contains(m, `"5"`) || strings.Contains(m, "Gt") {
+			t.Error("generation 5 and older must not be eligible in any pool")
+		}
 	}
 }
 
-func TestSLMNodePoolSameContractOnBothProvisioners(t *testing.T) {
-	// Workloads select nodes by label and toleration; that contract must not
-	// depend on who provisions the nodes.
-	for _, opts := range []NodePoolOptions{karpenterOpts(), {Provisioner: ProvisionerAutoMode}} {
-		m := SLMNodePoolManifest(sized7B(), opts)
-		for _, want := range []string{"slemify.io/workload: slm", "key: slemify.io/slm", `"on-demand"`, `"arm64"`, `"amd64"`, "name: slemify-slm"} {
-			if !strings.Contains(m, want) {
-				t.Errorf("%s pool missing %q", opts.Provisioner, want)
+func TestSLMNodePoolsSharedContract(t *testing.T) {
+	// Workloads select nodes by label and toleration; that contract must be
+	// identical across both pools and both provisioners.
+	for _, opts := range []NodePoolOptions{karpenterOpts(), autoModeOpts()} {
+		preferred, fallback := pools(t, opts)
+		for _, m := range []string{preferred, fallback} {
+			for _, want := range []string{
+				"slemify.io/workload: slm", "key: slemify.io/slm", "effect: NoSchedule",
+				`"on-demand"`, `"arm64"`, `"amd64"`, `"c", "m", "r"`,
+				`"metal", "nano", "micro", "small"`, "WhenEmptyOrUnderutilized",
+			} {
+				if !strings.Contains(m, want) {
+					t.Errorf("%s pool missing %q", opts.Provisioner, want)
+				}
+			}
+			if strings.Contains(m, `"spot"`) {
+				t.Errorf("%s pool must not include spot", opts.Provisioner)
 			}
 		}
 	}
 }
 
-func TestSLMNodePoolMinGeneration(t *testing.T) {
-	sized := sized7B()
-	manifest := SLMNodePoolManifest(sized, karpenterOpts())
+func TestSLMNodePoolsKarpenterReferencesOwnNodeClass(t *testing.T) {
+	preferred, fallback := pools(t, karpenterOpts())
+	for _, m := range []string{preferred, fallback} {
+		if !strings.Contains(m, "group: karpenter.k8s.aws") || !strings.Contains(m, "kind: EC2NodeClass") {
+			t.Error("Karpenter pools should reference a karpenter.k8s.aws EC2NodeClass")
+		}
+		if !strings.Contains(m, "name: slemify-slm\n") {
+			t.Error("Karpenter pools should reference the slemify-slm EC2NodeClass")
+		}
+		if !strings.Contains(m, "karpenter.k8s.aws/instance-category") {
+			t.Error("Karpenter pools should use karpenter.k8s.aws instance labels")
+		}
+		if strings.Contains(m, "eks.amazonaws.com") {
+			t.Error("Karpenter pools must not reference Auto Mode groups")
+		}
+	}
+}
 
-	if !strings.Contains(manifest, "instance-generation") {
-		t.Error("should filter by instance generation")
+func TestSLMNodePoolsAutoModeReferencesClusterNodeClass(t *testing.T) {
+	preferred, fallback := pools(t, autoModeOpts())
+	for _, m := range []string{preferred, fallback} {
+		if !strings.Contains(m, "group: eks.amazonaws.com") || !strings.Contains(m, "kind: NodeClass") {
+			t.Error("Auto Mode pools should reference an eks.amazonaws.com NodeClass")
+		}
+		if !strings.Contains(m, "name: default") {
+			t.Error("Auto Mode pools should reference the named cluster NodeClass")
+		}
+		for _, key := range []string{"eks.amazonaws.com/instance-category", "eks.amazonaws.com/instance-generation", "eks.amazonaws.com/instance-size"} {
+			if !strings.Contains(m, key) {
+				t.Errorf("Auto Mode pools should use %s", key)
+			}
+		}
+		if strings.Contains(m, "EC2NodeClass") || strings.Contains(m, "karpenter.k8s.aws") {
+			t.Error("Auto Mode pools must not reference self-managed Karpenter types or labels")
+		}
 	}
-	if !strings.Contains(manifest, `Gt`) {
-		t.Error("should use Gt operator for generation")
-	}
-	if !strings.Contains(manifest, `"4"`) {
-		t.Error("should require generation > 4 (allows gen 5+ for NodeOverlay penalization)")
+}
+
+func TestSLMNodePoolsAutoModeDefaultsNodeClass(t *testing.T) {
+	preferred, _ := pools(t, NodePoolOptions{Provisioner: ProvisionerAutoMode})
+	if !strings.Contains(preferred, "name: default") {
+		t.Error("Auto Mode should default to the NodeClass named default")
 	}
 }
 
@@ -171,41 +139,5 @@ func TestSLMEC2NodeClass(t *testing.T) {
 	}
 	if !strings.Contains(manifest, "KarpenterNodeRole-my-cluster") {
 		t.Error("should reference the node role")
-	}
-}
-
-func TestNodeOverlayManifests(t *testing.T) {
-	manifest := NodeOverlayManifests()
-
-	// Should have 3 overlays for gen 5, 6, 7
-	if !strings.Contains(manifest, "penalize-gen5") {
-		t.Error("should penalize generation 5")
-	}
-	if !strings.Contains(manifest, "penalize-gen6") {
-		t.Error("should penalize generation 6")
-	}
-	if !strings.Contains(manifest, "penalize-gen7") {
-		t.Error("should penalize generation 7")
-	}
-
-	// Should target slemify-slm NodePool
-	if !strings.Contains(manifest, "slemify-slm") {
-		t.Error("should target slemify-slm NodePool")
-	}
-
-	// Should have decreasing penalties (gen5 > gen6 > gen7)
-	if !strings.Contains(manifest, `"+45%"`) {
-		t.Error("gen5 should have +45% penalty")
-	}
-	if !strings.Contains(manifest, `"+30%"`) {
-		t.Error("gen6 should have +30% penalty")
-	}
-	if !strings.Contains(manifest, `"+15%"`) {
-		t.Error("gen7 should have +15% penalty")
-	}
-
-	// Gen 8 should have no overlay (no penalty = preferred)
-	if strings.Contains(manifest, "gen8") {
-		t.Error("gen8 should have no overlay (naturally preferred)")
 	}
 }

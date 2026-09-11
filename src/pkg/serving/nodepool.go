@@ -10,19 +10,19 @@ import (
 )
 
 // Provisioner is who owns the nodes: self-managed Karpenter, or EKS Auto Mode.
-// Both speak karpenter.sh/v1 NodePool, but they differ in three places that
-// matter here: the NodeClass kind the pool references, the group prefix of the
-// well-known instance labels, and whether NodeOverlay exists at all.
+// Both speak karpenter.sh/v1 NodePool, but they differ in two places that
+// matter here: the NodeClass kind the pool references and the group prefix of
+// the well-known instance labels.
 type Provisioner string
 
 const (
 	// ProvisionerKarpenter: Karpenter installed by you. Slemify creates its own
-	// EC2NodeClass (Bottlerocket + SOCI) and applies NodeOverlays if enabled.
+	// EC2NodeClass (Bottlerocket + SOCI).
 	ProvisionerKarpenter Provisioner = "karpenter"
 	// ProvisionerAutoMode: EKS Auto Mode. AWS owns the NodeClass, the AMI, and
 	// the node lifecycle. Slemify only creates a NodePool that references the
 	// cluster's existing eks.amazonaws.com NodeClass. No EC2NodeClass, no
-	// userData, no NodeOverlay.
+	// userData.
 	ProvisionerAutoMode Provisioner = "auto-mode"
 )
 
@@ -35,11 +35,34 @@ type NodePoolOptions struct {
 	NodeClassName string
 }
 
-// SLMNodePoolManifest generates the shared NodePool for all CPU workloads:
-// convert/train jobs and inference serving. c, m, and r families, generation 5
-// and newer, arm64 and amd64, on-demand: the provisioner picks the cheapest
-// instance that fits. Requirement keys follow the provisioner's label group.
-func SLMNodePoolManifest(sized config.SizedConfig, opts NodePoolOptions) string {
+// Instance generations per pool. Newer generations carry more memory
+// bandwidth per socket, which is what CPU inference speed is made of, so the
+// preferred pool is the newest generation and the fallback is the two before
+// it. Older than that is not eligible at all.
+const (
+	preferredGeneration = `"8"`
+	fallbackGenerations = `"6", "7"`
+)
+
+// SLMNodePoolManifests generates the CPU NodePools for all Slemify workloads
+// (convert/train jobs and inference serving) as two YAML documents:
+//
+//   - slemify-slm (weight 100): current generation only.
+//   - slemify-slm-fallback (weight 50): the two previous generations.
+//
+// The provisioner tries pools in weight order and falls through when the
+// preferred one cannot launch (no capacity for that generation in the zone),
+// so preference is expressed without an alpha feature and works the same on
+// self-managed Karpenter and EKS Auto Mode. Both pools: c, m, and r families,
+// arm64 and amd64, on-demand, the same slemify.io/workload label and
+// slemify.io/slm taint, so workloads never know which pool served them.
+func SLMNodePoolManifests(sized config.SizedConfig, opts NodePoolOptions) string {
+	return nodePool("slemify-slm", 100, preferredGeneration, opts) +
+		"---\n" +
+		nodePool("slemify-slm-fallback", 50, fallbackGenerations, opts)
+}
+
+func nodePool(name string, weight int, generations string, opts NodePoolOptions) string {
 	categories := `"c", "m", "r"`
 	labelGroup, ncGroup, ncKind, ncName := "karpenter.k8s.aws", "karpenter.k8s.aws", "EC2NodeClass", "slemify-slm"
 	if opts.Provisioner == ProvisionerAutoMode {
@@ -53,10 +76,11 @@ func SLMNodePoolManifest(sized config.SizedConfig, opts NodePoolOptions) string 
 	return fmt.Sprintf(`apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
-  name: slemify-slm
+  name: %s
   labels:
     app.kubernetes.io/managed-by: slemify
 spec:
+  weight: %d
   template:
     metadata:
       labels:
@@ -77,8 +101,8 @@ spec:
           operator: In
           values: [%s]
         - key: %s/instance-generation
-          operator: Gt
-          values: ["4"]
+          operator: In
+          values: [%s]
         - key: %s/instance-size
           operator: NotIn
           values: ["metal", "nano", "micro", "small"]
@@ -94,7 +118,7 @@ spec:
   disruption:
     consolidationPolicy: WhenEmptyOrUnderutilized
     consolidateAfter: 5m
-`, ncGroup, ncKind, ncName, labelGroup, categories, labelGroup, labelGroup)
+`, name, weight, ncGroup, ncKind, ncName, labelGroup, categories, labelGroup, generations, labelGroup)
 }
 
 // SLMEC2NodeClassManifest generates the shared EC2NodeClass for all CPU workloads
@@ -148,66 +172,4 @@ spec:
     slemify.io/project: %s
     slemify.io/workload: slm
 `, nodeRole, clusterName, clusterName, projectName)
-}
-
-// NodeOverlayManifests generates Karpenter NodeOverlay resources that penalize
-// older instance generations to prefer the latest (gen 8 Graviton/x86).
-// Targeted to the slemify-slm NodePool so training GPU nodes are unaffected.
-// With on-demand capacity, this gives deterministic latest-gen selection.
-// With Spot, EC2 Fleet uses capacity-optimized-prioritized which may override
-// preferences based on capacity availability. Self-managed Karpenter only: EKS
-// Auto Mode has no NodeOverlay CRD, so there the pool's generation floor is the
-// only lever and the provisioner picks the cheapest fit above it.
-func NodeOverlayManifests() string {
-	return `apiVersion: karpenter.sh/v1alpha1
-kind: NodeOverlay
-metadata:
-  name: slemify-penalize-gen5
-  labels:
-    app.kubernetes.io/managed-by: slemify
-spec:
-  weight: 10
-  requirements:
-    - key: karpenter.sh/nodepool
-      operator: In
-      values: ["slemify-slm"]
-    - key: karpenter.k8s.aws/instance-generation
-      operator: In
-      values: ["5"]
-  priceAdjustment: "+45%"
----
-apiVersion: karpenter.sh/v1alpha1
-kind: NodeOverlay
-metadata:
-  name: slemify-penalize-gen6
-  labels:
-    app.kubernetes.io/managed-by: slemify
-spec:
-  weight: 10
-  requirements:
-    - key: karpenter.sh/nodepool
-      operator: In
-      values: ["slemify-slm"]
-    - key: karpenter.k8s.aws/instance-generation
-      operator: In
-      values: ["6"]
-  priceAdjustment: "+30%"
----
-apiVersion: karpenter.sh/v1alpha1
-kind: NodeOverlay
-metadata:
-  name: slemify-penalize-gen7
-  labels:
-    app.kubernetes.io/managed-by: slemify
-spec:
-  weight: 10
-  requirements:
-    - key: karpenter.sh/nodepool
-      operator: In
-      values: ["slemify-slm"]
-    - key: karpenter.k8s.aws/instance-generation
-      operator: In
-      values: ["7"]
-  priceAdjustment: "+15%"
-`
 }

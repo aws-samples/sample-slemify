@@ -234,22 +234,18 @@ Total time = (input_tokens / prompt_throughput) + (output_tokens x ms_per_token 
 
 Slemify's NodePool allows both arm64 and amd64 architectures and uses on-demand capacity. The provisioner (EKS Auto Mode or Karpenter) evaluates all eligible instance types across families and picks the cheapest option that meets the CPU and memory requirements.
 
-### Preferring latest generation instances with NodeOverlays
+### Preferring the latest generation with weighted NodePools
 
-Newer instance generations (e.g., Graviton4 c8g vs Graviton3 c7g) offer better memory bandwidth and price-performance for inference. On self-managed Karpenter, Slemify uses [Karpenter NodeOverlays](https://karpenter.sh/docs/concepts/nodeoverlays/) (alpha) to prefer the latest generation by penalizing older generations through price adjustments:
+Newer instance generations (e.g., Graviton4 c8g vs Graviton3 c7g) carry more memory bandwidth per socket, which is what CPU inference speed is made of. Slemify expresses that preference with two NodePools and `spec.weight`, a GA feature that behaves the same on EKS Auto Mode and self-managed Karpenter:
 
-| Generation | Penalty | Effect |
-|-----------|---------|--------|
-| Gen 5 (c5, m5, r5) | +45% | Strongly deprioritized |
-| Gen 6 (c6g, m6i, r6g) | +30% | Deprioritized |
-| Gen 7 (c7g, m7i, r7g) | +15% | Slightly deprioritized |
-| Gen 8 (c8g, m8g, r8g) | No penalty | Preferred |
+| NodePool | Weight | Generations | Role |
+|----------|--------|-------------|------|
+| `slemify-slm` | 100 | 8 (c8g, m8g, r8g, c8i, ...) | Preferred |
+| `slemify-slm-fallback` | 50 | 6 and 7 | Used only when the preferred pool cannot launch |
 
-With on-demand capacity, this gives deterministic selection. Karpenter always picks the lowest perceived price, which is the latest generation. Both arm64 (Graviton) and amd64 are eligible, but Graviton instances are typically cheaper per core, so they're naturally preferred.
+The provisioner tries the highest-weight pool whose requirements fit the pending pod. If that generation has no capacity in the zone, it falls through to the fallback pool rather than leaving the pod pending. Generation 5 and older are not eligible in either pool. Both pools carry the same `slemify.io/workload: slm` label and `slemify.io/slm` taint, so workloads never know which pool served them. Both arm64 (Graviton) and amd64 are eligible; Graviton is typically cheaper per core, so it is naturally preferred within a generation.
 
-If cost is the primary concern, you can switch the NodePool to Spot capacity. NodeOverlays still apply, but EC2 Fleet uses `capacity-optimized-prioritized` for Spot, where capacity availability can override your generation preferences. You'll still get a preference for latest gen, but not a guarantee. EC2 may select an older generation if it has better Spot capacity.
-
-NodeOverlays require the `NodeOverlay` feature gate to be enabled in Karpenter (`settings.featureGates.nodeOverlay=true`). If the feature gate is not enabled, Slemify skips the overlays gracefully and Karpenter selects instances based on pure price optimization. EKS Auto Mode has no NodeOverlay CRD, so there the pool's generation floor (generation 5 and newer) is the only lever and Auto Mode picks the cheapest fit above it.
+If cost is the primary concern, Spot is a reasonable choice for inference replicas behind a PodDisruptionBudget: edit the `karpenter.sh/capacity-type` requirement on the pools to allow it. Keep the convert Job on on-demand; it is a one-shot, bandwidth-heavy run that a reclaim would restart from zero.
 
 For a detailed comparison of how these architectures handle the instruction-data-shape triangle for inference workloads, see [Silicon, Memory, and Modern Inference](https://cmanaha.github.io/tech-deep-dives/silicon-memory-inference/).
 
@@ -301,7 +297,7 @@ This is a deliberate exception to Slemify's usual policy of not setting CPU limi
 
 ## Node provisioning and instance selection
 
-Slemify detects whether the cluster runs EKS Auto Mode (by the presence of the `eks.amazonaws.com` NodeClass API) or self-managed Karpenter, and creates one `karpenter.sh/v1` NodePool named `slemify-slm` either way. On Karpenter it also creates its own `EC2NodeClass` (Bottlerocket with SOCI) and NodeOverlays. On Auto Mode, AWS owns the NodeClass, the AMI, and the node lifecycle, so the pool references the cluster's existing NodeClass (`default`, or `--auto-mode-nodeclass`) and nothing else is created. The requirement labels follow the provisioner (`karpenter.k8s.aws/instance-*` vs `eks.amazonaws.com/instance-*`); the contract workloads depend on, the `slemify.io/workload: slm` label and the `slemify.io/slm` taint, is identical on both. The NodePool is configured to:
+Slemify detects whether the cluster runs EKS Auto Mode (by the presence of the `eks.amazonaws.com` NodeClass API) or self-managed Karpenter, and creates two `karpenter.sh/v1` NodePools (`slemify-slm` and `slemify-slm-fallback`, see below) either way. On Karpenter it also creates its own `EC2NodeClass` (Bottlerocket with SOCI). On Auto Mode, AWS owns the NodeClass, the AMI, and the node lifecycle, so the pool references the cluster's existing NodeClass (`default`, or `--auto-mode-nodeclass`) and nothing else is created. The requirement labels follow the provisioner (`karpenter.k8s.aws/instance-*` vs `eks.amazonaws.com/instance-*`); the contract workloads depend on, the `slemify.io/workload: slm` label and the `slemify.io/slm` taint, is identical on both. The pools are configured to:
 
 - **Allow multiple instance families.** The `c` (compute-optimized), `m` (general-purpose), and `r` (memory-optimized) families are all eligible. Karpenter picks the cheapest available option.
 - **Use on-demand capacity.** Deterministic instance selection and no reclaim mid-conversion. Spot is a good production choice for inference replicas behind a PDB; edit the `karpenter.sh/capacity-type` requirement to allow it.
