@@ -3,7 +3,7 @@
 
 SCRIPTS := ./scripts
 
-.PHONY: demo reset clean infra eval scoreboard
+.PHONY: demo reset clean infra eval scoreboard triage-acc recall
 
 # One command to start a demo session: reset the scenarios to their broken
 # state, then port-forward the orchestrator, open the browser, and launch the
@@ -31,6 +31,16 @@ infra:
 REPEAT ?= 4
 eval:
 	python3 eval/run_eval.py --repeat $(REPEAT)
+
+# Deterministic per-seat quality, no judge. triage-acc scores whoever holds the
+# TRIAGE seat (set TRIAGE=llm|classifier) on the 43-query held-out set;
+# recall scores retrieval three ways (bedrock, slemify, slemify+rerank) on the
+# recall set. Both need the relevant services port-forwarded; see the scripts.
+triage-acc:
+	python3 eval/triage_acc.py
+
+recall:
+	python3 eval/recall.py $(if $(MODE),--mode $(MODE),)
 
 # Print the live scoreboard from /stats: per seat configuration, queries seen,
 # Bedrock $/query, p50/p95 latency, escalation rate, per-step p50.

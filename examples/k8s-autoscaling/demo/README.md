@@ -113,6 +113,15 @@ stream ends with a `cost` event carrying the query's USD and tokens, and
 `make eval` prints one scoreboard row (quality, Bedrock $/query, p50 latency)
 for the active seats; `make scoreboard` prints the live aggregate.
 
+Two per-seat quality numbers are deterministic and need no judge:
+`make triage-acc` scores whoever holds the `TRIAGE` seat by exact match on a
+43-query held-out set (`eval/triage-heldout.yaml`, none of it used as a
+training seed, every label at least four times), and `make recall` scores
+retrieval three ways (Titan, tuned encoder, tuned encoder plus re-ranker) by
+recall@2, recall@5, and MRR on `eval/recall-set.jsonl`, questions each
+answerable from one known chunk (built once with
+`eval/make_recall_set.py` against a populated index).
+
 Only Bedrock is metered per query. CPU pods are capacity billed by the hour
 whether or not a query arrives, so their cost is reported separately
 (`CPU_POOL_USD_PER_HOUR`, informational) and never folded into the per-query

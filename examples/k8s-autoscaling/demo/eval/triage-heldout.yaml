@@ -1,0 +1,255 @@
+# Held-out triage set: exact-match accuracy for the TRIAGE seat.
+#
+# None of these queries were seeds for the synthetic training data (the 91
+# files under data/queries/ were; the 14 under data/eval-queries/ were written
+# as a held-out set and are referenced here by file). The rest are new.
+#
+# Scoring is deterministic: the predicted label must be `label`, or one of
+# `accept` when a query genuinely fits two categories (an HPA and a
+# ScaledObject on the same deployment is both keda_config and multi_resource).
+# No judge, no prose. Run: python3 eval/triage_acc.py
+#
+# Labels: karpenter_config, keda_config, hpa_config, pdb_disruption,
+#         spot_interruption, multi_resource, noise
+
+- id: heldout-deprecated-01
+  file: ../../data/eval-queries/eval-deprecated-01.txt
+  label: karpenter_config
+- id: heldout-deprecated-02
+  file: ../../data/eval-queries/eval-deprecated-02.txt
+  label: karpenter_config
+- id: heldout-nodeclass-01
+  file: ../../data/eval-queries/eval-nodeclass-01.txt
+  label: karpenter_config
+- id: heldout-nodeclass-02
+  file: ../../data/eval-queries/eval-nodeclass-02.txt
+  label: karpenter_config
+- id: heldout-security-01
+  file: ../../data/eval-queries/eval-security-01.txt
+  label: karpenter_config
+- id: heldout-valid-01
+  file: ../../data/eval-queries/eval-valid-01.txt
+  label: karpenter_config
+- id: heldout-keda-hpa-01
+  file: ../../data/eval-queries/eval-keda-hpa-01.txt
+  label: multi_resource
+  accept: [multi_resource, keda_config, hpa_config]
+- id: heldout-keda-hpa-02
+  file: ../../data/eval-queries/eval-keda-hpa-02.txt
+  label: multi_resource
+  accept: [multi_resource, keda_config]
+- id: heldout-security-02
+  file: ../../data/eval-queries/eval-security-02.txt
+  label: keda_config
+- id: heldout-pdb-01
+  file: ../../data/eval-queries/eval-pdb-01.txt
+  label: pdb_disruption
+- id: heldout-pdb-02
+  file: ../../data/eval-queries/eval-pdb-02.txt
+  label: pdb_disruption
+- id: heldout-spot-01
+  file: ../../data/eval-queries/eval-spot-01.txt
+  label: spot_interruption
+- id: heldout-spot-02
+  file: ../../data/eval-queries/eval-spot-02.txt
+  label: spot_interruption
+- id: heldout-topology-01
+  file: ../../data/eval-queries/eval-topology-01.txt
+  label: multi_resource
+  accept: [multi_resource, karpenter_config]
+
+# --- karpenter_config ---
+- id: new-karpenter-consolidate
+  label: karpenter_config
+  query: |
+    our nodepool has consolidationPolicy: WhenEmptyOrUnderutilized and
+    consolidateAfter: 0s. nodes get replaced every few minutes and pods keep
+    restarting. is 0s too aggressive? what do people normally set here?
+- id: new-karpenter-limits-hit
+  label: karpenter_config
+  query: |
+    karpenter logs say "exceeded limits" and nothing launches. nodepool limits
+    are cpu: 64 memory: 256Gi and kubectl get nodepool shows 62 cpu in use.
+    do limits count pending capacity or only running nodes?
+- id: new-karpenter-arch
+  label: karpenter_config
+  query: |
+    we want graviton only. is this the right requirement?
+    - key: kubernetes.io/arch
+      operator: In
+      values: ["arm64"]
+    do we also need to pin instance-family or is arch enough?
+- id: new-karpenter-expire
+  label: karpenter_config
+  query: |
+    what does expireAfter actually do on a v1 NodePool? we set it to 720h and
+    nodes older than 30 days are still around. does it need a budget too?
+
+# --- keda_config ---
+- id: new-keda-sqs-idle
+  label: keda_config
+  query: |
+    ScaledObject on an SQS queue with minReplicaCount: 0. the queue has been
+    empty for an hour but we still have 1 replica. cooldownPeriod is 300.
+    why doesn't it scale to zero?
+- id: new-keda-cron
+  label: keda_config
+  query: |
+    trying to pre-scale before our 9am traffic with a cron trigger:
+    triggers:
+      - type: cron
+        metadata:
+          timezone: Europe/London
+          start: 0 8 * * 1-5
+          end: 0 18 * * 1-5
+          desiredReplicas: "10"
+    outside the window we want the prometheus trigger to take over. do the two
+    triggers fight each other?
+- id: new-keda-pollinginterval
+  label: keda_config
+  query: |
+    pollingInterval is 30 on our ScaledObject but the metric we scale on spikes
+    within seconds. can we go to 5? any downside for the prometheus server?
+- id: new-keda-auth
+  label: keda_config
+  query: |
+    getting "error getting scaler" on a kafka ScaledObject. the
+    TriggerAuthentication references a secret in a different namespace. does
+    it need to be a ClusterTriggerAuthentication for that?
+
+# --- hpa_config ---
+- id: new-hpa-flapping
+  label: hpa_config
+  query: |
+    our HPA scales from 3 to 12 and back to 3 every couple of minutes. target
+    cpu utilization is 50%. no KEDA involved. is there a stabilization window
+    setting or do we need to change the target?
+- id: new-hpa-memory
+  label: hpa_config
+  query: |
+    can an HPA scale on memory as well as cpu at the same time? we have
+    metrics:
+      - type: Resource
+        resource:
+          name: cpu
+          target: {type: Utilization, averageUtilization: 60}
+    and want to add memory. which one wins when they disagree?
+- id: new-hpa-requests-missing
+  label: hpa_config
+  query: |
+    HPA shows <unknown>/60% for cpu and never scales. the deployment has no
+    resource requests set. is that the cause? the pods run fine otherwise.
+- id: new-hpa-scale-to-zero
+  label: hpa_config
+  query: |
+    is there any way to get a plain HPA to scale to zero replicas overnight?
+    minReplicas: 0 is rejected by the api server.
+
+# --- pdb_disruption ---
+- id: new-pdb-drain-stuck
+  label: pdb_disruption
+  query: |
+    kubectl drain hangs with "Cannot evict pod as it would violate the pod's
+    disruption budget". the deployment has 1 replica and a PDB with
+    minAvailable: 1. how are we supposed to ever drain this node?
+- id: new-pdb-percent
+  label: pdb_disruption
+  query: |
+    for a 5-replica deployment, is maxUnavailable: 20% the same as
+    maxUnavailable: 1? and what happens during a rollout when the replica
+    count is temporarily 6?
+- id: new-pdb-two-pdbs
+  label: pdb_disruption
+  query: |
+    two PDBs select the same pods (someone copied a manifest). evictions now
+    fail with an error about multiple budgets. which one does kubernetes
+    honor, or does it refuse both?
+- id: new-pdb-statefulset-quorum
+  label: pdb_disruption
+  query: |
+    3-replica zookeeper statefulset. we want node maintenance to never take
+    more than one pod at a time. minAvailable: 2 or maxUnavailable: 1, and is
+    there any difference for a statefulset?
+
+# --- spot_interruption ---
+- id: new-spot-handler
+  label: spot_interruption
+  query: |
+    do we still need the node termination handler if karpenter is managing our
+    spot nodes? someone said karpenter handles the interruption notice itself
+    now via SQS.
+- id: new-spot-diversify
+  label: spot_interruption
+  query: |
+    what's the practical minimum number of instance types for a spot nodepool
+    to avoid getting all nodes reclaimed at once? we have 3 in the list today
+    and got hit last week.
+- id: new-spot-fallback
+  label: spot_interruption
+  query: |
+    can a single NodePool fall back to on-demand when spot capacity is
+    unavailable, or do we need two NodePools with weights? our batch jobs
+    can't wait for capacity.
+- id: new-spot-rebalance
+  label: spot_interruption
+  query: |
+    karpenter drained a spot node before any interruption came. the event says
+    "rebalance recommendation". can we turn that behavior off? the pods were
+    mid-job.
+
+# --- multi_resource ---
+- id: new-multi-hpa-keda-nodepool
+  label: multi_resource
+  query: |
+    full picture: HPA on cpu, a KEDA ScaledObject on the same deployment for
+    queue depth, and a karpenter NodePool limited to 20 cpu. pods go Pending
+    every afternoon. which of these three is actually the bottleneck and how
+    should they be configured together?
+- id: new-multi-pdb-nodepool
+  label: multi_resource
+  accept: [multi_resource, pdb_disruption]
+  query: |
+    karpenter consolidation is blocked by a PDB with maxUnavailable: 0 on a
+    deployment, and the nodepool has expireAfter: 24h. nodes are never
+    replaced. which side should we fix, the PDB or the nodepool?
+- id: new-multi-migration
+  label: multi_resource
+  query: |
+    we're moving from cluster autoscaler + plain HPA to karpenter + KEDA in one
+    go. can someone sanity check the plan: keep the HPAs, add ScaledObjects for
+    the queue workers, one NodePool per team. anything that will conflict?
+- id: new-multi-stateful-gpu
+  label: multi_resource
+  query: |
+    gpu training jobs on a spot nodepool, a PDB on the redis they depend on,
+    and an HPA on the api tier that calls both. an interruption took down the
+    api last night. how do we design these three together so one spot reclaim
+    doesn't cascade?
+
+# --- noise ---
+- id: new-noise-lunch
+  label: noise
+  query: |
+    anyone up for lunch at 12:30? the italian place near the office has a new
+    menu
+- id: new-noise-terraform
+  label: noise
+  query: |
+    terraform plan fails with "provider produced inconsistent final plan" on
+    our aws_s3_bucket resource. we're on provider 5.x. anyone seen this?
+- id: new-noise-network
+  label: noise
+  query: |
+    our ingress returns 502 for one path only, everything else works. nginx
+    ingress controller 1.10. the upstream service responds fine with curl from
+    inside the cluster.
+- id: new-noise-cicd
+  label: noise
+  query: |
+    github actions runner is out of disk again, third time this week. is
+    there a way to prune docker images automatically between jobs?
+- id: new-noise-hr
+  label: noise
+  query: |
+    reminder that timesheets are due friday, and the new expense tool goes
+    live monday. reach out to finance if your login doesn't work.
