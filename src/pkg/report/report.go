@@ -94,7 +94,7 @@ func PrintReport(r *ClassificationReport) {
 		}
 	}
 
-	fmt.Printf("  Cost:        ~$%.0f/mo (fixed, Graviton Spot)\n", r.CostProjection.InferenceMonthlyCost)
+	fmt.Printf("  Cost:        ~$%.0f/mo (fixed, one CPU replica, on-demand)\n", r.CostProjection.InferenceMonthlyCost)
 	fmt.Printf("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 }
 

@@ -37,27 +37,33 @@ type NodePoolOptions struct {
 
 // Instance generations per pool. Newer generations carry more memory
 // bandwidth per socket, which is what CPU inference speed is made of, so the
-// preferred pool is the newest generation and the fallback is the two before
-// it. Older than that is not eligible at all.
+// pools are ordered newest first: the current generation (Graviton5 c9g/m9g/r9g
+// and their x86 peers), then the previous one, then the two before that. Older
+// than that is not eligible at all.
 const (
-	preferredGeneration = `"8"`
+	newestGeneration    = `"9"`
+	previousGeneration  = `"8"`
 	fallbackGenerations = `"6", "7"`
 )
 
 // SLMNodePoolManifests generates the CPU NodePools for all Slemify workloads
-// (convert/train jobs and inference serving) as two YAML documents:
+// (convert/train jobs and inference serving) as three YAML documents:
 //
-//   - slemify-slm (weight 100): current generation only.
-//   - slemify-slm-fallback (weight 50): the two previous generations.
+//   - slemify-slm (weight 100): the newest generation only.
+//   - slemify-slm-previous (weight 75): the generation before it.
+//   - slemify-slm-fallback (weight 50): the two generations before that.
 //
-// The provisioner tries pools in weight order and falls through when the
-// preferred one cannot launch (no capacity for that generation in the zone),
-// so preference is expressed without an alpha feature and works the same on
-// self-managed Karpenter and EKS Auto Mode. Both pools: c, m, and r families,
-// arm64 and amd64, on-demand, the same slemify.io/workload label and
-// slemify.io/slm taint, so workloads never know which pool served them.
+// The provisioner tries pools in weight order and falls through when a pool
+// cannot launch (no capacity for that generation in the zone, or the
+// generation is not offered in the Region yet), so preference is expressed
+// without an alpha feature and works the same on self-managed Karpenter and
+// EKS Auto Mode. All pools: c, m, and r families, arm64 and amd64, on-demand,
+// the same slemify.io/workload label and slemify.io/slm taint, so workloads
+// never know which pool served them.
 func SLMNodePoolManifests(sized config.SizedConfig, opts NodePoolOptions) string {
-	return nodePool("slemify-slm", 100, preferredGeneration, opts) +
+	return nodePool("slemify-slm", 100, newestGeneration, opts) +
+		"---\n" +
+		nodePool("slemify-slm-previous", 75, previousGeneration, opts) +
 		"---\n" +
 		nodePool("slemify-slm-fallback", 50, fallbackGenerations, opts)
 }

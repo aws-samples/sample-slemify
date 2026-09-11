@@ -15,21 +15,24 @@ func autoModeOpts() NodePoolOptions {
 	return NodePoolOptions{Provisioner: ProvisionerAutoMode, NodeClassName: "default"}
 }
 
-// pools splits the two-document manifest into (preferred, fallback).
-func pools(t *testing.T, opts NodePoolOptions) (string, string) {
+// pools splits the three-document manifest into (preferred, previous, fallback).
+func pools(t *testing.T, opts NodePoolOptions) (string, string, string) {
 	t.Helper()
 	docs := pipeline.SplitYAMLDocs(SLMNodePoolManifests(sized7B(), opts))
-	if len(docs) != 2 {
-		t.Fatalf("expected 2 NodePool documents, got %d", len(docs))
+	if len(docs) != 3 {
+		t.Fatalf("expected 3 NodePool documents, got %d", len(docs))
 	}
-	return docs[0], docs[1]
+	return docs[0], docs[1], docs[2]
 }
 
-func TestSLMNodePoolsTwoWeightedPools(t *testing.T) {
+func TestSLMNodePoolsThreeWeightedPools(t *testing.T) {
 	for _, opts := range []NodePoolOptions{karpenterOpts(), autoModeOpts()} {
-		preferred, fallback := pools(t, opts)
+		preferred, previous, fallback := pools(t, opts)
 		if !strings.Contains(preferred, "name: slemify-slm\n") || !strings.Contains(preferred, "weight: 100") {
 			t.Errorf("%s: preferred pool should be slemify-slm with weight 100", opts.Provisioner)
+		}
+		if !strings.Contains(previous, "name: slemify-slm-previous") || !strings.Contains(previous, "weight: 75") {
+			t.Errorf("%s: previous pool should be slemify-slm-previous with weight 75", opts.Provisioner)
 		}
 		if !strings.Contains(fallback, "name: slemify-slm-fallback") || !strings.Contains(fallback, "weight: 50") {
 			t.Errorf("%s: fallback pool should be slemify-slm-fallback with weight 50", opts.Provisioner)
@@ -38,14 +41,17 @@ func TestSLMNodePoolsTwoWeightedPools(t *testing.T) {
 }
 
 func TestSLMNodePoolsGenerations(t *testing.T) {
-	preferred, fallback := pools(t, karpenterOpts())
-	if !strings.Contains(preferred, `values: ["8"]`) {
-		t.Error("preferred pool should be generation 8 only")
+	preferred, previous, fallback := pools(t, karpenterOpts())
+	if !strings.Contains(preferred, `values: ["9"]`) {
+		t.Error("preferred pool should be generation 9 only")
+	}
+	if !strings.Contains(previous, `values: ["8"]`) {
+		t.Error("previous pool should be generation 8 only")
 	}
 	if !strings.Contains(fallback, `values: ["6", "7"]`) {
 		t.Error("fallback pool should allow generations 6 and 7")
 	}
-	for _, m := range []string{preferred, fallback} {
+	for _, m := range []string{preferred, previous, fallback} {
 		if strings.Contains(m, `"5"`) || strings.Contains(m, "Gt") {
 			t.Error("generation 5 and older must not be eligible in any pool")
 		}
@@ -56,8 +62,8 @@ func TestSLMNodePoolsSharedContract(t *testing.T) {
 	// Workloads select nodes by label and toleration; that contract must be
 	// identical across both pools and both provisioners.
 	for _, opts := range []NodePoolOptions{karpenterOpts(), autoModeOpts()} {
-		preferred, fallback := pools(t, opts)
-		for _, m := range []string{preferred, fallback} {
+		preferred, previous, fallback := pools(t, opts)
+		for _, m := range []string{preferred, previous, fallback} {
 			for _, want := range []string{
 				"slemify.io/workload: slm", "key: slemify.io/slm", "effect: NoSchedule",
 				`"on-demand"`, `"arm64"`, `"amd64"`, `"c", "m", "r"`,
@@ -75,8 +81,8 @@ func TestSLMNodePoolsSharedContract(t *testing.T) {
 }
 
 func TestSLMNodePoolsKarpenterReferencesOwnNodeClass(t *testing.T) {
-	preferred, fallback := pools(t, karpenterOpts())
-	for _, m := range []string{preferred, fallback} {
+	preferred, previous, fallback := pools(t, karpenterOpts())
+	for _, m := range []string{preferred, previous, fallback} {
 		if !strings.Contains(m, "group: karpenter.k8s.aws") || !strings.Contains(m, "kind: EC2NodeClass") {
 			t.Error("Karpenter pools should reference a karpenter.k8s.aws EC2NodeClass")
 		}
@@ -93,8 +99,8 @@ func TestSLMNodePoolsKarpenterReferencesOwnNodeClass(t *testing.T) {
 }
 
 func TestSLMNodePoolsAutoModeReferencesClusterNodeClass(t *testing.T) {
-	preferred, fallback := pools(t, autoModeOpts())
-	for _, m := range []string{preferred, fallback} {
+	preferred, previous, fallback := pools(t, autoModeOpts())
+	for _, m := range []string{preferred, previous, fallback} {
 		if !strings.Contains(m, "group: eks.amazonaws.com") || !strings.Contains(m, "kind: NodeClass") {
 			t.Error("Auto Mode pools should reference an eks.amazonaws.com NodeClass")
 		}
@@ -113,7 +119,7 @@ func TestSLMNodePoolsAutoModeReferencesClusterNodeClass(t *testing.T) {
 }
 
 func TestSLMNodePoolsAutoModeDefaultsNodeClass(t *testing.T) {
-	preferred, _ := pools(t, NodePoolOptions{Provisioner: ProvisionerAutoMode})
+	preferred, _, _ := pools(t, NodePoolOptions{Provisioner: ProvisionerAutoMode})
 	if !strings.Contains(preferred, "name: default") {
 		t.Error("Auto Mode should default to the NodeClass named default")
 	}

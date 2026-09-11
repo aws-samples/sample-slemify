@@ -236,14 +236,15 @@ Slemify's NodePool allows both arm64 and amd64 architectures and uses on-demand 
 
 ### Preferring the latest generation with weighted NodePools
 
-Newer instance generations (e.g., Graviton4 c8g vs Graviton3 c7g) carry more memory bandwidth per socket, which is what CPU inference speed is made of. Slemify expresses that preference with two NodePools and `spec.weight`, a GA feature that behaves the same on EKS Auto Mode and self-managed Karpenter:
+Newer instance generations carry more memory bandwidth per socket, which is what CPU inference speed is made of (Graviton5 moves to DDR5-8800 with about five times the L3 cache of Graviton4; Graviton4 carries about 75 percent more bandwidth than Graviton3). Slemify expresses that preference with three NodePools and `spec.weight`, a GA feature that behaves the same on EKS Auto Mode and self-managed Karpenter:
 
 | NodePool | Weight | Generations | Role |
 |----------|--------|-------------|------|
-| `slemify-slm` | 100 | 8 (c8g, m8g, r8g, c8i, ...) | Preferred |
-| `slemify-slm-fallback` | 50 | 6 and 7 | Used only when the preferred pool cannot launch |
+| `slemify-slm` | 100 | 9 (c9g, m9g, r9g, and x86 peers) | Preferred |
+| `slemify-slm-previous` | 75 | 8 (c8g, m8g, r8g, c8i, ...) | Used when the newest generation cannot launch or is not offered in the Region |
+| `slemify-slm-fallback` | 50 | 6 and 7 | Used only when neither of the above can launch |
 
-The provisioner tries the highest-weight pool whose requirements fit the pending pod. If that generation has no capacity in the zone, it falls through to the fallback pool rather than leaving the pod pending. Generation 5 and older are not eligible in either pool. Both pools carry the same `slemify.io/workload: slm` label and `slemify.io/slm` taint, so workloads never know which pool served them. Both arm64 (Graviton) and amd64 are eligible; Graviton is typically cheaper per core, so it is naturally preferred within a generation.
+The provisioner tries the highest-weight pool whose requirements fit the pending pod. If that generation has no capacity in the zone, or is not available in the Region yet, it falls through to the next pool rather than leaving the pod pending. Generation 5 and older are not eligible in any pool. All pools carry the same `slemify.io/workload: slm` label and `slemify.io/slm` taint, so workloads never know which pool served them. Both arm64 (Graviton) and amd64 are eligible; Graviton is typically cheaper per core, so it is naturally preferred within a generation.
 
 If cost is the primary concern, Spot is a reasonable choice for inference replicas behind a PodDisruptionBudget: edit the `karpenter.sh/capacity-type` requirement on the pools to allow it. Keep the convert Job on on-demand; it is a one-shot, bandwidth-heavy run that a reclaim would restart from zero.
 

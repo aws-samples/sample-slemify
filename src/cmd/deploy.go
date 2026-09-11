@@ -231,10 +231,11 @@ func setupClusterInfrastructure(ctx context.Context, client *k8s.Client, cfg *co
 
 	// Who provisions nodes decides what Slemify creates. Both self-managed
 	// Karpenter and EKS Auto Mode take karpenter.sh/v1 NodePools; only Karpenter
-	// needs Slemify's own EC2NodeClass. Two pools either way: the current
-	// instance generation (preferred, weight 100) and the two before it
-	// (fallback, weight 50), so the provisioner reaches for the newest silicon
-	// first and still launches when that generation has no capacity.
+	// needs Slemify's own EC2NodeClass. Three pools either way: the newest
+	// instance generation (weight 100), the one before it (weight 75), and the
+	// two before that (weight 50), so the provisioner reaches for the newest
+	// silicon first and still launches when that generation has no capacity or
+	// is not offered in the Region.
 	var opts serving.NodePoolOptions
 	if client.IsAutoMode(ctx) {
 		fmt.Println("Setting up NodePools (EKS Auto Mode)...")
@@ -258,17 +259,17 @@ func setupClusterInfrastructure(ctx context.Context, client *k8s.Client, cfg *co
 			return fmt.Errorf("applying NodePool: %w", err)
 		}
 	}
-	fmt.Println("  slemify-slm (gen 8, preferred) and slemify-slm-fallback (gen 6-7) applied")
+	fmt.Println("  NodePools applied: slemify-slm (gen 9, preferred), slemify-slm-previous (gen 8), slemify-slm-fallback (gen 6-7)")
 	fmt.Println()
 
 	fmt.Println("Checking Mountpoint for S3 CSI driver...")
 	if client.IsMountpointCSIEnabled(ctx) {
 		pc.UseS3Mount = true
-		fmt.Println("  Mountpoint CSI driver detected — models will be mounted directly from S3")
+		fmt.Println("  Mountpoint CSI driver detected: models will be mounted directly from S3")
 		fmt.Println("  (no init container download, llama.cpp reads via mmap)")
 	} else {
 		pc.UseS3Mount = false
-		fmt.Println("  Mountpoint CSI driver not found — models will be downloaded via init container")
+		fmt.Println("  Mountpoint CSI driver not found: models will be downloaded via init container")
 		fmt.Println("  Install it for faster pod startup: https://docs.aws.amazon.com/eks/latest/userguide/s3-csi-create.html")
 	}
 	fmt.Println()
