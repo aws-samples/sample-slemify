@@ -45,8 +45,8 @@ func isEncoderHeadTask(task string) bool {
 func autoSizeEncoderHead(data DataConfig, training TrainingConfig) SizedConfig {
 	sized := SizedConfig{
 		TrainingGPU:       "none (CPU)",
-		TrainingInstance:  "Spot CPU (Karpenter selects)",
-		InferenceInstance: "Spot CPU (Karpenter selects)",
+		TrainingInstance:  "CPU, on-demand (provisioner selects)",
+		InferenceInstance: "CPU, on-demand (provisioner selects)",
 		InferenceCPU:      "2",
 		InferenceMemory:   "4Gi",
 		InferenceThreads:  "2",
@@ -71,8 +71,8 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 		TrainingGPU: "none (CPU)",
 		// The generation "training" stage is the GGUF convert Job, pinned to
 		// on-demand (one-shot, bandwidth-heavy; a Spot reclaim would force a
-		// full re-download). Inference still runs on Spot.
-		TrainingInstance:  "On-Demand CPU (Karpenter selects)",
+		// full re-download). Inference uses the same on-demand pool.
+		TrainingInstance:  "CPU, on-demand (provisioner selects)",
 		WarmupRatio:       0.1,
 		Scheduler:         "cosine",
 		EarlyStopPatience: 2,
@@ -88,7 +88,7 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 	// There is no GPU and no fine-tuning in this path.
 	switch {
 	case modelSize <= 3:
-		sized.InferenceInstance = "Spot (Karpenter selects)"
+		sized.InferenceInstance = "CPU, on-demand (provisioner selects)"
 		sized.InferenceCPU = "4"
 		sized.InferenceMemory = "6Gi"
 		sized.InferenceThreads = "4"
@@ -96,7 +96,7 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 		sized.ConvertMemory = "16Gi"
 		sized.ConvertEphemeralStorage = "40Gi"
 	case modelSize <= 5:
-		sized.InferenceInstance = "Spot (Karpenter selects)"
+		sized.InferenceInstance = "CPU, on-demand (provisioner selects)"
 		sized.InferenceCPU = "4"
 		sized.InferenceMemory = "8Gi"
 		sized.InferenceThreads = "4"
@@ -104,7 +104,7 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 		sized.ConvertMemory = "24Gi"
 		sized.ConvertEphemeralStorage = "48Gi"
 	case modelSize <= 8:
-		sized.InferenceInstance = "Spot (Karpenter selects)"
+		sized.InferenceInstance = "CPU, on-demand (provisioner selects)"
 		sized.InferenceCPU = "8"
 		sized.InferenceMemory = "16Gi"
 		sized.InferenceThreads = "8"
@@ -112,7 +112,7 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 		sized.ConvertMemory = "40Gi"
 		sized.ConvertEphemeralStorage = "64Gi"
 	default: // 8B-13B (tool targets ≤10B models)
-		sized.InferenceInstance = "Spot (Karpenter selects)"
+		sized.InferenceInstance = "CPU, on-demand (provisioner selects)"
 		sized.InferenceCPU = "16"
 		sized.InferenceMemory = "24Gi"
 		sized.InferenceThreads = "16"

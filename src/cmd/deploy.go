@@ -22,6 +22,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// autoModeNodeClass is the eks.amazonaws.com NodeClass the NodePool references on
+// EKS Auto Mode. Auto Mode owns the NodeClass (AMI, storage, networking), so
+// Slemify does not create one there; it points at the cluster's.
+var autoModeNodeClass string
+
 var deployCmd = &cobra.Command{
 	Use:   "deploy",
 	Short: "Run the full pipeline: data → training → quantize → serving",
@@ -190,19 +195,12 @@ func deploySingleExpert(ctx context.Context, cmd *cobra.Command, cfg *config.Exp
 	default:
 		fmt.Printf("   Model:         %s → %s (%s GGUF)\n", cfg.Model.Base, sized.InferenceInstance, cfg.Model.QuantizeLabel())
 	}
-	// Spot pricing estimate for inference
-	spotPricing := map[string]float64{
-		"c8g.medium": 25, "c8g.xlarge": 50, "c8g.2xlarge": 80,
-		"c8g.4xlarge": 140, "c8g.8xlarge": 280, "r8g.8xlarge": 320,
-	}
-	if price, ok := spotPricing[sized.InferenceInstance]; ok {
-		fmt.Printf("   Est. monthly:  ~$%.0f/mo (Spot)\n", price)
-	}
 	fmt.Printf("\n   Next: slemify analyze --config %s\n", cfgFile)
 	return nil
 }
 
-// setupClusterInfrastructure creates the namespace, Pod Identity, Karpenter NodePools,
+// setupClusterInfrastructure creates the namespace, Pod Identity, the CPU NodePool
+// (for EKS Auto Mode or self-managed Karpenter, whichever the cluster runs),
 // NodeOverlays, and detects CSI driver availability.
 func setupClusterInfrastructure(ctx context.Context, client *k8s.Client, cfg *config.ExpertConfig, sized config.SizedConfig, pc *pipeline.PipelineContext) error {
 	if err := client.EnsureNamespace(ctx); err != nil {
@@ -231,30 +229,48 @@ func setupClusterInfrastructure(ctx context.Context, client *k8s.Client, cfg *co
 	pc.ServiceAccount = podID.ServiceAccountName
 	fmt.Println()
 
-	fmt.Println("Setting up Karpenter NodePools...")
-	slmNodeClass := serving.SLMEC2NodeClassManifest(clusterName, nodeRole, cfg.Project.Name)
-	slmNodePool := serving.SLMNodePoolManifest(sized)
-	if err := client.ApplyYAML(ctx, []byte(slmNodeClass)); err != nil {
-		return fmt.Errorf("applying slemify-slm EC2NodeClass: %w", err)
-	}
-	if err := client.ApplyYAML(ctx, []byte(slmNodePool)); err != nil {
-		return fmt.Errorf("applying slemify-slm NodePool: %w", err)
-	}
-
-	fmt.Println("Setting up NodeOverlays...")
-	if client.IsNodeOverlayEnabled(ctx) {
-		nodeOverlays := serving.NodeOverlayManifests()
-		for _, doc := range pipeline.SplitYAMLDocs(nodeOverlays) {
-			if err := client.ApplyYAML(ctx, []byte(doc)); err != nil {
-				fmt.Printf("  ⚠ Failed to apply NodeOverlay: %v\n", err)
-				break
-			}
+	// Who provisions nodes decides what Slemify creates. Both self-managed
+	// Karpenter and EKS Auto Mode take a karpenter.sh/v1 NodePool; only Karpenter
+	// needs Slemify's own EC2NodeClass and supports NodeOverlays.
+	if client.IsAutoMode(ctx) {
+		fmt.Println("Setting up NodePool (EKS Auto Mode)...")
+		nodeClass := autoModeNodeClass
+		if !client.AutoModeNodeClassExists(ctx, nodeClass) {
+			return fmt.Errorf("EKS Auto Mode detected but NodeClass %q not found; "+
+				"set --auto-mode-nodeclass to an existing eks.amazonaws.com NodeClass", nodeClass)
 		}
-		fmt.Println("  NodeOverlays applied (preferring latest generation instances)")
+		opts := serving.NodePoolOptions{Provisioner: serving.ProvisionerAutoMode, NodeClassName: nodeClass}
+		if err := client.ApplyYAML(ctx, []byte(serving.SLMNodePoolManifest(sized, opts))); err != nil {
+			return fmt.Errorf("applying slemify-slm NodePool: %w", err)
+		}
+		fmt.Printf("  NodePool slemify-slm references NodeClass %s (AWS-managed AMI and lifecycle)\n", nodeClass)
+		fmt.Println("  NodeOverlays are not available on Auto Mode; the pool's generation floor (gen 5+) applies")
 	} else {
-		fmt.Println("  ⚠ NodeOverlay feature gate not enabled in Karpenter")
-		fmt.Println("  Enable it with: helm upgrade karpenter oci://public.ecr.aws/karpenter/karpenter --set \"settings.featureGates.nodeOverlay=true\" --reuse-values -n karpenter")
-		fmt.Println("  Without NodeOverlays, Karpenter selects instances by lowest price (any generation)")
+		fmt.Println("Setting up Karpenter NodePools...")
+		slmNodeClass := serving.SLMEC2NodeClassManifest(clusterName, nodeRole, cfg.Project.Name)
+		opts := serving.NodePoolOptions{Provisioner: serving.ProvisionerKarpenter}
+		if err := client.ApplyYAML(ctx, []byte(slmNodeClass)); err != nil {
+			return fmt.Errorf("applying slemify-slm EC2NodeClass: %w", err)
+		}
+		if err := client.ApplyYAML(ctx, []byte(serving.SLMNodePoolManifest(sized, opts))); err != nil {
+			return fmt.Errorf("applying slemify-slm NodePool: %w", err)
+		}
+
+		fmt.Println("Setting up NodeOverlays...")
+		if client.IsNodeOverlayEnabled(ctx) {
+			nodeOverlays := serving.NodeOverlayManifests()
+			for _, doc := range pipeline.SplitYAMLDocs(nodeOverlays) {
+				if err := client.ApplyYAML(ctx, []byte(doc)); err != nil {
+					fmt.Printf("  ⚠ Failed to apply NodeOverlay: %v\n", err)
+					break
+				}
+			}
+			fmt.Println("  NodeOverlays applied (preferring latest generation instances)")
+		} else {
+			fmt.Println("  ⚠ NodeOverlay feature gate not enabled in Karpenter")
+			fmt.Println("  Enable it with: helm upgrade karpenter oci://public.ecr.aws/karpenter/karpenter --set \"settings.featureGates.nodeOverlay=true\" --reuse-values -n karpenter")
+			fmt.Println("  Without NodeOverlays, Karpenter selects instances by lowest price (any generation)")
+		}
 	}
 	fmt.Println()
 
@@ -353,6 +369,8 @@ func registerDryRunStages(runner *pipeline.Runner, cfg *config.ExpertConfig, siz
 func init() {
 	deployCmd.Flags().String("stage", "", "Start from a specific stage (data, training, quantize, serving)")
 	deployCmd.Flags().Bool("dry-run", false, "Show what would be deployed without connecting to a cluster")
+	deployCmd.Flags().StringVar(&autoModeNodeClass, "auto-mode-nodeclass", "default",
+		"On EKS Auto Mode, the existing eks.amazonaws.com NodeClass the slemify-slm NodePool references")
 	deployCmd.Flags().Bool("no-wait", false, "Submit the stage and exit without waiting for completion (use with --stage)")
 	rootCmd.AddCommand(deployCmd)
 }

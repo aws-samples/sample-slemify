@@ -41,7 +41,7 @@ converted to GGUF, and quantized on CPU. The LLM API is called only for the
 
 ## Prerequisites
 
-- EKS cluster with [Karpenter](https://karpenter.sh) installed
+- EKS cluster with [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) enabled, or self-managed [Karpenter](https://karpenter.sh) installed
 - S3 bucket for data and artifacts
 - AWS credentials with Bedrock, S3, and EKS access
 - `kubectl` configured for your cluster
@@ -269,7 +269,7 @@ The tmux dashboard shows all three pods processing in sequence, proving it's a m
 |------|------|-----------|
 | Synthetic data (Bedrock, triage only) | ~$15 | One-time |
 | Model prep (CPU: triage train / analyst convert) | <$1 | One-time |
-| Inference (CPU Spot) | ~$117/mo per replica | Ongoing |
+| Inference (CPU, on-demand by default) | ~$117/mo per replica | Ongoing |
 | OpenSearch (CPU) | ~$50/mo | Ongoing |
 | LLM fallback (Bedrock) | ~$0.008 per query | Only for low-confidence queries |
 

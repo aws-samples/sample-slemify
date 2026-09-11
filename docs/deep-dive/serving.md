@@ -232,11 +232,11 @@ Total time = (input_tokens / prompt_throughput) + (output_tokens x ms_per_token 
 | [AMD EPYC Turin](https://www.amd.com/en/products/processors/server/epyc/9005-series.html) (Zen 5) | 12x DDR5-6000 channels, up to 614 GB/s | Highest channel count and bandwidth per socket. Strong Spot availability on AWS (m7a, c7a families). |
 | [Intel Xeon 6 Granite Rapids](https://www.intel.com/content/www/us/en/products/platforms/details/granite-rapids.html) | 8x DDR5-6400 channels, MRDIMM option at 8800 MT/s | MRDIMM support can push bandwidth beyond standard DDR5 limits. AMX tile registers accelerate matrix operations. |
 
-Slemify's Karpenter NodePool allows both arm64 and amd64 architectures and uses on-demand capacity. Karpenter evaluates all eligible instance types across families and picks the cheapest option that meets the CPU and memory requirements.
+Slemify's NodePool allows both arm64 and amd64 architectures and uses on-demand capacity. The provisioner (EKS Auto Mode or Karpenter) evaluates all eligible instance types across families and picks the cheapest option that meets the CPU and memory requirements.
 
 ### Preferring latest generation instances with NodeOverlays
 
-Newer instance generations (e.g., Graviton4 c8g vs Graviton3 c7g) offer better memory bandwidth and price-performance for inference. Slemify uses [Karpenter NodeOverlays](https://karpenter.sh/docs/concepts/nodeoverlays/) (alpha) to prefer the latest generation by penalizing older generations through price adjustments:
+Newer instance generations (e.g., Graviton4 c8g vs Graviton3 c7g) offer better memory bandwidth and price-performance for inference. On self-managed Karpenter, Slemify uses [Karpenter NodeOverlays](https://karpenter.sh/docs/concepts/nodeoverlays/) (alpha) to prefer the latest generation by penalizing older generations through price adjustments:
 
 | Generation | Penalty | Effect |
 |-----------|---------|--------|
@@ -249,7 +249,7 @@ With on-demand capacity, this gives deterministic selection. Karpenter always pi
 
 If cost is the primary concern, you can switch the NodePool to Spot capacity. NodeOverlays still apply, but EC2 Fleet uses `capacity-optimized-prioritized` for Spot, where capacity availability can override your generation preferences. You'll still get a preference for latest gen, but not a guarantee. EC2 may select an older generation if it has better Spot capacity.
 
-NodeOverlays require the `NodeOverlay` feature gate to be enabled in Karpenter (`settings.featureGates.nodeOverlay=true`). If the feature gate is not enabled, Slemify skips the overlays gracefully and Karpenter selects instances based on pure price optimization.
+NodeOverlays require the `NodeOverlay` feature gate to be enabled in Karpenter (`settings.featureGates.nodeOverlay=true`). If the feature gate is not enabled, Slemify skips the overlays gracefully and Karpenter selects instances based on pure price optimization. EKS Auto Mode has no NodeOverlay CRD, so there the pool's generation floor (generation 5 and newer) is the only lever and Auto Mode picks the cheapest fit above it.
 
 For a detailed comparison of how these architectures handle the instruction-data-shape triangle for inference workloads, see [Silicon, Memory, and Modern Inference](https://cmanaha.github.io/tech-deep-dives/silicon-memory-inference/).
 
@@ -299,12 +299,12 @@ This is a deliberate exception to Slemify's usual policy of not setting CPU limi
 
 **Models larger than 8B.** The auto-sizer supports models up to 30B+ parameters on CPU. For *dense* models, larger means proportionally higher latency (more weights to read per token), so for classification and routing tasks 3-8B remains the sweet spot: fast enough for real-time use, large enough for multi-class accuracy. *Mixture-of-Experts* models are the exception: a 30B-total/3B-active MoE decodes at roughly dense-3B speed because only its active parameters stream through memory per token — but every parameter must stay resident, so size its pod by the full model file plus KV cache (~26Gi for a 30B-A3B at q4), and expect prefill to be somewhat slower than a dense 8B. See [choosing a base model](training.md#choosing-a-base-model) for when the trade is worth it.
 
-## Karpenter and instance selection
+## Node provisioning and instance selection
 
-The serving stage creates a Karpenter NodePool that provisions CPU instances for inference. The NodePool is configured to:
+Slemify detects whether the cluster runs EKS Auto Mode (by the presence of the `eks.amazonaws.com` NodeClass API) or self-managed Karpenter, and creates one `karpenter.sh/v1` NodePool named `slemify-slm` either way. On Karpenter it also creates its own `EC2NodeClass` (Bottlerocket with SOCI) and NodeOverlays. On Auto Mode, AWS owns the NodeClass, the AMI, and the node lifecycle, so the pool references the cluster's existing NodeClass (`default`, or `--auto-mode-nodeclass`) and nothing else is created. The requirement labels follow the provisioner (`karpenter.k8s.aws/instance-*` vs `eks.amazonaws.com/instance-*`); the contract workloads depend on, the `slemify.io/workload: slm` label and the `slemify.io/slm` taint, is identical on both. The NodePool is configured to:
 
 - **Allow multiple instance families.** The `c` (compute-optimized), `m` (general-purpose), and `r` (memory-optimized) families are all eligible. Karpenter picks the cheapest available option.
-- **Prefer Spot.** Both Spot and on-demand are allowed, with Karpenter preferring Spot for cost savings.
+- **Use on-demand capacity.** Deterministic instance selection and no reclaim mid-conversion. Spot is a good production choice for inference replicas behind a PDB; edit the `karpenter.sh/capacity-type` requirement to allow it.
 - **Allow arm64 and amd64.** llama.cpp runs on both architectures. AWS Graviton (arm64) instances are typically cheaper per core-hour, but AMD EPYC and Intel Xeon instances are also eligible. Karpenter picks the cheapest available option across all architectures.
 - **Exclude tiny instances.** Nano, micro, and small sizes are excluded because they don't have enough memory or CPU for model serving.
 - **Consolidate when idle.** The `WhenEmptyOrUnderutilized` consolidation policy removes nodes that aren't carrying useful workload, keeping costs down during low-traffic periods.
@@ -583,9 +583,9 @@ path.
 - [llama.cpp](https://github.com/ggerganov/llama.cpp). The inference engine Slemify uses for CPU deployment. Supports GGUF models with quantization.
 - [Mountpoint for Amazon S3 CSI Driver](https://github.com/awslabs/mountpoint-s3-csi-driver). Mounts S3 buckets as read-only filesystems in Kubernetes pods. Slemify uses it to serve GGUF models directly from S3 via mmap, eliminating download time during pod startup and scaling.
 - [Silicon, Memory, and Modern Inference](https://cmanaha.github.io/tech-deep-dives/silicon-memory-inference/). Why memory bandwidth (not FLOPs) determines inference speed on both CPU and GPU.
-- [Karpenter](https://karpenter.sh). Just-in-time node provisioning for Kubernetes. Slemify uses it to provision the cheapest Spot instances for both training and inference.
+- [Karpenter](https://karpenter.sh) and [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html). Just-in-time node provisioning for Kubernetes. Slemify creates a NodePool for whichever the cluster runs and lets it pick the cheapest eligible instance for training, conversion, and inference.
 - [KEDA](https://keda.sh). Kubernetes Event-Driven Autoscaling. Scales inference replicas based on concurrent request metrics from Prometheus.
-- [SOCI Snapshotter](https://github.com/awslabs/soci-snapshotter). Parallel chunk-based container image pulls for faster pod startup. Configured automatically on all Slemify nodes.
+- [SOCI Snapshotter](https://github.com/awslabs/soci-snapshotter). Parallel chunk-based container image pulls for faster pod startup. Configured automatically on Slemify's EC2NodeClass on self-managed Karpenter; on EKS Auto Mode the AMI is AWS-managed.
 - [AI on EKS: Accelerating Container Startup](https://awslabs.github.io/ai-on-eks/docs/guidance/container-startup-time/accelerate-pull-process). Guidance on SOCI, Nydus, and image preloading strategies for AI workloads on EKS.
 - [Small Language Models are the Future of Agentic AI](https://arxiv.org/abs/2506.02153) (NVIDIA, 2025). SLMs offer 10-30x lower inference costs per token, making them the sustainable choice for high-frequency agentic deployment.
 - [GGUF format specification](https://github.com/ggerganov/llama.cpp/blob/master/gguf-py/README.md). The model format optimized for CPU inference with llama.cpp.

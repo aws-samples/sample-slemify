@@ -142,7 +142,7 @@ The LLM stays in the system. It handles the 10-15% the SLM isn't confident about
 ### Prerequisites
 
 Verify the user has:
-- An EKS cluster with Karpenter installed
+- An EKS cluster with EKS Auto Mode enabled or Karpenter installed
 - An S3 bucket for data and model artifacts
 - AWS credentials with Amazon Bedrock access (for synthetic data generation)
 - `kubectl` configured for their cluster

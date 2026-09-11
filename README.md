@@ -61,7 +61,7 @@ The output is a GGUF model file in S3 and a production readiness report. The ser
 
 ### Prerequisites
 
-- EKS cluster with [Karpenter](https://karpenter.sh)
+- EKS cluster with [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) or self-managed [Karpenter](https://karpenter.sh)
 - S3 bucket for data and artifacts
 - AWS credentials with Bedrock access
 - `kubectl` configured for your cluster
@@ -179,7 +179,7 @@ Technical docs covering the design decisions, best practices, and research behin
 
 The pipeline runs on Kubernetes (EKS). The output is a GGUF model in S3.
 
-- **Karpenter**. CPU nodes for training, conversion, and the reference deployment (no GPU in the pipeline)
+- **EKS Auto Mode or Karpenter**. CPU nodes for training, conversion, and the reference deployment (no GPU in the pipeline). Slemify detects which one the cluster runs and creates a matching NodePool
 - **llama.cpp**. GGUF conversion and quantization, plus CPU inference (used in the reference deployment and validation report)
 - **Pod Identity**. IAM access to S3 and Bedrock, no static credentials
 - **Systems Manager**. Remote container builds via SSM, no SSH keys or open ports required

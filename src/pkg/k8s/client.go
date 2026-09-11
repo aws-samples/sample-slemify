@@ -145,6 +145,7 @@ func isClusterScoped(kind string) bool {
 		"Namespace":          true,
 		"NodePool":           true,
 		"EC2NodeClass":       true,
+		"NodeClass":          true,
 		"NodeOverlay":        true,
 		"PersistentVolume":   true,
 		"ClusterRole":        true,
@@ -384,6 +385,7 @@ func pluralize(kind string) string {
 		"NodePool":            "nodepools",
 		"ScaledObject":        "scaledobjects",
 		"EC2NodeClass":        "ec2nodeclasses",
+		"NodeClass":           "nodeclasses",
 	}
 	if p, ok := known[kind]; ok {
 		return p
@@ -821,6 +823,34 @@ func (c *Client) IsNodeOverlayEnabled(ctx context.Context) bool {
 		Resource: "nodeoverlays",
 	}
 	_, err := c.dynamicClient.Resource(gvr).List(ctx, metav1.ListOptions{Limit: 1})
+	return err == nil
+}
+
+// IsAutoMode reports whether the cluster is EKS Auto Mode, detected by the
+// presence of the eks.amazonaws.com/v1 NodeClass API (Auto Mode's own node
+// class; self-managed Karpenter uses karpenter.k8s.aws EC2NodeClass instead).
+// Lists with Limit 1 so the probe is cheap and does not depend on any object
+// existing.
+func (c *Client) IsAutoMode(ctx context.Context) bool {
+	gvr := schema.GroupVersionResource{
+		Group:    "eks.amazonaws.com",
+		Version:  "v1",
+		Resource: "nodeclasses",
+	}
+	_, err := c.dynamicClient.Resource(gvr).List(ctx, metav1.ListOptions{Limit: 1})
+	return err == nil
+}
+
+// AutoModeNodeClassExists reports whether the named eks.amazonaws.com NodeClass
+// exists. Auto Mode clusters ship one called "default"; Slemify's NodePool
+// references it rather than creating its own.
+func (c *Client) AutoModeNodeClassExists(ctx context.Context, name string) bool {
+	gvr := schema.GroupVersionResource{
+		Group:    "eks.amazonaws.com",
+		Version:  "v1",
+		Resource: "nodeclasses",
+	}
+	_, err := c.dynamicClient.Resource(gvr).Get(ctx, name, metav1.GetOptions{})
 	return err == nil
 }
 

@@ -9,11 +9,46 @@ import (
 	"github.com/aws-samples/sample-slemify/pkg/config"
 )
 
-// SLMNodePoolManifest generates the shared Karpenter NodePool for all CPU workloads:
-// quantize and inference serving. Uses arm64 Graviton instances.
-func SLMNodePoolManifest(sized config.SizedConfig) string {
-	// Allow c, m, and r families for CPU inference — Karpenter picks the cheapest.
+// Provisioner is who owns the nodes: self-managed Karpenter, or EKS Auto Mode.
+// Both speak karpenter.sh/v1 NodePool, but they differ in three places that
+// matter here: the NodeClass kind the pool references, the group prefix of the
+// well-known instance labels, and whether NodeOverlay exists at all.
+type Provisioner string
+
+const (
+	// ProvisionerKarpenter: Karpenter installed by you. Slemify creates its own
+	// EC2NodeClass (Bottlerocket + SOCI) and applies NodeOverlays if enabled.
+	ProvisionerKarpenter Provisioner = "karpenter"
+	// ProvisionerAutoMode: EKS Auto Mode. AWS owns the NodeClass, the AMI, and
+	// the node lifecycle. Slemify only creates a NodePool that references the
+	// cluster's existing eks.amazonaws.com NodeClass. No EC2NodeClass, no
+	// userData, no NodeOverlay.
+	ProvisionerAutoMode Provisioner = "auto-mode"
+)
+
+// NodePoolOptions parameterize the shared CPU NodePool.
+type NodePoolOptions struct {
+	Provisioner Provisioner
+	// NodeClassName is the NodeClass the pool references. Ignored for Karpenter
+	// (always slemify-slm). For Auto Mode it is an existing NodeClass, normally
+	// "default".
+	NodeClassName string
+}
+
+// SLMNodePoolManifest generates the shared NodePool for all CPU workloads:
+// convert/train jobs and inference serving. c, m, and r families, generation 5
+// and newer, arm64 and amd64, on-demand: the provisioner picks the cheapest
+// instance that fits. Requirement keys follow the provisioner's label group.
+func SLMNodePoolManifest(sized config.SizedConfig, opts NodePoolOptions) string {
 	categories := `"c", "m", "r"`
+	labelGroup, ncGroup, ncKind, ncName := "karpenter.k8s.aws", "karpenter.k8s.aws", "EC2NodeClass", "slemify-slm"
+	if opts.Provisioner == ProvisionerAutoMode {
+		labelGroup, ncGroup, ncKind = "eks.amazonaws.com", "eks.amazonaws.com", "NodeClass"
+		ncName = opts.NodeClassName
+		if ncName == "" {
+			ncName = "default"
+		}
+	}
 
 	return fmt.Sprintf(`apiVersion: karpenter.sh/v1
 kind: NodePool
@@ -28,9 +63,9 @@ spec:
         slemify.io/workload: slm
     spec:
       nodeClassRef:
-        group: karpenter.k8s.aws
-        kind: EC2NodeClass
-        name: slemify-slm
+        group: %s
+        kind: %s
+        name: %s
       requirements:
         - key: kubernetes.io/arch
           operator: In
@@ -38,13 +73,13 @@ spec:
         - key: karpenter.sh/capacity-type
           operator: In
           values: ["on-demand"]
-        - key: karpenter.k8s.aws/instance-category
+        - key: %s/instance-category
           operator: In
           values: [%s]
-        - key: karpenter.k8s.aws/instance-generation
+        - key: %s/instance-generation
           operator: Gt
           values: ["4"]
-        - key: karpenter.k8s.aws/instance-size
+        - key: %s/instance-size
           operator: NotIn
           values: ["metal", "nano", "micro", "small"]
         - key: slemify.io/workload
@@ -59,12 +94,13 @@ spec:
   disruption:
     consolidationPolicy: WhenEmptyOrUnderutilized
     consolidateAfter: 5m
-`, categories)
+`, ncGroup, ncKind, ncName, labelGroup, categories, labelGroup, labelGroup)
 }
 
-// SLMEC2NodeClassManifest generates the shared EC2NodeClass for all CPU workloads.
-// Uses Bottlerocket with SOCI snapshotter for faster container image pulls.
-// Bottlerocket has native SOCI support, so no shell-based installation is needed.
+// SLMEC2NodeClassManifest generates the shared EC2NodeClass for all CPU workloads
+// on self-managed Karpenter. Uses Bottlerocket with SOCI snapshotter for faster
+// container image pulls. Bottlerocket has native SOCI support, so no shell-based
+// installation is needed. Not used on EKS Auto Mode, where AWS owns the NodeClass.
 func SLMEC2NodeClassManifest(clusterName, nodeRole, projectName string) string {
 	return fmt.Sprintf(`apiVersion: karpenter.k8s.aws/v1
 kind: EC2NodeClass
@@ -114,14 +150,14 @@ spec:
 `, nodeRole, clusterName, clusterName, projectName)
 }
 
-
-
 // NodeOverlayManifests generates Karpenter NodeOverlay resources that penalize
 // older instance generations to prefer the latest (gen 8 Graviton/x86).
 // Targeted to the slemify-slm NodePool so training GPU nodes are unaffected.
 // With on-demand capacity, this gives deterministic latest-gen selection.
 // With Spot, EC2 Fleet uses capacity-optimized-prioritized which may override
-// preferences based on capacity availability.
+// preferences based on capacity availability. Self-managed Karpenter only: EKS
+// Auto Mode has no NodeOverlay CRD, so there the pool's generation floor is the
+// only lever and the provisioner picks the cheapest fit above it.
 func NodeOverlayManifests() string {
 	return `apiVersion: karpenter.sh/v1alpha1
 kind: NodeOverlay
@@ -175,4 +211,3 @@ spec:
   priceAdjustment: "+15%"
 `
 }
-
