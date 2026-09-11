@@ -301,7 +301,7 @@ matters is whether the model gets the answer right.
 This distinction comes from the [Microsoft Multi-Agent Reference Architecture](https://www.microsoft.com/en-us/research/publication/multi-agent-reference-architecture/) (2025), which describes the "Semantic Router" pattern: a model outputs an intent label, and an LLM orchestrator routes based on it.
 </details>
 
-Use free-form when the downstream consumer needs to understand *why*, not just *what*. For example, a triage classifier outputs `billing_question|high`. An auditor outputs a paragraph explaining what's wrong with a configuration and how to fix it.
+Use free-form when the downstream consumer needs to understand *why*, not just *what*. For example, a triage classifier outputs `billing_question|high`. An analyst outputs a paragraph explaining what's wrong with a configuration and how to fix it.
 
 ## The generation prompt
 

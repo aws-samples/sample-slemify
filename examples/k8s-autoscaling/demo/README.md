@@ -38,7 +38,7 @@ flowchart TD
     EM["Retriever · CPU<br/>embed query 768d"] --> OS["OpenSearch<br/>vector search"]
     OS --> RR["Reranker · CPU<br/>cross-encoder top-k"]
     RR --> GEN{Generate}
-    GEN -->|in-domain question| AUD["Auditor SLM · CPU<br/>grounded answer"]
+    GEN -->|in-domain question| AUD["Analyst SLM · CPU<br/>grounded answer"]
     GEN -->|unclassifiable| LLM["LLM API · Bedrock<br/>open-ended fallback"]
     AUD --> CR{"Faithfulness gate · LLM<br/>draft supported by evidence?"}
     LLM --> CR
@@ -67,7 +67,7 @@ CPU; the gate is one LLM call per answer.
 | Retriever | Slemify retriever (`task: embedding`), ONNX | c8g (Graviton4 CPU) | Domain-tuned query/doc embeddings, 768d | **Yes** (fine-tuned encoder) |
 | Reranker | sentence-transformers cross-encoder | c8g (Graviton4 CPU) | Re-ranks candidates to the best few | No — stock |
 | OpenSearch | OpenSearch k-NN | CPU pod | Vector search over 3900+ doc chunks | — |
-| Auditor SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed | No — a stock 30B-A3B MoE at q4 (3.3B active params/token; only lever that raised accuracy AND speed together vs the previous dense 8B), grounded by RAG |
+| Analyst SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed | No — a stock 30B-A3B MoE at q4 (3.3B active params/token; only lever that raised accuracy AND speed together vs the previous dense 8B), grounded by RAG |
 | Faithfulness gate | Bedrock LLM | Managed | Judges whether the draft is supported by the evidence; drives accept/retry/escalate/abstain | No — LLM judge |
 | LLM API | Bedrock | Managed | Open-ended fallback / escalation | No — general model |
 
@@ -76,6 +76,30 @@ deliberately **plain code, not models** — they are control-loop glue, and a fe
 rules do the job. The faithfulness gate is the opposite choice: catching a
 confidently-wrong domain answer needs judgement, so it's an LLM call, not a
 heuristic. See "Right tool for the right task" below.
+
+## Seats: who fills each role
+
+Every model-backed step is a **seat** that either the frontier LLM on Bedrock
+or a small model on CPU can fill. Four environment variables on the orchestrator
+choose (see `agent/config.py`):
+
+| Seat | LLM value | CPU value (default) | What moves |
+|------|-----------|---------------------|------------|
+| `TRIAGE` | `llm` | `classifier` | Who classifies the query. The intent check follows: plain-code heuristic with the classifier, a short LLM call with the LLM. |
+| `EMBED` | `bedrock` | `slemify` | Who embeds the query (Titan v2, 1024d, or the tuned encoder, 768d). The OpenSearch index follows: `BEDROCK_INDEX_NAME` or `INDEX_NAME`. |
+| `RERANK` | `off` | `on` | Whether the cross-encoder re-orders candidates, or vector order is kept. |
+| `ANALYST` | `llm` | `slm` | Who drafts the answer. |
+
+The gate is always the LLM. Set all four to their LLM value and you have the
+**monolith**: one frontier model doing every step, the starting point most
+teams have. Move one seat at a time, re-run the eval, and read `/stats` (which
+reports the active `seats`) to see what each move changed in cost, latency,
+and quality. `ANALYST=llm` is also the one-variable control described under
+"Self-Correction": same graph, context, gate, and judge, only the drafter
+changed. Step names in the UI and logs say who actually filled each seat.
+
+Both indexes come from the same corpus; build the Bedrock one with
+`scripts/index-knowledge.py --embedder=bedrock`.
 
 ## Pods & How They Interact
 
@@ -104,7 +128,7 @@ flowchart LR
         TRIAGE["triage-inference pod<br/>classifier-serving · ONNX"]
         RETR["retriever-inference pod<br/>classifier-serving · ONNX embed"]
         RERANK["reranker pod<br/>cross-encoder · torch"]
-        AUD["auditor-inference pod<br/>llama.cpp · GGUF 30B-A3B MoE"]
+        AUD["analyst-inference pod<br/>llama.cpp · GGUF 30B-A3B MoE"]
         OS[("opensearch<br/>vector DB · StatefulSet")]
     end
 
@@ -155,7 +179,7 @@ sequenceDiagram
     participant R as Retriever (ONNX)
     participant S as OpenSearch
     participant X as Reranker
-    participant A as Auditor SLM
+    participant A as Analyst SLM
     participant B as Bedrock LLM
     U->>O: query (opens SSE stream)
     O->>T: classify
@@ -199,7 +223,7 @@ evidence before answering, instead of reasoning from documentation alone:
 | `list_events` | Recent events for that object or namespace | read (list) |
 | `validate_config` | Client-side structural + deprecated-apiVersion lint of a pasted manifest | none (local) |
 
-The tool output is folded into the auditor's context, so the answer is grounded
+The tool output is folded into the analyst's context, so the answer is grounded
 in the cluster's real state, not just the docs.
 
 **Safety — everything is read-only:**
@@ -219,7 +243,7 @@ gracefully and the agent answers from documentation — the demo still runs.
 
 ## Self-Correction (the faithfulness gate)
 
-After the auditor drafts an answer, a **faithfulness gate** decides whether that
+After the analyst drafts an answer, a **faithfulness gate** decides whether that
 draft is supported by the evidence the agent gathered (retrieved docs + tool
 output). The gate is an LLM call (Bedrock, `GATE_MODEL`, defaulting to the same
 model as escalation): catching a *confidently wrong* domain answer — one that
@@ -275,7 +299,7 @@ cases.
 
 One more caveat the breakeven table hides: the "SLM fails, escalation passes"
 row assumes escalation succeeds where the SLM failed. Measured, that assumption
-is weak: running the frontier LLM as the auditor through the identical pipeline
+is weak: running the frontier LLM as the analyst through the identical pipeline
 scored the same as the SLM, and missed the same cases the same way. On grounded
 in-domain questions, what the SLM cannot answer from the retrieved evidence, the
 LLM usually cannot either — the failures are retrieval and eval issues, not
@@ -295,7 +319,7 @@ future query for free; more Bedrock calls or GPU capacity are recurring costs
 that scale with volume forever.
 
 **Level 5 has a built-in test.** Before concluding the model is the ceiling, set
-`FORCE_LLM_AUDITOR=1` on the orchestrator and re-run the eval: every query is
+`ANALYST=llm` on the orchestrator and re-run the eval: every query is
 answered by the Bedrock LLM through the identical graph, retrieved context,
 gate, and judge. If the LLM fails the same cases, the problem is at levels 1-4
 and no amount of model upgrading will fix it. When we ran this control, the
@@ -327,7 +351,7 @@ steps and the confirmed result.
 evidence-checked heuristic (`remediation.detect_remediation`) recognizes the
 two problem shapes this demo ships scenarios for, with no model call. If that
 finds nothing but the query still names a resource of a kind the schema covers,
-the auditor SLM (CPU) is asked to propose a fix — see "How a fix is proposed"
+the analyst SLM (CPU) is asked to propose a fix — see "How a fix is proposed"
 below. Either way the result is the same shape and goes through the identical
 validate → dry-run → apply → verify pipeline; there is no separate, less-checked
 path for a model-proposed fix.
@@ -360,10 +384,10 @@ there is one generic engine (`remediation.plan_patch` / `apply_patch` /
 "verb") is a small, reusable function, not a scenario.
 
 When the query names a resource of a schema-covered kind but the fast
-heuristic doesn't recognize the specific problem, the auditor SLM is asked to
+heuristic doesn't recognize the specific problem, the analyst SLM is asked to
 propose which allowed field to change and to what value — constrained by a
 JSON Schema built straight from `PATCH_SCHEMA` and passed as `response_format`
-to the CPU auditor's OpenAI-compatible endpoint. llama.cpp compiles that into a
+to the CPU analyst's OpenAI-compatible endpoint. llama.cpp compiles that into a
 grammar and masks the sampler, so **the model cannot name a field outside the
 schema even if it tried** — this isn't a prompted convention, it's enforced at
 decode time. The proposal is then independently re-validated against the same
@@ -379,7 +403,7 @@ model for every step:
 - **Fine-tune where domain quality genuinely improves.** The **retriever**
   (embedding) is fine-tuned on the K8s corpus — that's where a custom model
   measurably beats a generic one (see the retriever numbers below).
-- **Serve a stock model where the base is already capable.** The **auditor**
+- **Serve a stock model where the base is already capable.** The **analyst**
   (generation) is served stock and grounded by RAG. We tested fine-tuning it and
   it made answers *worse*: the base model already reasons, what it lacked was the
   facts, and RAG supplies those. (We also tested quantizing it below q8_0; that
@@ -387,7 +411,7 @@ model for every step:
 - **Train a cheap head for a learned closed-set decision.** **Triage** is a
   logistic head on a frozen encoder — CPU-trained in seconds and deterministic.
   Its category rejects clear noise up front and sends in-domain questions to the
-  auditor SLM; only input it genuinely can't classify falls straight through to
+  analyst SLM; only input it genuinely can't classify falls straight through to
   the LLM.
 - **Use a stock model where it already wins.** The **reranker** is an
   off-the-shelf cross-encoder; we measured that *fine-tuning* one on synthetic
@@ -401,7 +425,7 @@ model for every step:
   questions escalate to Bedrock.
 
 So the agent runs on **two custom-trained models** (retriever, triage), a stock
-SLM auditor, a stock reranker, plain code for the control loop, and a capable LLM
+SLM analyst, a stock reranker, plain code for the control loop, and a capable LLM
 for the faithfulness gate and the open-ended fallback — not a fine-tuned model
 per step.
 
@@ -434,7 +458,7 @@ The domain-tuned retriever roughly **doubles retrieval quality** (recall and MRR
 and is **~5x faster per query** (the ONNX serving stack vs a torch-based stock
 encoder). Absolute recall looks low for both because the corpus has heavy
 duplication and we score a single gold chunk per query, but the relative gap is
-the signal: better recall means the auditor SLM sees more relevant docs, which
+the signal: better recall means the analyst SLM sees more relevant docs, which
 directly improves answer quality. This is the same encoder you would train with
 `slemify` for `task: embedding`, so the demo doubles as a worked example of when
 fine-tuning a retriever pays off (a narrow, domain-specific corpus).
@@ -472,11 +496,11 @@ do serve it — both backed by measurement.
 
 ## Demo Prompts (Tested)
 
-### 0. Config analysis — minValues (Auditor SLM reads a pasted manifest)
+### 0. Config analysis — minValues (Analyst SLM reads a pasted manifest)
 
 The headline demo: paste a real Karpenter manifest and ask the agent to analyze
 it. The agent lints it client-side (`validate_config`), grounds itself in the
-Karpenter docs via RAG, and the Auditor SLM explains it — here, what `minValues`
+Karpenter docs via RAG, and the Analyst SLM explains it — here, what `minValues`
 does and whether the config is valid (it is; `minValues: 3` requires at least 3
 of the listed instance families to be available before Karpenter launches):
 
@@ -500,11 +524,11 @@ what does minValues do and is my config correct?
 ```
 
 In the step log you'll see: Triage → Plan → `validate_config` (manifest lint) →
-Retriever/OpenSearch/Reranker → Auditor SLM → Critic. Live cluster tool use
+Retriever/OpenSearch/Reranker → Analyst SLM → Critic. Live cluster tool use
 (`describe_resource`/`list_events` against real objects) is demonstrated by the
 remediation scenarios in §4, which name actual broken resources.
 
-### 1. Config analysis (Auditor SLM responds)
+### 1. Config analysis (Analyst SLM responds)
 
 **NodePool limits:**
 ```
@@ -592,10 +616,10 @@ our NodePool disruption budget is set to nodes: "50%" but it doesn't seem to be 
 ### 2. Escalation to the LLM
 
 The LLM is the open-ended tail, not the default. A question reaches Bedrock two
-ways: triage can't classify it into the domain at all, or the auditor SLM drafts
+ways: triage can't classify it into the domain at all, or the analyst SLM drafts
 an answer the faithfulness gate finds unsupported by the retrieved docs (after a refine retry).
 The second path is the common one. To see it, ask an in-domain question the
-corpus only thinly covers: the auditor draft states something the retrieved docs
+corpus only thinly covers: the analyst draft states something the retrieved docs
 don't support, the faithfulness gate flags it, the agent refines and retries, and
 on a second miss escalates to Bedrock with everything it gathered (and if the LLM
 answer also isn't supported, it abstains with a calibrated reply).
@@ -697,7 +721,7 @@ The setup script:
 # Prerequisites: models deployed via slemify deploy
 # Port-forwards:
 kubectl port-forward -n slemify svc/k8s-autoscaling-triage-inference 8081:8080
-kubectl port-forward -n slemify svc/k8s-autoscaling-auditor-inference 8082:8080
+kubectl port-forward -n slemify svc/k8s-autoscaling-analyst-inference 8082:8080
 kubectl port-forward -n slemify svc/opensearch-cluster-master 9200:9200
 kubectl port-forward -n slemify svc/k8s-autoscaling-retriever-inference 8083:8080
 kubectl port-forward -n slemify svc/k8s-autoscaling-reranker 8084:80
@@ -799,9 +823,9 @@ python3 scripts/index-knowledge.py --append --source=karpenter
 
 ## The Story This Tells
 
-1. **Right tool for the right task** — fine-tune where it earns it (retrieval), serve stock where the base is already capable (the generation auditor + RAG, the reranker), use plain code for glue (routing, extraction), and use a capable LLM to check answers (the faithfulness gate) and for the open-ended tail
+1. **Right tool for the right task** — fine-tune where it earns it (retrieval), serve stock where the base is already capable (the generation analyst + RAG, the reranker), use plain code for glue (routing, extraction), and use a capable LLM to check answers (the faithfulness gate) and for the open-ended tail
 2. CPUs handle the full AI pipeline: classification, retrieval, reranking, generation, and tool use — no GPUs serve traffic
-3. **The CPU-served SLM is at parity with a frontier LLM on this workload — measured, not assumed.** Swapping the Bedrock escalation LLM in as the auditor through the identical pipeline scored the same and missed the same cases; the reproducible control is one env var (`FORCE_LLM_AUDITOR=1`). Quality is not what you give up by serving on CPU here
+3. **The CPU-served SLM is at parity with a frontier LLM on this workload — measured, not assumed.** Swapping the Bedrock escalation LLM in as the analyst through the identical pipeline scored the same and missed the same cases; the reproducible control is one env var (`ANALYST=llm`). Quality is not what you give up by serving on CPU here
 4. An agent can route, gather live evidence, and self-correct on CPU; the LLM checks every answer (it is not skipped), but a passing check costs less than a full LLM answer — see "Cost model" above for the breakeven math
 5. RAG + live cluster state grounds the response in real evidence (reduces hallucinations)
 6. A stock SLM grounded by RAG handles the domain answer on CPU; the custom training pays off in the retriever, not the generator

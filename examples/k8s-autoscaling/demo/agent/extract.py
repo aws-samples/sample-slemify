@@ -157,6 +157,25 @@ def is_operational(text: str) -> bool:
     return any(sig in low for sig in _OPERATIONAL_SIGNALS)
 
 
+# Explicit request to act on the user's LIVE cluster, as opposed to a question
+# about a config or a concept. Deliberately stricter than is_operational (which
+# matches "scal" and so fires on nearly every autoscaling question): it needs an
+# inspect-style verb AND a reference to their own cluster or resources. This is
+# the plain-code intent router used when the classifier holds the triage seat;
+# the LLM seat asks the model the same question in prose (classify.py).
+_ACTION_VERBS = re.compile(
+    r"\b(check|inspect|look at|look into|describe|diagnose|investigate|verify|"
+    r"validate|debug|show me|list|what'?s wrong with|why (?:is|are|does|isn'?t|aren'?t))\b")
+_OWN_CLUSTER = re.compile(
+    r"\b(my|our|this|the)\s+(cluster|nodepools?|node pools?|ec2nodeclass(?:es)?|"
+    r"deployments?|hpas?|scaledobjects?|pdbs?|pods?|nodes?)\b|\bkubectl\b|\bin (?:my|our) cluster\b")
+
+
+def wants_cluster_action(text: str) -> bool:
+    low = text.lower()
+    return bool(_ACTION_VERBS.search(low)) and bool(_OWN_CLUSTER.search(low))
+
+
 def select_cluster_tools(query: str) -> list:
     """On the diagnose path, pick which read-only cluster tool(s) to run: a named
     resource is described directly (with events on a symptom); otherwise a broad

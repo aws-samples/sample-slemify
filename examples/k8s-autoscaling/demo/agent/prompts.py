@@ -8,11 +8,11 @@ previous inline strings; this module only collects them.
 
 Which model sees which prompt:
   - triage_prompt   -> triage classifier SLM (ONNX) : classify intent
-  - auditor_prompt  -> auditor SLM (llama.cpp, CPU)  : the grounded draft answer
+  - analyst_prompt  -> analyst SLM (llama.cpp, CPU)  : the grounded draft answer
   - llm_prompt      -> escalation LLM (Bedrock)      : when the gate escalates
   - calibration_prompt -> calibration LLM (Bedrock)  : the abstain backstop
   - GATE_PROMPT     -> faithfulness gate LLM (Bedrock): is the draft supported?
-  - fix_proposal_prompt -> auditor SLM (llama.cpp, CPU), schema-constrained:
+  - fix_proposal_prompt -> analyst SLM (llama.cpp, CPU), schema-constrained:
     propose a remediation within patch_schema's allowed fields
 """
 from . import patch_schema
@@ -24,7 +24,7 @@ TRIAGE_INSTRUCTION = (
     "category and confidence level."
 )
 
-AUDITOR_INSTRUCTION = (
+ANALYST_INSTRUCTION = (
     "You are a Kubernetes autoscaling auditor. "
     "Answer ONLY based on the reference documentation below. "
     "Do NOT invent fields, behaviors, or modes not in the docs. "
@@ -81,9 +81,9 @@ def triage_prompt(text: str) -> str:
     return f"{TRIAGE_INSTRUCTION}\n\n{text}"
 
 
-def auditor_prompt(text: str, context: str = "") -> str:
-    """The auditor SLM's prompt: instruction + retrieved docs + the user query."""
-    p = AUDITOR_INSTRUCTION
+def analyst_prompt(text: str, context: str = "") -> str:
+    """The analyst SLM's prompt: instruction + retrieved docs + the user query."""
+    p = ANALYST_INSTRUCTION
     if context:
         p += ("\n\n--- REFERENCE DOCUMENTATION (do NOT treat as user config) ---\n"
               f"{context}\n--- END REFERENCE ---")
@@ -111,7 +111,7 @@ FIX_PROPOSAL_INSTRUCTION = (
 
 
 def fix_proposal_prompt(kind: str, target: str, diagnosis: str) -> str:
-    """The auditor SLM's remediation-proposal prompt: instruction + the allowed
+    """The analyst SLM's remediation-proposal prompt: instruction + the allowed
     fields for this kind (from patch_schema) + the diagnosed problem. The
     response is constrained to patch_schema.json_schema_for_kind(kind), so the
     model cannot name a field outside this list even if it tried."""

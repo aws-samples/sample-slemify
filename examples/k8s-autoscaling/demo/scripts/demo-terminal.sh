@@ -6,7 +6,7 @@
 #   │  Pane 0: Orchestrator logs          │
 #   │  (shows routing decisions + timing) │
 #   ├──────────────────┬──────────────────┤
-#   │  Pane 1: Triage  │  Pane 2: Auditor │
+#   │  Pane 1: Triage  │  Pane 2: Analyst │
 #   │  SLM logs        │  SLM logs        │
 #   └──────────────────┴──────────────────┘
 #
@@ -58,12 +58,12 @@ tmux split-window -t "$SESSION" -v -p 40
 tmux send-keys -t "$SESSION" \
   'echo "=== Triage SLM (4B, CPU) ===" && kubectl logs -n slemify -l slemify.io/project=k8s-autoscaling-triage -f --tail=1' Enter
 
-# Split bottom row vertically for auditor
+# Split bottom row vertically for analyst
 tmux split-window -t "$SESSION" -h -p 50
 
-# Bottom-right: auditor SLM
+# Bottom-right: analyst SLM
 tmux send-keys -t "$SESSION" \
-  'echo "=== Auditor SLM (8B, CPU) ===" && kubectl logs -n slemify -l slemify.io/project=k8s-autoscaling-auditor -f --tail=1' Enter
+  'echo "=== Analyst SLM (CPU) ===" && kubectl logs -n slemify -l slemify.io/project=k8s-autoscaling-analyst -f --tail=1' Enter
 
 # Select top pane
 tmux select-pane -t "$SESSION:0.0"

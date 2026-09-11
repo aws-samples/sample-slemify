@@ -2,7 +2,7 @@
 
 Scores (query, document) pairs with a cross-encoder and returns relevance
 scores, so the orchestrator can retrieve a wide candidate set from OpenSearch
-(k=10) and keep only the best few for the auditor SLM. A cross-encoder reads
+(k=10) and keep only the best few for the analyst SLM. A cross-encoder reads
 the query and document together, which ranks relevance far more accurately
 than the embedding cosine similarity used for the initial vector search.
 

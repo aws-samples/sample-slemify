@@ -120,8 +120,8 @@ spec:
               value: "eu-west-1"
             - name: TRIAGE_URL
               value: "http://k8s-autoscaling-triage-inference.slemify:8080"
-            - name: AUDITOR_URL
-              value: "http://k8s-autoscaling-auditor-inference.slemify:8080"
+            - name: ANALYST_URL
+              value: "http://k8s-autoscaling-analyst-inference.slemify:8080"
             - name: OPENSEARCH_URL
               value: "http://opensearch-cluster-master.slemify:9200"
             - name: EMBEDDING_URL
@@ -132,8 +132,23 @@ spec:
               value: "http://k8s-autoscaling-tools.slemify"
             - name: INDEX_NAME
               value: "k8s-autoscaling-knowledge"
+            - name: BEDROCK_INDEX_NAME
+              value: "k8s-autoscaling-knowledge-bedrock"
             - name: LLM_MODEL
               value: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+            # Seats: who fills each model-backed role. These defaults are the
+            # CPU-first system. Set all four to their LLM value (llm / bedrock /
+            # off / llm) for the monolith: one frontier model doing every step.
+            # Move one seat at a time and re-run the eval to see what changed.
+            # See agent/config.py for the allowed values.
+            - name: TRIAGE
+              value: "classifier"
+            - name: EMBED
+              value: "slemify"
+            - name: RERANK
+              value: "on"
+            - name: ANALYST
+              value: "slm"
           resources:
             requests:
               cpu: 100m

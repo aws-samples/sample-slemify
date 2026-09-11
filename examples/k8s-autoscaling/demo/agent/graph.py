@@ -11,7 +11,9 @@ Doc-first by default. Tools are opt-in:
   gate: accept | refine(deprecated fix) | verify(runtime claim) | escalate(LLM)
 
 Each node streams the SSE vocabulary the UI consumes (step_start/step_done/
-model/token/answer_reset/response).
+model/token/answer_reset/response). Step names say who actually filled each
+seat (config.py: TRIAGE, EMBED, RERANK, ANALYST), so the UI, the logs, and the
+eval describe the configuration that ran, not the one the code assumed.
 """
 import asyncio
 import time
@@ -23,6 +25,18 @@ from langgraph.graph import END, START, StateGraph
 from . import classify, config, extract, gate, generation, metrics, patch_schema, prompts, retrieval, tools
 from . import toolclient
 from .validation import validate_config, validate_draft_fix
+
+# --- Seat labels (what the UI and eval see) ---
+LBL_TRIAGE = ("Triage \u00b7 LLM (Bedrock)" if config.TRIAGE == "llm"
+              else "Triage classifier \u00b7 ONNX Runtime (CPU)")
+LBL_INTENT = "Intent router (LLM)" if config.TRIAGE == "llm" else "Intent router (CPU)"
+LBL_EMBED = ("Retriever (Bedrock embeddings)" if config.EMBED == "bedrock"
+             else "Retriever (tuned encoder, CPU)")
+LBL_EMBED_DETAIL = (f"Titan, {config.BEDROCK_EMBED_DIM}d" if config.EMBED == "bedrock"
+                    else "domain-tuned encoder, 768d")
+LBL_RERANK = "Reranker (off)" if config.RERANK == "off" else "Reranker (cross-encoder, CPU)"
+LBL_ANALYST = "Analyst \u00b7 LLM (Bedrock)" if config.ANALYST == "llm" else "Analyst SLM (CPU)"
+MODEL_ANALYST = "LLM (Bedrock)" if config.ANALYST == "llm" else "Analyst SLM (CPU)"
 
 
 class AgentState(TypedDict, total=False):
@@ -65,7 +79,7 @@ async def _stream_answer(writer, name: str, token_stream) -> str:
     """Relay a model's token stream onto the SSE vocabulary the UI consumes, and
     return the full text. Emits the step_done timing on the first token (so the
     UI can show time-to-first-token) and a token event per chunk. Shared by every
-    node that streams an answer (auditor SLM, LLM escalation, calibrated fallback)
+    node that streams an answer (analyst SLM, LLM escalation, calibrated fallback)
     so the streaming contract lives in one place."""
     t = time.perf_counter()
     parts, first = [], True
@@ -85,14 +99,14 @@ async def _stream_answer(writer, name: str, token_stream) -> str:
 async def n_triage(state: AgentState) -> dict:
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
-    writer({"type": "step_start", "name": "Triage classifier \u00b7 ONNX Runtime (CPU)", "note": "classifying intent"})
+    writer({"type": "step_start", "name": LBL_TRIAGE, "note": "classifying intent"})
     t = time.perf_counter()
     result = await loop.run_in_executor(None, classify.classify, state["query"])
     cat = result["category"].replace("_", " ")
     detail = (f"off-topic \u00b7 {result['confidence']} confidence \u2192 reject"
               if result["category"] == "noise"
               else f"{cat} \u00b7 {result['confidence']} confidence \u2192 in-domain")
-    writer({"type": "step_done", "name": "Triage classifier \u00b7 ONNX Runtime (CPU)", "ms": _ms(t), "detail": detail})
+    writer({"type": "step_done", "name": LBL_TRIAGE, "ms": _ms(t), "detail": detail})
     return {"category": result["category"], "confidence": result["confidence"]}
 
 
@@ -107,13 +121,13 @@ async def n_intent(state: AgentState) -> dict:
     are available), queue the cluster tools; otherwise stay doc-first."""
     writer = get_stream_writer()
     loop = asyncio.get_event_loop()
-    writer({"type": "step_start", "name": "Intent router (CPU)", "note": "answer from docs, or act on the cluster?"})
+    writer({"type": "step_start", "name": LBL_INTENT, "note": "answer from docs, or act on the cluster?"})
     t = time.perf_counter()
     intent = await loop.run_in_executor(None, classify.classify_intent, state["query"])
     use_tools = intent == "action" and toolclient.available()
     pending = extract.select_cluster_tools(state["query"]) if use_tools else []
     detail = ("explicit cluster request \u2192 " + ", ".join(pending)) if pending else "answer from documentation"
-    writer({"type": "step_done", "name": "Intent router (CPU)", "ms": _ms(t), "detail": detail})
+    writer({"type": "step_done", "name": LBL_INTENT, "ms": _ms(t), "detail": detail})
     return {"intent": intent, "pending_tools": pending}
 
 
@@ -152,10 +166,10 @@ async def n_retrieve(state: AgentState) -> dict:
     loop = asyncio.get_event_loop()
     query = state["query"]
     broaden = state.get("broaden", False)
-    writer({"type": "step_start", "name": "Retriever (tuned encoder, CPU)", "note": "embedding query \u2192 768d"})
+    writer({"type": "step_start", "name": LBL_EMBED, "note": "embedding query"})
     t = time.perf_counter()
     embedding = await loop.run_in_executor(None, retrieval.embed_query, query)
-    writer({"type": "step_done", "name": "Retriever (tuned encoder, CPU)", "ms": _ms(t), "detail": "domain-tuned encoder"})
+    writer({"type": "step_done", "name": LBL_EMBED, "ms": _ms(t), "detail": LBL_EMBED_DETAIL})
 
     writer({"type": "step_start", "name": "OpenSearch (vector DB)", "note": "hybrid k-NN + BM25"})
     t = time.perf_counter()
@@ -163,10 +177,12 @@ async def n_retrieve(state: AgentState) -> dict:
     writer({"type": "step_done", "name": "OpenSearch (vector DB)", "ms": _ms(t), "detail": f"{len(candidates)} candidates"})
 
     keep = config.KEEP_DOCS + (config.BROADEN_EXTRA if broaden else 0)
-    writer({"type": "step_start", "name": "Reranker (cross-encoder, CPU)", "note": f"scoring {len(candidates)} \u2192 top {keep}"})
+    note = (f"keeping top {keep} in vector order" if config.RERANK == "off"
+            else f"scoring {len(candidates)} \u2192 top {keep}")
+    writer({"type": "step_start", "name": LBL_RERANK, "note": note})
     t = time.perf_counter()
     docs = await loop.run_in_executor(None, retrieval.rerank_docs, query[:config.RERANK_QUERY_CHARS], candidates, keep)
-    writer({"type": "step_done", "name": "Reranker (cross-encoder, CPU)", "ms": _ms(t), "detail": f"kept top {len(docs)}"})
+    writer({"type": "step_done", "name": LBL_RERANK, "ms": _ms(t), "detail": f"kept top {len(docs)}"})
 
     # Field-aware guarantee for pasted configs: similarity ranking can bury the
     # one chunk that DEFINES a field the manifest uses (the model then
@@ -198,17 +214,19 @@ async def n_generate(state: AgentState) -> dict:
         writer({"type": "answer_reset", "reason": "refining"})
 
     unclassified = state.get("category", "unknown") in (None, "unknown")
-    # Control-experiment switch: FORCE_LLM_AUDITOR makes the LLM the auditor for
-    # EVERY query (same graph, context, gate, and judge as the SLM path). Used to
-    # test whether the hard eval cases are an SLM-capability problem or a
-    # domain/agent/eval problem — if the LLM fails the same cases here, tuning the
-    # SLM is chasing the wrong layer. Not for production use.
-    if config.FORCE_LLM_AUDITOR or unclassified:
+    # Who drafts: the ANALYST seat. With the LLM in the seat (the monolith, or
+    # the one-variable control: same graph, context, gate, and judge, only the
+    # drafter changed) every query goes to Bedrock. With the SLM in the seat,
+    # only an unclassifiable query falls back to the LLM.
+    if config.ANALYST == "llm":
+        name, stream_fn, used_llm = LBL_ANALYST, generation.stream_llm, True
+        writer({"type": "model", "name": MODEL_ANALYST})
+    elif unclassified:
         name, stream_fn, used_llm = "LLM API (Bedrock fallback)", generation.stream_llm, True
         writer({"type": "model", "name": "LLM (Bedrock)"})
     else:
-        name, stream_fn, used_llm = "Auditor SLM (30B-A3B MoE, CPU)", generation.stream_slm, False
-        writer({"type": "model", "name": "Auditor SLM (30B-A3B MoE, CPU)"})
+        name, stream_fn, used_llm = LBL_ANALYST, generation.stream_slm, False
+        writer({"type": "model", "name": MODEL_ANALYST})
 
     writer({"type": "step_start", "name": name, "note": "generating answer"})
     draft = await _stream_answer(writer, name, stream_fn(state["query"], context))
@@ -319,7 +337,7 @@ async def _find_fix(state: AgentState, writer, loop) -> dict | None:
       1. detect_remediation: cheap, evidence-checked heuristics for the known
          problem shapes this demo ships scenarios for (no model call).
       2. Otherwise, if the query names a resource of a kind PATCH_SCHEMA covers
-         at all, ask the auditor SLM (CPU) to propose a fix -- constrained by
+         at all, ask the analyst SLM (CPU) to propose a fix -- constrained by
          response_format to only ever name a field from patch_schema for this
          kind. Its proposal is then re-validated against the schema (defense
          in depth: the grammar should already guarantee this) before it is
@@ -339,21 +357,21 @@ async def _find_fix(state: AgentState, writer, loop) -> dict | None:
     diagnosis = state.get("draft", "")
     prompt = prompts.fix_proposal_prompt(kind, target, diagnosis)
     schema = patch_schema.json_schema_for_kind(kind)
-    writer({"type": "step_start", "name": "Fix proposal (Auditor SLM, CPU)",
+    writer({"type": "step_start", "name": "Fix proposal (Analyst SLM, CPU)",
             "note": f"proposing a schema-constrained fix for {kind} {target}"})
     t = time.perf_counter()
     proposal = await generation.propose_fix(prompt, schema)
     if not proposal or proposal.get("no_fix") or proposal.get("field") in (None, "none"):
-        writer({"type": "step_done", "name": "Fix proposal (Auditor SLM, CPU)", "ms": _ms(t),
+        writer({"type": "step_done", "name": "Fix proposal (Analyst SLM, CPU)", "ms": _ms(t),
                 "detail": "no safe fix proposed"})
         return None
     field, value = proposal.get("field", ""), proposal.get("value", "")
     plan = await loop.run_in_executor(None, toolclient.plan_fix, kind, target, field, value)
     if not plan.get("ok"):
-        writer({"type": "step_done", "name": "Fix proposal (Auditor SLM, CPU)", "ms": _ms(t),
+        writer({"type": "step_done", "name": "Fix proposal (Analyst SLM, CPU)", "ms": _ms(t),
                 "detail": f"proposal rejected by schema: {plan.get('message')}"})
         return None
-    writer({"type": "step_done", "name": "Fix proposal (Auditor SLM, CPU)", "ms": _ms(t),
+    writer({"type": "step_done", "name": "Fix proposal (Analyst SLM, CPU)", "ms": _ms(t),
             "detail": f"{field} -> {value}"})
     return {"kind": kind, "target": target, "field": field, "value": value,
             "summary": plan.get("message", patch_schema.describe_fix(kind, field, value)),

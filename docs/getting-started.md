@@ -1,8 +1,8 @@
 # Getting Started: Build a Multi-Agent K8s Expert
 
-This guide walks you through building a complete multi-agent system using Slemify. By the end, you'll have two specialist models running on CPUs that audit Kubernetes autoscaling configurations, backed by a RAG knowledge base and an LLM fallback for edge cases. One is a CPU-trained encoder classifier (triage), the other a stock generative SLM served on CPU and grounded by RAG (auditor).
+This guide walks you through building a complete multi-agent system using Slemify. By the end, you'll have two specialist models running on CPUs that audit Kubernetes autoscaling configurations, backed by a RAG knowledge base and an LLM fallback for edge cases. One is a CPU-trained encoder classifier (triage), the other a stock generative SLM served on CPU and grounded by RAG (analyst).
 
-Total time: ~1 hour (mostly waiting for the convert and indexing steps). Cost: ~$15-30 (mostly Bedrock synthetic data for the triage classifier; the auditor is convert-only on CPU).
+Total time: ~1 hour (mostly waiting for the convert and indexing steps). Cost: ~$15-30 (mostly Bedrock synthetic data for the triage classifier; the analyst is convert-only on CPU).
 
 ## The problem
 
@@ -21,7 +21,7 @@ User question or YAML config
         |
         |-- noise --> rejected
         |-- low confidence --> LLM API + RAG
-        |-- high confidence --> Auditor SLM + RAG
+        |-- high confidence --> Analyst SLM + RAG
                                     |
                                     v
                             Structured analysis
@@ -31,11 +31,11 @@ User question or YAML config
 Two specialists, one pipeline — and they use two different model families:
 - **Triage** (`task: classification`): a frozen encoder + logistic head that
   classifies intent in ~25ms. CPU-trained in seconds, deterministic.
-- **Auditor** (`task: generation`): a causal LM (small-MoE, ~3B active params/token) served stock and grounded by
+- **Analyst** (`task: generation`): a causal LM (small-MoE, ~3B active params/token) served stock and grounded by
   RAG that produces structured config analysis, streamed.
 
 Both run on Graviton4 CPUs at inference time, and no GPU is used anywhere in the
-pipeline: the triage classifier trains on CPU and the auditor is downloaded,
+pipeline: the triage classifier trains on CPU and the analyst is downloaded,
 converted to GGUF, and quantized on CPU. The LLM API is called only for the
 ~10-20% of queries where triage isn't confident.
 
@@ -147,19 +147,19 @@ Key choices:
 - **1200 synthetic pairs**: Bedrock generates `query → category` examples from
   your raw queries.
 
-## Step 3: Define the auditor model
+## Step 3: Define the analyst model
 
-The auditor is the expert. It receives queries that passed triage and produces structured analysis. Create `auditor/expert.yaml`:
+The analyst is the expert. It receives queries that passed triage and produces structured analysis. Create `analyst/expert.yaml`:
 
 ```yaml
 apiVersion: slemify/v1
 
 project:
-  name: k8s-autoscaling-auditor
+  name: k8s-autoscaling-analyst
   task: generation
   output_format: free_form
   domain: >
-    Expert auditor for Kubernetes autoscaling configurations on EKS.
+    Expert analyst for Kubernetes autoscaling configurations on EKS.
     Produces structured reasoning about what is wrong, why it is
     dangerous, and how to fix it.
 
@@ -183,34 +183,34 @@ data:
 Key choices:
 - **`task: generation`**: routes through the generative path — a causal LM
   downloaded, converted to GGUF, and quantized on CPU (no fine-tuning), then
-  served on CPU and grounded by RAG. Unlike triage, the auditor must *write* a
+  served on CPU and grounded by RAG. Unlike triage, the analyst must *write* a
   report, which only a generative model can do.
 - **Small-MoE model**: stores 30B parameters of quality but activates only ~3B per token, so on CPU it answers better than a dense 8B while decoding faster — at the cost of more RAM. Start with a dense 7-8B if memory is tight; the eval scorecard decides (see [choosing a base model](deep-dive/training.md#choosing-a-base-model))
-- **`output_format: free_form`**: the auditor generates paragraphs, not labels
-- **no synthetic data or labels**: the auditor isn't trained; its knowledge comes from RAG at serving time
+- **`output_format: free_form`**: the analyst generates paragraphs, not labels
+- **no synthetic data or labels**: the analyst isn't trained; its knowledge comes from RAG at serving time
 
 ## Step 4: Train and deploy
 
 ```bash
-# Build both models (triage trains on CPU in seconds; the auditor converts on CPU, ~6 min)
+# Build both models (triage trains on CPU in seconds; the analyst converts on CPU, ~6 min)
 slemify deploy --config triage/expert.yaml
-slemify deploy --config auditor/expert.yaml
+slemify deploy --config analyst/expert.yaml
 ```
 
-Each command runs the full pipeline: data prep, CPU training (triage) or GGUF convert and quantization (auditor), deployment to your cluster, and a validation report.
+Each command runs the full pipeline: data prep, CPU training (triage) or GGUF convert and quantization (analyst), deployment to your cluster, and a validation report.
 
 Monitor progress:
 
 ```bash
 slemify status k8s-autoscaling-triage
-slemify status k8s-autoscaling-auditor
+slemify status k8s-autoscaling-analyst
 ```
 
 ## Step 5: View the reports
 
 ```bash
 slemify report --config triage/expert.yaml
-slemify report --config auditor/expert.yaml
+slemify report --config analyst/expert.yaml
 ```
 
 The HTML report shows:
@@ -248,7 +248,7 @@ This deploys:
 Open `http://localhost:8000` and paste a Kubernetes config. You'll see:
 1. Triage classification (~25ms on CPU)
 2. RAG retrieval from the knowledge base
-3. Auditor analysis streaming token by token
+3. Analyst analysis streaming token by token
 
 The tmux dashboard shows all three pods processing in sequence, proving it's a multi-agent system running entirely on CPUs.
 
@@ -268,7 +268,7 @@ The tmux dashboard shows all three pods processing in sequence, proving it's a m
 | Item | Cost | Frequency |
 |------|------|-----------|
 | Synthetic data (Bedrock, triage only) | ~$15 | One-time |
-| Model prep (CPU: triage train / auditor convert) | <$1 | One-time |
+| Model prep (CPU: triage train / analyst convert) | <$1 | One-time |
 | Inference (CPU Spot) | ~$117/mo per replica | Ongoing |
 | OpenSearch (CPU) | ~$50/mo | Ongoing |
 | LLM fallback (Bedrock) | ~$0.008 per query | Only for low-confidence queries |

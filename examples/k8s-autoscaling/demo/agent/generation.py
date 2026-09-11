@@ -1,4 +1,4 @@
-"""Answer generation: stream tokens from the auditor SLM (default, on CPU) or
+"""Answer generation: stream tokens from the analyst SLM (default, on CPU) or
 the Bedrock LLM (escalation / fallback). Both take the assembled RAG context.
 """
 import asyncio
@@ -11,16 +11,16 @@ from . import prompts
 
 
 async def stream_slm(text: str, context: str = ""):
-    """Stream tokens from the auditor SLM (OpenAI-compatible /v1/chat/completions)."""
+    """Stream tokens from the analyst SLM (OpenAI-compatible /v1/chat/completions)."""
     body = {
         "model": "model",
-        "messages": [{"role": "user", "content": prompts.auditor_prompt(text, context)}],
+        "messages": [{"role": "user", "content": prompts.analyst_prompt(text, context)}],
         "max_tokens": 1024,
         "temperature": 0.1,
         "stream": True,
     }
     async with httpx.AsyncClient(timeout=60) as client:
-        async with client.stream("POST", f"{config.AUDITOR_URL}/v1/chat/completions", json=body) as resp:
+        async with client.stream("POST", f"{config.ANALYST_URL}/v1/chat/completions", json=body) as resp:
             async for line in resp.aiter_lines():
                 if not line.startswith("data: "):
                     continue
@@ -36,7 +36,7 @@ async def stream_slm(text: str, context: str = ""):
 
 
 async def propose_fix(prompt: str, json_schema: dict) -> dict | None:
-    """Ask the auditor SLM (CPU) for a schema-constrained remediation proposal.
+    """Ask the analyst SLM (CPU) for a schema-constrained remediation proposal.
     Passed as response_format.json_schema, llama.cpp's server compiles this into
     a GBNF grammar and masks the sampler, so the model CANNOT emit a field name
     or JSON shape outside json_schema, regardless of what it 'wants' to say.
@@ -51,7 +51,7 @@ async def propose_fix(prompt: str, json_schema: dict) -> dict | None:
     }
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(f"{config.AUDITOR_URL}/v1/chat/completions", json=body)
+            resp = await client.post(f"{config.ANALYST_URL}/v1/chat/completions", json=body)
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"]
             return json.loads(content)

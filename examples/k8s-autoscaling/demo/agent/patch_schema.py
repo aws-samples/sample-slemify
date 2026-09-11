@@ -9,7 +9,7 @@ field is a schema entry, not a new function; onboarding a new verb (a new KIND
 of write, e.g. "toggle a bool") is a small, reusable addition, not a scenario.
 
 The model proposes {field, value} constrained to this schema (a JSON Schema
-built from PATCH_SCHEMA is passed as response_format to the CPU auditor SLM, so
+built from PATCH_SCHEMA is passed as response_format to the CPU analyst SLM, so
 it cannot name a field or kind that isn't here). remediation.py does the
 cluster IO (fetch/patch/verify); this module is pure Python — no Kubernetes
 client — so it can be tested and reasoned about without a cluster.

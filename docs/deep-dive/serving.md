@@ -163,7 +163,7 @@ For a deeper treatment of this topic, see [Silicon, Memory, and Modern Inference
 The honest counterpart to the section above. CPU serving is not a claim that GPUs are unnecessary; it is a claim about placing each job on the hardware it is best at. Two facts frame the decision:
 
 1. **Adding CPU replicas scales throughput, not latency.** Three replicas serve 3x the requests at 3x the cost, but a single request is exactly as fast on three replicas as on one. If your problem is aggregate demand, replicas solve it linearly and cheaply. If your problem is the speed of one request, they do nothing.
-2. **Quality is not the differentiator on grounded tasks.** We measured this directly: running a frontier LLM (the demo's Bedrock escalation model) as the auditor through the identical pipeline (same retrieved context, same faithfulness gate, same judge) scored the same as the CPU-served SLM. On RAG-grounded domain work, the model is not the bottleneck; retrieval and evaluation quality are. See the FAQ in the root README.
+2. **Quality is not the differentiator on grounded tasks.** We measured this directly: running a frontier LLM (the demo's Bedrock escalation model) as the analyst through the identical pipeline (same retrieved context, same faithfulness gate, same judge) scored the same as the CPU-served SLM. On RAG-grounded domain work, the model is not the bottleneck; retrieval and evaluation quality are. See the FAQ in the root README.
 
 With those two in hand, the cases where a GPU genuinely earns its 3-10x hourly cost:
 
@@ -202,9 +202,9 @@ Prompt throughput: ~220 tokens/sec. Generation: ~51 ms/token.
 | Medium query + RAG (3 docs) | 800 | 3.6s | 15.3s | **18.9s** |
 | Long query + RAG (5 docs) | 1,500 | 6.8s | 15.3s | **22.1s** |
 
-### 30B-A3B MoE at q4 (measured on the k8s-autoscaling auditor, 8 Graviton4 threads)
+### 30B-A3B MoE at q4 (measured on the k8s-autoscaling analyst, 8 Graviton4 threads)
 
-These are production measurements from the running demo auditor (a 30B-total/3B-active MoE at q4_k_m, llama.cpp, 8-thread pod on a c8g instance), not projections. The MoE profile is the reverse of a dense model's: decode is cheap (only ~3.3B active parameters stream per token, so it decodes near dense-3B speed at dense-30B-class quality) while prefill is the weak axis (a long prompt touches most experts collectively, so the sparse-activation saving does not apply).
+These are production measurements from the running demo analyst (a 30B-total/3B-active MoE at q4_k_m, llama.cpp, 8-thread pod on a c8g instance), not projections. The MoE profile is the reverse of a dense model's: decode is cheap (only ~3.3B active parameters stream per token, so it decodes near dense-3B speed at dense-30B-class quality) while prefill is the weak axis (a long prompt touches most experts collectively, so the sparse-activation saving does not apply).
 
 | Phase | Measured | Notes |
 |-------|----------|-------|
@@ -490,7 +490,7 @@ If inference latency is higher than expected, check these in order:
 
 **Two levers we measured that do not help here, so you can skip them:**
 
-- **Speculative decoding** (a small draft model proposing tokens the big model verifies) gave zero speedup on the 30B-A3B MoE auditor: measured decode was ~38.7 tok/s with and without a 0.6B same-family draft model. The mechanism only pays when decode is expensive; an A3B MoE's decode is already cheap (~3.3B active params/token), so the draft-and-verify overhead cancels the tokens it saves. On a *dense* 8B+ model the math may differ; measure before adopting.
+- **Speculative decoding** (a small draft model proposing tokens the big model verifies) gave zero speedup on the 30B-A3B MoE analyst: measured decode was ~38.7 tok/s with and without a 0.6B same-family draft model. The mechanism only pays when decode is expensive; an A3B MoE's decode is already cheap (~3.3B active params/token), so the draft-and-verify overhead cancels the tokens it saves. On a *dense* 8B+ model the math may differ; measure before adopting.
 - **Chunk-level KV cache reuse** (precomputing KV for RAG chunks and stitching them per query, CacheBlend-style) is not available on llama.cpp. llama.cpp reuses KV only for a shared *prefix* (`--cache-prompt`), which does not help when the retrieved chunks differ per query. The chunk-level techniques live in the vLLM/LMCache GPU stack. So on this stack, the way to attack prefill cost is smaller retrieved context and prefix warming, not KV engineering.
 
 ## The OpenAI-compatible API

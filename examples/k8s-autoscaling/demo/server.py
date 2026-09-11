@@ -68,22 +68,30 @@ async def warmup():
         "max_tokens": 8,
         "temperature": 0.0,
     }
+    # Only warm the seats a CPU pod holds; LLM-held seats have nothing to warm.
+    cpu_pods = []
+    if config.TRIAGE == "classifier":
+        cpu_pods.append(("triage", config.TRIAGE_URL))
+    if config.ANALYST == "slm":
+        cpu_pods.append(("analyst", config.ANALYST_URL))
     async with httpx.AsyncClient(timeout=30) as client:
         results = await asyncio.gather(
-            client.post(f"{config.TRIAGE_URL}/v1/chat/completions", json=body),
-            client.post(f"{config.AUDITOR_URL}/v1/chat/completions", json=body),
+            *(client.post(f"{url}/v1/chat/completions", json=body) for _, url in cpu_pods),
             return_exceptions=True,
         )
-    for name, r in zip(("triage", "auditor"), results):
+    for (name, _), r in zip(cpu_pods, results):
         print(f"  Warmup {name}: {'ok' if not isinstance(r, Exception) else f'failed ({r})'}")
     loop = asyncio.get_event_loop()
-    for name, fn in (("embedding", lambda: retrieval.embed_query("warmup")),
-                     ("reranker", lambda: retrieval.rerank_docs("warmup", ["warmup doc"], 1))):
+    warm = [("embedding", lambda: retrieval.embed_query("warmup"))]
+    if config.RERANK == "on":
+        warm.append(("reranker", lambda: retrieval.rerank_docs("warmup", ["warmup doc"], 1)))
+    for name, fn in warm:
         try:
             await loop.run_in_executor(None, fn)
             print(f"  Warmup {name}: ok")
         except Exception as e:
             print(f"  Warmup {name}: failed ({e})")
+    print(f"  Seats: {config.seats()}")
     print("  All services warmed up")
     _ready = True
 
@@ -108,8 +116,9 @@ async def stats():
     model of the CPU-first architecture hinges on this number (breakeven vs
     calling the LLM directly is ~87-92%); until now it was only ever estimated
     from the eval scorecard. Counters reset on restart; the JSON-line metric
-    events in the pod logs are the durable record."""
-    return metrics.snapshot()
+    events in the pod logs are the durable record. `seats` says which
+    configuration produced these numbers."""
+    return {"seats": config.seats(), **metrics.snapshot()}
 
 
 @app.get("/config")

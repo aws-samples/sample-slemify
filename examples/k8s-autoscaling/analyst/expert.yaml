@@ -1,7 +1,7 @@
 apiVersion: slemify/v1
 
 project:
-  name: k8s-autoscaling-auditor
+  name: k8s-autoscaling-analyst
   task: generation
   output_format: free_form
   # Description of the expert's scope. The model is served stock and grounded in

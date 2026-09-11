@@ -139,7 +139,7 @@ before/after — not a claim that it works, just the one avenue that stays insid
 ## Generation is served stock (no fine-tuning)
 
 The generative path does not train the model. We tested fine-tuning the
-generative auditor in the k8s-autoscaling example and it made answers *worse*:
+generative analyst in the k8s-autoscaling example and it made answers *worse*:
 for a knowledge task the base model already reasons and writes, and what it lacks
 is your facts. RAG supplies those at serving time more reliably than baking them
 into weights, and the answer's format is handled by prompting and constrained
@@ -167,7 +167,7 @@ Upload model-<quant>.gguf to S3
 
 1. **Download.** The job pulls the base model's weights from HuggingFace to a CPU node.
 2. **Convert.** llama.cpp's converter writes an f16 GGUF.
-3. **Quantize.** `llama-quantize` produces the configured level (default `q4_k_m`; the k8s auditor uses `q8_0`, see below).
+3. **Quantize.** `llama-quantize` produces the configured level (default `q4_k_m`; the k8s analyst uses `q8_0`, see below).
 4. **Upload.** The quantized `model-<quant>.gguf` and conversion logs are uploaded to S3 for the serving stage.
 
 There is no GPU, no adapter, and no checkpoint in this path. The job is a
@@ -182,7 +182,7 @@ The base model is the one Slemify converts and serves. Slemify supports any Hugg
 
 **Architecture first: dense vs Mixture-of-Experts.** On CPU, inference speed is set by memory bandwidth: every generated token requires streaming the model's *active* weights through RAM. In a dense model, every parameter is active for every token, so speed is inversely proportional to total size. An MoE stores many parallel "expert" sub-networks but routes each token through only a few of them, so its per-token cost tracks its *active* parameters while its quality tracks closer to its *total* parameters. That trade — pay in RAM capacity, save on bandwidth — is a poor fit for GPUs (VRAM is the scarce resource) but an excellent fit for CPU serving, where RAM is abundant and bandwidth is the constraint.
 
-Measured on the k8s-autoscaling auditor (same eval, same hardware, same llama.cpp settings, scored on an earlier 18-case adversarial version of the demo's eval): a 30B-A3B small-MoE (30.5B total, ~3.3B active per token, q4) beat the dense 8B (q8) on accuracy (12/18 vs 10/18 scorecard, 66.7% vs 51.6% faithfulness-gate first-pass rate) while decoding 1.6-2.3x faster. The demo's current eval is a simplified 8-case set the MoE passes 8/8; the head-to-head above is the historical comparison that drove the adoption. The costs: ~2x the pod memory (26Gi vs 16Gi) and ~25% slower prefill — batch-processing a long prompt touches most experts collectively, so the sparse-activation saving applies to decode, not prefill. Net latency was still lower on real queries because answers are long enough that decode dominates.
+Measured on the k8s-autoscaling analyst (same eval, same hardware, same llama.cpp settings, scored on an earlier 18-case adversarial version of the demo's eval): a 30B-A3B small-MoE (30.5B total, ~3.3B active per token, q4) beat the dense 8B (q8) on accuracy (12/18 vs 10/18 scorecard, 66.7% vs 51.6% faithfulness-gate first-pass rate) while decoding 1.6-2.3x faster. The demo's current eval is a simplified 8-case set the MoE passes 8/8; the head-to-head above is the historical comparison that drove the adoption. The costs: ~2x the pod memory (26Gi vs 16Gi) and ~25% slower prefill — batch-processing a long prompt touches most experts collectively, so the sparse-activation saving applies to decode, not prefill. Net latency was still lower on real queries because answers are long enough that decode dominates.
 
 | Model class | Good for | CPU speed | Memory |
 |-------------|----------|-----------|--------|
@@ -200,7 +200,7 @@ Bigger models are slower and more expensive to serve. On CPU (where Slemify depl
 
 Research from [Microsoft](https://arxiv.org/abs/2309.05463) and [NVIDIA](https://arxiv.org/abs/2506.02153) confirms that models under 10B parameters match or beat larger models on structured, repetitive tasks, especially when grounded by retrieval for the domain knowledge.
 
-One boundary worth knowing: a bigger or smarter model fixes *capability* gaps, not *behavior* gaps. In the k8s-autoscaling eval, the failure cases where the model invents problems with valid configs persisted almost unchanged across a 3.7x parameter increase — that kind of failure is addressed by training the behavior (fine-tuning for faithfulness), not by model selection. The strongest version of this evidence: running a frontier LLM (the demo's Bedrock escalation model) as the auditor through the identical pipeline scored the same as the CPU-served SLM, and missed the same cases the same way. Past a modest capability threshold, more model buys nothing on this kind of grounded task; the leverage is in retrieval and evaluation quality.
+One boundary worth knowing: a bigger or smarter model fixes *capability* gaps, not *behavior* gaps. In the k8s-autoscaling eval, the failure cases where the model invents problems with valid configs persisted almost unchanged across a 3.7x parameter increase — that kind of failure is addressed by training the behavior (fine-tuning for faithfulness), not by model selection. The strongest version of this evidence: running a frontier LLM (the demo's Bedrock escalation model) as the analyst through the identical pipeline scored the same as the CPU-served SLM, and missed the same cases the same way. Past a modest capability threshold, more model buys nothing on this kind of grounded task; the leverage is in retrieval and evaluation quality.
 </details>
 
 ## Quantization and GGUF export
@@ -230,9 +230,9 @@ Slemify supports these quantization levels:
 | 8-bit | `q8_0` | Near-lossless; the safe choice for reasoning-heavy tasks. |
 | None | `f16` | Full precision; only useful for GPU serving. |
 
-**Pick the quant against your eval, not by reputation.** The default `q4_k_m` is fine for many tasks, but quantization hurts *reasoning* far more than it hurts perplexity, and a binary pass/fail eval over calibration-heavy cases exposes that. The k8s-autoscaling auditor showed this with its original dense 8B: on the earlier 18-case adversarial version of the demo's scorecard, q8_0 held accuracy while q5_k_m and q4_k_m roughly halved it by losing calibration (inventing problems on valid configs) — so that model had to be served at `q8_0` even though it was larger and slower.
+**Pick the quant against your eval, not by reputation.** The default `q4_k_m` is fine for many tasks, but quantization hurts *reasoning* far more than it hurts perplexity, and a binary pass/fail eval over calibration-heavy cases exposes that. The k8s-autoscaling analyst showed this with its original dense 8B: on the earlier 18-case adversarial version of the demo's scorecard, q8_0 held accuracy while q5_k_m and q4_k_m roughly halved it by losing calibration (inventing problems on valid configs) — so that model had to be served at `q8_0` even though it was larger and slower.
 
-**Quant sensitivity is also architecture-specific — re-measure when you change models.** The same demo's current MoE auditor (the 30B-A3B class) holds its accuracy at `q4_k_m` on the same scorecard, outscoring the dense 8B at q8_0. A tolerable quant for one model tells you nothing about another. Always re-run the [report](report.md) scorecard after changing either the model or the quant.
+**Quant sensitivity is also architecture-specific — re-measure when you change models.** The same demo's current MoE analyst (the 30B-A3B class) holds its accuracy at `q4_k_m` on the same scorecard, outscoring the dense 8B at q8_0. A tolerable quant for one model tells you nothing about another. Always re-run the [report](report.md) scorecard after changing either the model or the quant.
 
 <details>
 <summary>Can a smaller quant be made to hold accuracy?</summary>
@@ -253,4 +253,4 @@ The real check is the next stage: the [report](report.md) runs the eval dataset 
 - [llama.cpp](https://github.com/ggerganov/llama.cpp). The engine Slemify uses to convert, quantize, and serve GGUF models on CPU.
 - [Phi-2: The Surprising Power of Small Language Models](https://arxiv.org/abs/2309.05463) (Microsoft, 2023). Evidence that smaller models match larger ones on structured tasks.
 - [Small Language Models are the Future of Agentic AI](https://arxiv.org/abs/2506.02153) (NVIDIA, 2025). Research case for using SLMs under 10B parameters in production agentic systems.
-- [Exploring and Mitigating Degradation of Low-Bit LLMs in Mathematical Reasoning](https://arxiv.org/abs/2505.11574). Why low-bit quantization hurts reasoning far more than perplexity, the effect behind the auditor's q8_0 choice.
+- [Exploring and Mitigating Degradation of Low-Bit LLMs in Mathematical Reasoning](https://arxiv.org/abs/2505.11574). Why low-bit quantization hurts reasoning far more than perplexity, the effect behind the analyst's q8_0 choice.

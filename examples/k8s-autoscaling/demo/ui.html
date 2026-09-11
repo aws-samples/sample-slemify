@@ -138,7 +138,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
       <div class="gconn"></div>
       <div class="grow"><div class="gnode cpu tuned" id="g-retrieve">Retrieve</div><span class="gbranch">&middot;</span><div class="gnode cpu" id="g-rerank">Rerank</div></div>
       <div class="gconn"></div>
-      <div class="grow"><div class="gnode cpu" id="g-generate">Auditor SLM</div><span class="gbranch">&rarr;</span><div class="gnode llm" id="g-llm">LLM</div></div>
+      <div class="grow"><div class="gnode cpu" id="g-generate">Analyst SLM</div><span class="gbranch">&rarr;</span><div class="gnode llm" id="g-llm">LLM</div></div>
       <div class="gconn"></div>
       <div class="grow"><div class="gnode llm" id="g-critic">Gate</div><span class="gloop">&#8635; refine</span></div>
       <div class="gconn"></div>
@@ -169,7 +169,7 @@ function nodeType(name){
   if(n.includes('validator')||n.includes('lint')||n.includes('config')) return 'lint';
   if(n.startsWith('tool')) return 'tool';
   if(n.includes('retriever')||n.includes('opensearch')||n.includes('reranker')) return 'retrieve';
-  if(n.includes('auditor')) return 'generate';
+  if(n.includes('analyst')) return 'generate';
   if(n.includes('gate')||n.includes('faithfulness')||n.includes('critic')) return 'critic';
   if(n.includes('apply')||n.includes('remediat')||n.includes('verify')) return 'remediate';
   if(n.includes('llm')||n.includes('bedrock')||n.includes('calibrated')) return 'llm';
@@ -178,9 +178,11 @@ function nodeType(name){
 }
 // Agents backed by a Slemify-trained / fine-tuned model: the triage classifier
 // (classification head) and the retriever (contrastively tuned encoder).
-// NOT the reranker (stock cross-encoder) or auditor SLM (stock).
+// NOT the reranker (stock cross-encoder) or analyst SLM (stock), and not a
+// seat currently filled by the LLM (step names say "LLM" / "Bedrock" then).
 function isTuned(name){
   const n = name.toLowerCase();
+  if(n.includes('llm') || n.includes('bedrock')) return false;
   return n.includes('triage') || n.includes('retriever');
 }
 const BAR_SCALE = 3000;

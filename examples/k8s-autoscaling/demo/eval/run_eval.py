@@ -4,7 +4,7 @@
 """End-to-end accuracy scorecard for the k8s-autoscaling agent.
 
 Runs every case in cases.yaml through the live orchestrator's /query endpoint
-(real triage -> retrieval -> auditor) and scores five things per case:
+(real triage -> retrieval -> analyst) and scores five things per case:
 
   1. triage      — did triage land the right category / reject noise
   2. must_not_say — deterministic: did the answer state a known-wrong claim

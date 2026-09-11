@@ -1,7 +1,7 @@
 # Evaluation set for the k8s-autoscaling agent.
 #
 # Each case is scored end-to-end through the orchestrator's /query endpoint
-# (real triage -> retrieval -> auditor), so it measures what a user experiences
+# (real triage -> retrieval -> analyst), so it measures what a user experiences
 # on the CPU-served pipeline.
 #
 # This set is intentionally SIMPLE and representative: fair, documentation-

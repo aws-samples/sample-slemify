@@ -16,9 +16,9 @@ project:
     PodDisruptionBudget, scaling to zero on a stateful workload, removing
     termination grace, or replacing a whole NodePool at once on Spot. MID-range
     scores (around 0.4-0.6) are ambiguous changes that need a human or the
-    expensive auditor to look closer. The score is used as a cheap CPU guardrail:
+    expensive analyst to look closer. The score is used as a cheap CPU guardrail:
     low-risk configs are auto-approved, high-risk configs are escalated to the
-    generative auditor for a full review.
+    generative analyst for a full review.
 
 model:
   base: ""  # encoder model ID for scoring (a 768d text encoder)

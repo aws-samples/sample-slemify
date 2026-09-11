@@ -1,14 +1,21 @@
 """Index Karpenter and KEDA documentation into OpenSearch for RAG.
 
-Clones official doc repos, chunks markdown files, generates embeddings
-via the Slemify-trained, domain-tuned retriever (task: embedding), and
-indexes into OpenSearch k-NN. The retriever exposes a TEI-compatible /embed
-endpoint and produces 768-dimensional vectors.
+Clones official doc repos, chunks markdown files, generates embeddings, and
+indexes into OpenSearch k-NN. Two embedders, one index each, same corpus:
+
+  --embedder=slemify (default)  the Slemify-trained, domain-tuned retriever
+                                (TEI-compatible /embed, 768d) -> INDEX_NAME
+  --embedder=bedrock            Titan Text Embeddings v2 on Bedrock (1024d)
+                                -> BEDROCK_INDEX_NAME
+
+The agent's EMBED seat (agent/config.py) picks which index queries hit, so a
+vector dimension is never mixed. Build both to be able to move the seat.
 
 Usage:
   kubectl port-forward -n slemify svc/opensearch-cluster-master 9200:9200
   kubectl port-forward -n slemify svc/k8s-autoscaling-retriever-inference 8083:8080
-  python3 index-knowledge.py                    # Full reindex
+  python3 index-knowledge.py                    # Full reindex, tuned encoder
+  python3 index-knowledge.py --embedder=bedrock # Full reindex, Titan
   python3 index-knowledge.py --append --source=aws-blog  # Add blogs only
 
 Requires: pip install opensearch-py httpx gitpython requests beautifulsoup4
@@ -30,20 +37,24 @@ from opensearchpy import OpenSearch
 
 OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:9200")
 INDEX_NAME = os.environ.get("INDEX_NAME", "k8s-autoscaling-knowledge")
-# Embedding endpoint. The demo's RAG retrieval uses the Slemify-trained,
-# domain-tuned encoder (task: embedding) served at the retriever inference
-# service, which is both more accurate and faster than a stock encoder on this
-# corpus. Same TEI-compatible /embed contract; 768 dimensions. Must match the
-# dimension in the index mapping and the query-time embedding in server.py.
+BEDROCK_INDEX_NAME = os.environ.get("BEDROCK_INDEX_NAME", "k8s-autoscaling-knowledge-bedrock")
+# Slemify embedder: the domain-tuned encoder (task: embedding) served at the
+# retriever inference service. TEI-compatible /embed contract; 768 dimensions.
 EMBEDDING_URL = os.environ.get("EMBEDDING_URL", "http://localhost:8083")
 EMBEDDING_DIM = 768
+# Bedrock embedder: Titan Text Embeddings v2, normalized so inner product ==
+# cosine, like the tuned encoder. Dimension must match agent/config.py.
+BEDROCK_EMBED_MODEL = os.environ.get("BEDROCK_EMBED_MODEL", "amazon.titan-embed-text-v2:0")
+BEDROCK_EMBED_DIM = int(os.environ.get("BEDROCK_EMBED_DIM", "1024"))
+# Set from --embedder in main(); index name and dimension follow it.
+EMBEDDER = "slemify"
 CHUNK_SIZE = 2000  # chars (~500 tokens)
 CHUNK_OVERLAP = 200
 
 # When set, the same chunked corpus that gets indexed into OpenSearch is also
-# exported to S3 as JSONL so the data pipeline can ground the auditor's
+# exported to S3 as JSONL so the data pipeline can ground the analyst's
 # synthetic training data on the exact passages served at inference time
-# (train/serve alignment). Defaults match the auditor expert.yaml grounding path
+# (train/serve alignment). Defaults match the analyst expert.yaml grounding path
 # (data.path + data.grounding.path => k8s-autoscaling/data/knowledge/).
 S3_GROUNDING_BUCKET = os.environ.get("S3_GROUNDING_BUCKET", "slemify-data")
 S3_GROUNDING_KEY = os.environ.get(
@@ -205,9 +216,20 @@ def fetch_blogs() -> list[dict]:
 # --- Embedding and indexing ---
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Generate embeddings via the Slemify-trained retriever (TEI /embed)."""
-    # TEI accepts a batch of inputs and returns one embedding per input.
+    """Generate embeddings with the selected embedder."""
     truncated = [t[:8000] for t in texts]
+    if EMBEDDER == "bedrock":
+        # Titan embeds one text per call.
+        br = boto3.client("bedrock-runtime")
+        out = []
+        for t in truncated:
+            resp = br.invoke_model(
+                modelId=BEDROCK_EMBED_MODEL,
+                body=json.dumps({"inputText": t, "dimensions": BEDROCK_EMBED_DIM, "normalize": True}),
+                contentType="application/json", accept="application/json")
+            out.append(json.loads(resp["body"].read())["embedding"])
+        return out
+    # TEI accepts a batch of inputs and returns one embedding per input.
     with httpx.Client(timeout=60) as client:
         resp = client.post(f"{EMBEDDING_URL}/embed", json={"inputs": truncated})
         resp.raise_for_status()
@@ -218,7 +240,7 @@ def export_corpus_to_s3(chunks: list[dict], bucket: str, key: str) -> int:
     """Write the chunked corpus to S3 as JSONL for grounded training data.
 
     Each line is {"text", "source", "section"} — the same fields the data
-    pipeline's grounded generator reads. This guarantees the auditor trains on
+    pipeline's grounded generator reads. This guarantees the analyst trains on
     the exact passages it will be given at serving time.
     """
     body = "\n".join(
@@ -270,7 +292,7 @@ def create_index(client: OpenSearch):
                 "section": {"type": "keyword"},
                 "embedding": {
                     "type": "knn_vector",
-                    "dimension": EMBEDDING_DIM,
+                    "dimension": BEDROCK_EMBED_DIM if EMBEDDER == "bedrock" else EMBEDDING_DIM,
                     # Embeddings are L2-normalized (unit vectors), so inner
                     # product ranks identically to cosine similarity. faiss
                     # supports innerproduct across OpenSearch versions, whereas
@@ -288,28 +310,37 @@ def create_index(client: OpenSearch):
 def main():
     print("=== Indexing Knowledge Base ===")
 
-    global INDEX_NAME
+    global INDEX_NAME, EMBEDDER
 
     append = "--append" in sys.argv
     # --export-s3:   also write the chunked corpus to S3 for grounded training.
     # --export-only: only chunk + export to S3 (skip OpenSearch entirely), so the
-    #                auditor's training grounding can be refreshed without a
+    #                analyst's training grounding can be refreshed without a
     #                running cluster or embedding service.
     export_s3 = "--export-s3" in sys.argv or "--export-only" in sys.argv
     export_only = "--export-only" in sys.argv
     s3_bucket = S3_GROUNDING_BUCKET
     s3_key = S3_GROUNDING_KEY
     source_filter = None
+    index_override = None
     for arg in sys.argv[1:]:
         if arg.startswith("--source="):
             source_filter = arg.split("=", 1)[1]
         elif arg.startswith("--index-name="):
-            INDEX_NAME = arg.split("=", 1)[1]
+            index_override = arg.split("=", 1)[1]
+        elif arg.startswith("--embedder="):
+            EMBEDDER = arg.split("=", 1)[1]
+            if EMBEDDER not in ("slemify", "bedrock"):
+                print(f"  Error: --embedder must be slemify or bedrock, got {EMBEDDER!r}")
+                return
         elif arg.startswith("--s3-bucket="):
             s3_bucket = arg.split("=", 1)[1]
         elif arg.startswith("--s3-key="):
             s3_key = arg.split("=", 1)[1]
 
+    # The index follows the embedder unless overridden explicitly.
+    INDEX_NAME = index_override or (BEDROCK_INDEX_NAME if EMBEDDER == "bedrock" else INDEX_NAME)
+    print(f"  Embedder: {EMBEDDER}")
     print(f"  Index: {INDEX_NAME}")
     if export_s3:
         print(f"  S3 grounding export: s3://{s3_bucket}/{s3_key}")

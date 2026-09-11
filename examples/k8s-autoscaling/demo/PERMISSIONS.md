@@ -54,7 +54,7 @@ code, but still a single reusable function, not a scenario.
   not to, but because `remediation.plan_patch`/`apply_patch` reject any
   `(kind, field)` pair not in `PATCH_SCHEMA` before doing anything else, and
   the model's own proposal is separately constrained by a JSON Schema
-  (`patch_schema.json_schema_for_kind`) passed to the CPU auditor SLM as
+  (`patch_schema.json_schema_for_kind`) passed to the CPU analyst SLM as
   `response_format` — llama.cpp compiles that into a grammar and masks the
   sampler, so the model cannot even *emit* a field name outside the list.
 - **No `create` or `delete`**, of anything — not in RBAC, not in any verb.
