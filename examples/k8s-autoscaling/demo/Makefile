@@ -3,7 +3,7 @@
 
 SCRIPTS := ./scripts
 
-.PHONY: demo reset clean infra eval scoreboard triage-acc recall
+.PHONY: demo reset clean infra eval eval-incluster scoreboard triage-acc recall
 
 # One command to start a demo session: reset the scenarios to their broken
 # state, then port-forward the orchestrator, open the browser, and launch the
@@ -31,6 +31,13 @@ infra:
 REPEAT ?= 4
 eval:
 	python3 eval/run_eval.py --repeat $(REPEAT)
+
+# Same eval, run as a Job next to the orchestrator. Use this once the analyst
+# seat is on CPU: a query then takes 25 to 75 seconds and a local port-forward
+# does not reliably survive the run. The scorecard is copied back to
+# eval/results/ when the Job finishes.
+eval-incluster:
+	bash scripts/run-eval-incluster.sh --repeat $(REPEAT)
 
 # Deterministic per-seat quality, no judge. triage-acc scores whoever holds the
 # TRIAGE seat (set TRIAGE=llm|classifier) on the 43-query held-out set;
