@@ -55,12 +55,31 @@ JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "eu.anthropic.claude-sonnet-4-5-2025
 # (possibly stale) memory. Retrieved broadly on the question AND the answer's own
 # wording, so claim-specific facts (e.g. a policy the answer names) are surfaced
 # even when the question doesn't mention them.
+# The judge's retrieval must not depend on which seats are deployed, or the
+# judge would change between scoreboard rows. By default it embeds with Titan
+# on Bedrock (always available to whoever can run the judge) against the Titan
+# index. Set JUDGE_EMBEDDER=slemify to use the tuned encoder and its index
+# instead (both must be reachable).
+JUDGE_EMBEDDER = os.environ.get("JUDGE_EMBEDDER", "bedrock")
 EMBED_URL = os.environ.get("EMBEDDING_URL", "http://localhost:8083")
-KNOWLEDGE_URL = os.environ.get("KNOWLEDGE_URL", "http://localhost:9200/k8s-autoscaling-knowledge")
+OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:9200")
+_DEFAULT_INDEX = "k8s-autoscaling-knowledge-bedrock" if JUDGE_EMBEDDER == "bedrock" else "k8s-autoscaling-knowledge"
+KNOWLEDGE_URL = os.environ.get("KNOWLEDGE_URL", f"{OPENSEARCH_URL}/{_DEFAULT_INDEX}")
+BEDROCK_EMBED_MODEL = os.environ.get("BEDROCK_EMBED_MODEL", "amazon.titan-embed-text-v2:0")
+BEDROCK_EMBED_DIM = int(os.environ.get("BEDROCK_EMBED_DIM", "1024"))
 HERE = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(HERE, "results")
 
 _bedrock = boto3.client("bedrock-runtime")
+
+
+def _judge_embed(text: str) -> list[float]:
+    if JUDGE_EMBEDDER == "bedrock":
+        resp = _bedrock.invoke_model(
+            modelId=BEDROCK_EMBED_MODEL,
+            body=json.dumps({"inputText": text[:8000], "dimensions": BEDROCK_EMBED_DIM, "normalize": True}))
+        return json.loads(resp["body"].read())["embedding"]
+    return httpx.post(f"{EMBED_URL}/embed", json={"inputs": text[:8000]}, timeout=30).json()[0]
 
 
 def fetch_reference(query: str, answer: str) -> str:
@@ -77,7 +96,7 @@ def fetch_reference(query: str, answer: str) -> str:
         return [h["_source"]["text"] for h in r.json()["hits"]["hits"]]
 
     try:
-        vec_q = httpx.post(f"{EMBED_URL}/embed", json={"inputs": query[:8000]}, timeout=30).json()[0]
+        vec_q = _judge_embed(query)
         dense_q = _hits({"size": 15, "query": {"knn": {"embedding": {"vector": vec_q, "k": 15}}},
                         "_source": ["text"]})
         lex_q = _hits({"size": 10, "query": {"match": {"text": query[:1000]}}, "_source": ["text"]})
@@ -89,7 +108,7 @@ def fetch_reference(query: str, answer: str) -> str:
         # judge can falsely flag a true claim as fabricated.
         dense_a = []
         if answer:
-            vec_a = httpx.post(f"{EMBED_URL}/embed", json={"inputs": answer[:8000]}, timeout=30).json()[0]
+            vec_a = _judge_embed(answer)
             dense_a = _hits({"size": 15, "query": {"knn": {"embedding": {"vector": vec_a, "k": 15}}},
                             "_source": ["text"]})
         # Round-robin across the four sources so answer-grounding chunks always get
@@ -265,11 +284,20 @@ def judge(case: dict, answer: str) -> dict:
 def score_case(case: dict, result: dict) -> dict:
     answer = result["answer"]
     triage = result["triage"].lower()
+    triage_off = (result.get("seats") or {}).get("triage") == "off"
     checks = {}
 
     # 1. triage
     if case.get("should_reject"):
-        checks["triage"] = "reject" in triage or "does not look like" in answer.lower()
+        if triage_off:
+            # No triage seat: the only thing that can decline an off-topic
+            # question is the answer itself. Ask the judge whether it did.
+            j = judge({**case, "should_abstain": True, "must_include": []}, answer)
+            checks["triage"] = bool(j.get("abstained"))
+        else:
+            checks["triage"] = "reject" in triage or "does not look like" in answer.lower()
+    elif triage_off:
+        checks["triage"] = True
     else:
         exp = case.get("expected_category", "").lower()
         checks["triage"] = (exp in triage) if exp else True
@@ -279,7 +307,7 @@ def score_case(case: dict, result: dict) -> dict:
                   if p.lower() in answer.lower()]
     checks["must_not_say"] = not violations
 
-    # Reject cases: triage is the whole story.
+    # Reject cases: declining is the whole story.
     if case.get("should_reject"):
         status = "pass" if checks["triage"] else "fail"
         return {"status": status, "checks": checks, "violations": violations,

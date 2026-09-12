@@ -10,9 +10,14 @@ Doc-first by default. Tools are opt-in:
                     └─ answer -> lint(if manifest)      -> retrieve -> answer -> gate
   gate: accept | refine(deprecated fix) | verify(runtime claim) | escalate(LLM)
 
+Seats can be off (config.py). TRIAGE=off removes triage, intent, tools, and the
+lint: the query goes straight to retrieval. GATE=off ships the draft as is.
+Both off with EMBED=bedrock and ANALYST=llm is the monolith: embed, search,
+one frontier-model call.
+
 Each node streams the SSE vocabulary the UI consumes (step_start/step_done/
 model/token/answer_reset/response). Step names say who actually filled each
-seat (config.py: TRIAGE, EMBED, RERANK, ANALYST), so the UI, the logs, and the
+seat (config.py: TRIAGE, EMBED, RERANK, ANALYST, GATE), so the UI, the logs, and the
 eval describe the configuration that ran, not the one the code assumed.
 """
 import asyncio
@@ -208,7 +213,9 @@ async def n_generate(state: AgentState) -> dict:
     if attempts > 0:
         writer({"type": "answer_reset", "reason": "refining"})
 
-    unclassified = state.get("category", "unknown") in (None, "unknown")
+    # With no triage seat there is no category, and that is not a failure to
+    # classify: the SLM drafts every query.
+    unclassified = config.TRIAGE != "off" and state.get("category", "unknown") in (None, "unknown")
     # Who drafts: the ANALYST seat. With the LLM in the seat (the monolith, or
     # the one-variable control: same graph, context, gate, and judge, only the
     # drafter changed) every query goes to Bedrock. With the SLM in the seat,
@@ -452,21 +459,31 @@ def build_agent():
     g.add_node("abstain", n_abstain)
     g.add_node("remediate", n_remediate)
 
-    g.add_edge(START, "triage")
-    g.add_conditional_edges("triage", _route_after_triage, {"reject": "reject", "intent": "intent"})
-    g.add_edge("reject", END)
-    g.add_conditional_edges("intent", _route_after_intent, {"gather": "gather", "lint": "lint"})
-    g.add_edge("gather", "retrieve")
-    g.add_edge("lint", "retrieve")
+    if config.TRIAGE == "off":
+        # No triage seat: nothing decides category or intent, so there is no
+        # reject path, no tools, and no manifest lint. Retrieval is the first step.
+        g.add_edge(START, "retrieve")
+    else:
+        g.add_edge(START, "triage")
+        g.add_conditional_edges("triage", _route_after_triage, {"reject": "reject", "intent": "intent"})
+        g.add_edge("reject", END)
+        g.add_conditional_edges("intent", _route_after_intent, {"gather": "gather", "lint": "lint"})
+        g.add_edge("gather", "retrieve")
+        g.add_edge("lint", "retrieve")
     g.add_edge("retrieve", "generate")
-    g.add_edge("generate", "critic")
-    g.add_conditional_edges("critic", _route_after_critic,
-                            {"end": "remediate", "refine": "generate", "verify": "gather",
-                             "propose": "propose", "escalate": "escalate", "abstain": "abstain"})
-    g.add_edge("escalate", "critic")
-    g.add_edge("abstain", END)
-    g.add_edge("propose", END)
-    g.add_edge("remediate", END)
+    if config.GATE == "off":
+        # No gate seat: the draft ships as written. Nothing checks it, nothing
+        # escalates, nothing remediates.
+        g.add_edge("generate", END)
+    else:
+        g.add_edge("generate", "critic")
+        g.add_conditional_edges("critic", _route_after_critic,
+                                {"end": "remediate", "refine": "generate", "verify": "gather",
+                                 "propose": "propose", "escalate": "escalate", "abstain": "abstain"})
+        g.add_edge("escalate", "critic")
+        g.add_edge("abstain", END)
+        g.add_edge("propose", END)
+        g.add_edge("remediate", END)
     return g.compile()
 
 

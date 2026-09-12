@@ -35,7 +35,9 @@ ANALYST_INSTRUCTION = (
 LLM_INSTRUCTION = (
     "You are a Kubernetes autoscaling expert. Answer the user's question accurately "
     "using the provided documentation context. Be specific and include YAML examples "
-    "when relevant. If the documentation doesn't cover the topic, say so."
+    "when relevant. If the documentation doesn't cover the topic, say so. If the "
+    "question is not about Kubernetes autoscaling at all, say briefly that it is out "
+    "of scope and do not answer it."
 )
 
 CALIBRATION_INSTRUCTION = (

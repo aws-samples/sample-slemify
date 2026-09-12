@@ -100,10 +100,13 @@ spec:
               value: "eu-west-1"
             - name: ORCHESTRATOR_URL
               value: "http://$ORCHESTRATOR_SVC.$NAMESPACE"
+            # The judge retrieves its reference with Titan against the Titan
+            # index (run_eval.py JUDGE_EMBEDDER default), so it does not depend
+            # on which seats are deployed. Only OpenSearch needs to be reachable.
+            - name: OPENSEARCH_URL
+              value: "http://opensearch-cluster-master.$NAMESPACE:9200"
             - name: EMBEDDING_URL
               value: "http://k8s-autoscaling-retriever-inference.$NAMESPACE:8080"
-            - name: KNOWLEDGE_URL
-              value: "http://opensearch-cluster-master.$NAMESPACE:9200/k8s-autoscaling-knowledge"
             - name: SCORECARD_STDOUT
               value: "1"
             - name: HOME

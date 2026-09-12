@@ -85,14 +85,15 @@ choose (see `agent/config.py`):
 
 | Seat | LLM value | CPU value (default) | What moves |
 |------|-----------|---------------------|------------|
-| `TRIAGE` | `llm` | `classifier` | Who classifies the query. The intent check follows: plain-code heuristic with the classifier, a short LLM call with the LLM. |
+| `TRIAGE` | `off` (or `llm`) | `classifier` | Who classifies the query. `off` removes triage, the intent check, tools, and the manifest lint: every query goes straight to retrieval. With the classifier the intent check is plain code; with `llm` it is a short frontier-model call. |
 | `EMBED` | `bedrock` | `slemify` | Who embeds the query (Titan v2, 1024d, or the tuned encoder, 768d). The OpenSearch index follows: `BEDROCK_INDEX_NAME` or `INDEX_NAME`. |
 | `RERANK` | `off` | `on` | Whether the cross-encoder re-orders candidates, or vector order is kept. |
 | `ANALYST` | `llm` | `slm` | Who drafts the answer. |
+| `GATE` | `off` | `llm` | Whether the draft is checked against the evidence before it ships. The gate is the frontier model whenever it exists; `off` ships the draft as written, with no escalation and no remediation. |
 
-The gate is always the LLM. Set all four to their LLM value and you have the
-**monolith**: one frontier model doing every step, the starting point most
-teams have. Move one seat at a time, re-run the eval, and read `/stats` (which
+`TRIAGE=off EMBED=bedrock RERANK=off ANALYST=llm GATE=off` is the
+**monolith**: embed the question, search, one frontier-model call, ship. That
+is the starting point most teams have. Move one seat at a time, re-run the eval, and read `/stats` (which
 reports the active `seats`) to see what each move changed in cost, latency,
 and quality. `ANALYST=llm` is also the one-variable control described under
 "Self-Correction": same graph, context, gate, and judge, only the drafter

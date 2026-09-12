@@ -137,10 +137,10 @@ spec:
             - name: LLM_MODEL
               value: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
             # Seats: who fills each model-backed role. These defaults are the
-            # CPU-first system. Set all four to their LLM value (llm / bedrock /
-            # off / llm) for the monolith: one frontier model doing every step.
-            # Move one seat at a time and re-run the eval to see what changed.
-            # See agent/config.py for the allowed values.
+            # CPU-first system. The monolith is TRIAGE=off EMBED=bedrock
+            # RERANK=off ANALYST=llm GATE=off: embed the question, search, one
+            # frontier-model call, ship. Move one seat at a time and re-run the
+            # eval to see what changed. See agent/config.py for the values.
             - name: TRIAGE
               value: "classifier"
             - name: EMBED
@@ -149,6 +149,8 @@ spec:
               value: "on"
             - name: ANALYST
               value: "slm"
+            - name: GATE
+              value: "llm"
           resources:
             requests:
               cpu: 100m

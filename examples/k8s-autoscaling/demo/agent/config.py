@@ -32,15 +32,20 @@ def _seat(name: str, default: str, allowed: tuple[str, ...]) -> str:
     return val
 
 
-TRIAGE = _seat("TRIAGE", "classifier", ("llm", "classifier"))
+# Seats. "off" means the seat does not exist in this configuration: the
+# monolith (TRIAGE=off EMBED=bedrock RERANK=off ANALYST=llm GATE=off) is a
+# plain RAG agent, embed the question, search, one frontier-model call, ship.
+# Every other value puts a model in the seat.
+TRIAGE = _seat("TRIAGE", "classifier", ("off", "llm", "classifier"))
 EMBED = _seat("EMBED", "slemify", ("bedrock", "slemify"))
 RERANK = _seat("RERANK", "on", ("off", "on"))
 ANALYST = _seat("ANALYST", "slm", ("llm", "slm"))
+GATE = _seat("GATE", "llm", ("off", "llm"))
 
 
 def seats() -> dict:
     """The current seat assignment, for /stats and the eval scorecard."""
-    return {"triage": TRIAGE, "embed": EMBED, "rerank": RERANK, "analyst": ANALYST}
+    return {"triage": TRIAGE, "embed": EMBED, "rerank": RERANK, "analyst": ANALYST, "gate": GATE}
 
 
 # --- Service endpoints ---
