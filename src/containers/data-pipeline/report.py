@@ -1,628 +1,809 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
+"""Slemify report: what the served model does, measured, with a baseline.
 
-"""Slemify Production Readiness Report — Phase 1.
+Runs as a Kubernetes Job after the serving stage, next to the inference
+Service. One report shape for every task family, organised the way a
+placement decision is made:
 
-Collects inference predictions with model confidence (logprobs),
-judges them via Bedrock LLM-as-judge, and presents the results
-alongside training metrics and cost analysis. No verdict — the
-user reviews the data and decides.
+  quality   the held-out numbers the training job wrote (metrics.json), next to
+            a trivial baseline, split by where the held-out data came from
+            (synthetic versus human-labeled), with the confusions and the
+            reliability of the head's probabilities. For classification, an
+            optional zero-shot frontier-model baseline on the same held-out set.
+  latency   measured against the served endpoint, not the training job.
+  serving   the node the pod landed on and its on-demand hourly rate, stated
+            as what it is: fixed capacity, not a per-request price.
 
-Environment variables:
-  BUCKET, PROJECT, INFERENCE_ENDPOINT, BEDROCK_MODEL, MAX_SAMPLES,
-  TOOL_NAME, TOOL_DESC
+For generation (served stock, grounded by retrieval at query time) there is no
+held-out label set, so the report is a serving profile: prefill and decode
+rates, cold and warm time to first token, the model's bytes, and the
+memory-bandwidth ceiling for the node. An optional grounded evaluation
+(question, evidence, points the answer must make) is judged by a frontier
+model when the expert config points at one.
+
+The report never says "ready" or "not ready". It gives the numbers and, when
+one of them is low, the order in which to look for the cause.
+
+Environment (set by the Slemify CLI on the Job):
+  BUCKET, PROJECT, TASK, INFERENCE_ENDPOINT, BEDROCK_MODEL, MAX_SAMPLES,
+  TOOL_DESC, LABELS, LLM_BASELINE, CASES_KEY, REPEAT,
+  INSTANCE_TYPE, INSTANCE_VCPUS, INSTANCE_HOURLY_USD
 """
-
 import json
-import math
 import os
 import re
 import statistics
 import time
+import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
 import boto3
 from botocore.config import Config
 
 BUCKET = os.environ.get("BUCKET", "")
 PROJECT = os.environ.get("PROJECT", "")
-BEDROCK_MODEL = os.environ.get("BEDROCK_MODEL", "eu.anthropic.claude-sonnet-4-6")
-MAX_SAMPLES = int(os.environ.get("MAX_SAMPLES", "72"))
-INFERENCE = os.environ.get("INFERENCE_ENDPOINT", "")
+TASK = os.environ.get("TASK", "generation").strip().lower()
+INFERENCE = os.environ.get("INFERENCE_ENDPOINT", "").rstrip("/")
+BEDROCK_MODEL = os.environ.get("BEDROCK_MODEL", "")
+MAX_SAMPLES = int(os.environ.get("MAX_SAMPLES", "100") or "100")
+TOOL_DESC = os.environ.get("TOOL_DESC", "")
+LABELS = [l.strip() for l in os.environ.get("LABELS", "").split(",") if l.strip()]
+LLM_BASELINE = os.environ.get("LLM_BASELINE", "").lower() in ("1", "true", "yes")
+CASES_KEY = os.environ.get("CASES_KEY", "")
+REPEAT = max(1, int(os.environ.get("REPEAT", "2") or "2"))
+INSTANCE_TYPE = os.environ.get("INSTANCE_TYPE", "")
+INSTANCE_VCPUS = int(os.environ.get("INSTANCE_VCPUS", "0") or "0")
+INSTANCE_HOURLY_USD = float(os.environ.get("INSTANCE_HOURLY_USD", "0") or "0")
+LATENCY_SAMPLES = 30
+# Bedrock calls from the report are rate limited so the report can never be
+# the thing that trips an account limit.
+BEDROCK_MIN_INTERVAL_S = 1.0
 
 s3 = boto3.client("s3")
-bedrock = boto3.client("bedrock-runtime", config=Config(read_timeout=60))
-ec2 = boto3.client("ec2")
-p = lambda msg: print(msg, flush=True)
+_bedrock = None
+_last_bedrock_call = 0.0
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+def p(msg):
+    print(msg, flush=True)
+
+
+# ── S3 and HTTP helpers ─────────────────────────────────────────────────────────
+
+def load_json(key, default=None):
+    try:
+        return json.loads(s3.get_object(Bucket=BUCKET, Key=key)["Body"].read().decode())
+    except Exception as e:  # noqa: BLE001
+        p(f"  (no {key}: {e})")
+        return default
+
+
+def load_jsonl(key):
+    try:
+        body = s3.get_object(Bucket=BUCKET, Key=key)["Body"].read().decode()
+    except Exception as e:  # noqa: BLE001
+        p(f"  (no {key}: {e})")
+        return []
+    out = []
+    for line in body.splitlines():
+        line = line.strip()
+        if line:
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return out
+
+
+def http_json(path, body=None, timeout=300):
+    """POST (or GET when body is None) JSON to the inference endpoint.
+    Returns (json, elapsed_ms)."""
+    url = f"{INFERENCE}{path}"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"},
+                                 method="POST" if data is not None else "GET")
+    t0 = time.perf_counter()
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read().decode())
+    return payload, (time.perf_counter() - t0) * 1000
+
+
+def bedrock():
+    global _bedrock
+    if _bedrock is None:
+        _bedrock = boto3.client("bedrock-runtime", config=Config(read_timeout=120, retries={"max_attempts": 6, "mode": "adaptive"}))
+    return _bedrock
+
+
+def bedrock_text(prompt, max_tokens=64):
+    """One rate-limited Bedrock call; returns the text of the reply."""
+    global _last_bedrock_call
+    wait = BEDROCK_MIN_INTERVAL_S - (time.time() - _last_bedrock_call)
+    if wait > 0:
+        time.sleep(wait)
+    _last_bedrock_call = time.time()
+    resp = bedrock().converse(
+        modelId=BEDROCK_MODEL,
+        messages=[{"role": "user", "content": [{"text": prompt}]}],
+        inferenceConfig={"maxTokens": max_tokens, "temperature": 0})
+    return resp["output"]["message"]["content"][0]["text"].strip()
+
+
+def pct(values, q):
+    if not values:
+        return None
+    vs = sorted(values)
+    idx = min(len(vs) - 1, max(0, round(q * (len(vs) - 1))))
+    return round(vs[idx], 1)
+
+
+def latency_summary(ms_values):
+    if not ms_values:
+        return {}
+    return {"n": len(ms_values), "p50_ms": pct(ms_values, 0.5), "p95_ms": pct(ms_values, 0.95),
+            "max_ms": round(max(ms_values), 1)}
+
+
+def serving_block():
+    """The node the inference pod landed on. Hourly rate is on-demand list
+    price for one node, looked up by the CLI; it is capacity you pay for
+    whether or not a request arrives, so it is never divided into a per-request
+    figure here."""
+    return {"instance_type": INSTANCE_TYPE or None, "vcpus": INSTANCE_VCPUS or None,
+            "hourly_usd": round(INSTANCE_HOURLY_USD, 4) if INSTANCE_HOURLY_USD else None,
+            "monthly_usd": round(INSTANCE_HOURLY_USD * 730, 2) if INSTANCE_HOURLY_USD else None}
+
+
+# ── Encoder-family tasks ────────────────────────────────────────────────────────
+
+def probe_encoder_latency(task, eval_rows):
+    """Time LATENCY_SAMPLES requests against the served endpoint, using real
+    held-out inputs, one at a time (the shape of a routing call)."""
+    inputs = []
+    for r in eval_rows:
+        text = r.get("input") or r.get("query") or ""
+        if text:
+            inputs.append(text)
+        if len(inputs) >= LATENCY_SAMPLES:
+            break
+    if not inputs:
+        return {}
+    # One warm-up request so the first measurement is not the model's first.
+    try:
+        _encoder_call(task, inputs[0])
+    except Exception as e:  # noqa: BLE001
+        p(f"  warm-up request failed: {e}")
+        return {"error": str(e)}
+    times = []
+    for text in inputs:
+        try:
+            _, ms = _encoder_call(task, text)
+            times.append(ms)
+        except Exception as e:  # noqa: BLE001
+            p(f"  request failed: {e}")
+    return latency_summary(times)
+
+
+def _encoder_call(task, text):
+    if task == "classification":
+        return http_json("/v1/chat/completions", {"model": "model", "max_tokens": 16,
+                                                  "messages": [{"role": "user", "content": text}]}, timeout=30)
+    if task == "embedding":
+        return http_json("/embed", {"inputs": text[:8000]}, timeout=30)
+    if task == "scoring":
+        return http_json("/score", {"input": text}, timeout=30)
+    if task == "extraction":
+        return http_json("/extract", {"input": text}, timeout=30)
+    raise ValueError(task)
+
+
+def llm_zero_shot_baseline(eval_rows, labels):
+    """The control: the frontier model, prompted with the label set, on the
+    same held-out inputs the head was scored on. Exact match on the label,
+    the same way the head is scored. One call per sample, rate limited."""
+    rows = [r for r in eval_rows if r.get("input") and r.get("output")][:MAX_SAMPLES]
+    if not rows or not labels or not BEDROCK_MODEL:
+        return None
+    label_list = ", ".join(labels)
+    correct_flags, origins, preds = [], [], []
+    for r in rows:
+        prompt = (f"Classify the message into exactly one of these categories: {label_list}.\n"
+                  f"Task description: {TOOL_DESC[:600]}\n\n"
+                  f"MESSAGE:\n{r['input'][:3000]}\n\n"
+                  "Reply with the category name only.")
+        expected = r["output"].split("|")[0].strip()
+        try:
+            text = bedrock_text(prompt, max_tokens=16)
+        except Exception as e:  # noqa: BLE001
+            p(f"  baseline call failed: {e}")
+            continue
+        pred = next((l for l in labels if l.lower() in text.lower()), text.strip().split()[0] if text.strip() else "")
+        correct_flags.append(int(pred == expected))
+        origins.append(r.get("origin", "synthetic"))
+        preds.append({"input": r["input"][:200], "expected": expected, "predicted": pred,
+                      "correct": pred == expected, "origin": origins[-1]})
+    if not correct_flags:
+        return None
+    by_origin = {}
+    for o, c in zip(origins, correct_flags):
+        g = by_origin.setdefault(o, {"n": 0, "correct": 0})
+        g["n"] += 1
+        g["correct"] += c
+    for g in by_origin.values():
+        g["accuracy"] = round(g["correct"] / g["n"], 4)
+    return {"model": BEDROCK_MODEL, "n": len(correct_flags),
+            "accuracy": round(sum(correct_flags) / len(correct_flags), 4),
+            "by_origin": by_origin, "predictions": preds}
+
+
+def encoder_report(task):
+    metrics = load_json(f"models/{PROJECT}/metrics.json", default={})
+    predictions = load_jsonl(f"models/{PROJECT}/eval_predictions.jsonl")
+    eval_rows = load_jsonl(f"{PROJECT}/processed/eval.jsonl")
+    p(f"Metrics: {'loaded' if metrics else 'missing'}; predictions: {len(predictions)}; eval rows: {len(eval_rows)}")
+
+    p(f"Measuring endpoint latency ({LATENCY_SAMPLES} requests)...")
+    latency = probe_encoder_latency(task, eval_rows) if INFERENCE else {}
+    if latency.get("p50_ms") is not None:
+        p(f"  p50 {latency['p50_ms']} ms, p95 {latency['p95_ms']} ms")
+
+    llm = None
+    if task == "classification" and LLM_BASELINE:
+        p(f"Running the zero-shot frontier-model baseline ({min(len(eval_rows), MAX_SAMPLES)} calls, 1 per second)...")
+        llm = llm_zero_shot_baseline(eval_rows, LABELS or metrics.get("classes", []))
+        if llm:
+            p(f"  frontier model: {llm['accuracy'] * 100:.1f}% on {llm['n']} held-out samples")
+
+    report = {
+        "project": PROJECT, "task": task, "generated_at": datetime.now(timezone.utc).isoformat(),
+        "metrics": metrics, "latency": latency, "llm_baseline": llm, "serving": serving_block(),
+        "predictions": predictions[:500],
+    }
+    items = guidance(task, metrics, llm)
+    # Specific findings first; the last item is always the generic order of
+    # investigation. The terminal summary prints only the findings.
+    report["findings"], report["guidance"] = items[:-1], items
+    return report
+
+
+def guidance(task, metrics, llm=None):
+    """The order to look for the cause when a number is low. Data first."""
+    items = []
+    if task == "classification":
+        by = metrics.get("by_origin") or {}
+        real, syn = by.get("real"), by.get("synthetic")
+        if real and syn and real.get("accuracy") is not None and syn.get("accuracy") is not None:
+            gap = syn["accuracy"] - real["accuracy"]
+            if gap > 0.05:
+                items.append(f"Accuracy on human-labeled held-out data is {gap * 100:.0f} points below the synthetic set. "
+                             "The generated data has drifted from what users write: revise the domain description in expert.yaml "
+                             "and add real seed examples before touching the model.")
+        base = (metrics.get("baseline") or {}).get("accuracy")
+        acc = metrics.get("accuracy")
+        if base is not None and acc is not None and acc - base < 0.15:
+            items.append("The head is within 15 points of the majority-class baseline. Check that the labels are separable "
+                         "from the text (read the confusions) and that each class has enough examples.")
+        for b in metrics.get("calibration") or []:
+            if b["n"] >= 5 and b["avg_confidence"] - b["accuracy"] > 0.15:
+                items.append(f"Predictions with probability {b['low']:.1f} to {b['high']:.1f} are right {b['accuracy'] * 100:.0f}% of the time "
+                             f"but claim {b['avg_confidence'] * 100:.0f}%. The head is over-confident there; those are the inputs to hand-check.")
+                break
+        if llm and acc is not None and llm["accuracy"] - acc > 0.05:
+            items.append("The frontier model scores higher on the same held-out set. The gap is what more or better training data would buy; "
+                         "the frontier model's misses tell you which classes are ambiguous by definition.")
+    if task == "embedding":
+        t, b = metrics.get("tuned") or {}, metrics.get("baseline") or {}
+        if t.get("recall@2") is not None and b.get("recall@2") is not None and t["recall@2"] - b["recall@2"] < 0.02:
+            items.append("Fine-tuning did not move recall@2. The stock encoder is as good on this corpus; serve it stock, or check that "
+                         "the generated (question, chunk) pairs read like real questions.")
+        by = t.get("by_origin") or {}
+        if by.get("real") and by.get("synthetic") and by["synthetic"]["recall@2"] - by["real"]["recall@2"] > 0.1:
+            items.append("Recall on human-written questions is well below recall on generated ones. The generated questions are easier "
+                         "than real ones; add real seeds to data.evaluation.labeled and revise the domain description.")
+    items.append("Order of investigation when a number is low: the data (coverage and labels), then the held-out set itself, "
+                 "then the prompt or head settings, and only then a different model.")
+    return items
+
+
+# ── Generation ──────────────────────────────────────────────────────────────────
+
+# Published per-socket memory bandwidth and vCPUs per socket, used to estimate
+# the share a node of a given size gets. These are estimates for the ceiling
+# arithmetic, not measurements; the report labels them as such.
+BANDWIDTH_TABLE = {
+    # family prefix: (GB/s per socket, vCPUs per socket, note)
+    "7g": (307, 64, "Graviton3: 8 channels DDR5-4800"),
+    "8g": (537, 96, "Graviton4: 12 channels DDR5-5600"),
+    "9g": (800, 192, "Graviton5: DDR5-8800; AWS quotes more than 800 GB/s aggregate"),
+    "7a": (460, 96, "AMD EPYC Genoa: 12 channels DDR5-4800"),
+    "7i": (307, 96, "Intel Sapphire Rapids: 8 channels DDR5-4800"),
+    "8i": (410, 96, "Intel Emerald Rapids / Granite Rapids class: 8 channels DDR5-6400"),
+}
+
+
+def bandwidth_estimate(instance_type, vcpus):
+    """(GB/s available to this node, note) or (None, reason)."""
+    m = re.match(r"^[a-z]+(\d)([a-z]*)\.", instance_type or "")
+    if not m:
+        return None, "instance type unknown"
+    gen, suffix = m.group(1), m.group(2)
+    key = None
+    if "g" in suffix:
+        key = f"{gen}g"
+    elif "a" in suffix:
+        key = f"{gen}a"
+    elif "i" in suffix or suffix == "":
+        key = f"{gen}i"
+    row = BANDWIDTH_TABLE.get(key)
+    if not row:
+        return None, f"no published figure in the table for {instance_type}"
+    per_socket, socket_vcpus, note = row
+    if not vcpus:
+        return per_socket, f"{note}; full-socket figure, node size unknown"
+    share = min(1.0, vcpus / socket_vcpus)
+    return round(per_socket * share, 1), f"{note}; {vcpus} of {socket_vcpus} vCPUs, so about {share * 100:.0f}% of a socket"
+
+
+def _chat(prompt, max_tokens=160, timeout=900):
+    body = {"model": "model", "max_tokens": max_tokens, "temperature": 0,
+            "messages": [{"role": "user", "content": prompt}]}
+    return http_json("/v1/chat/completions", body, timeout=timeout)
+
+
+def _timings(resp):
+    t = resp.get("timings") or {}
+    return {"prompt_tokens": t.get("prompt_n"), "prompt_ms": round(t.get("prompt_ms", 0), 1),
+            "prompt_tok_s": round(t.get("prompt_per_second", 0), 1),
+            "decode_tokens": t.get("predicted_n"), "decode_ms": round(t.get("predicted_ms", 0), 1),
+            "decode_tok_s": round(t.get("predicted_per_second", 0), 1)}
+
+
+def serving_profile():
+    """Probe llama.cpp: model facts, then a cold-prefix and a warm-prefix
+    completion so the two time-to-first-token figures are both measured."""
+    profile = {}
+    try:
+        models, _ = http_json("/v1/models", timeout=30)
+        meta = (models.get("data") or [{}])[0].get("meta") or {}
+        profile["model_size_bytes"] = meta.get("size")
+        profile["n_params_total"] = meta.get("n_params")
+        profile["n_ctx_train"] = meta.get("n_ctx_train")
+    except Exception as e:  # noqa: BLE001
+        p(f"  /v1/models failed: {e}")
+    try:
+        props, _ = http_json("/props", timeout=30)
+        profile["model_path"] = (props.get("model_path") or "").split("/")[-1]
+        profile["n_ctx"] = (props.get("default_generation_settings") or {}).get("n_ctx")
+        profile["slots"] = props.get("total_slots")
+    except Exception as e:  # noqa: BLE001
+        p(f"  /props failed: {e}")
+
+    # A prompt the server has not seen (a fresh prefix), long enough to make
+    # prefill visible, then the same prompt again so the prefix cache serves it.
+    # The nonce at the front keeps the prefix cold even when the report re-runs
+    # against a server that has already answered this prompt.
+    nonce = datetime.now(timezone.utc).strftime("run %Y%m%d%H%M%S%f")
+    filler = " ".join(f"Reference item {i}: the field spec.limits.cpu caps the total CPU a NodePool may provision; "
+                      f"a value of 0 means no node can be launched for it." for i in range(24))
+    prompt = (f"[{nonce}] Using only this reference:\n{filler}\n\nQuestion: what happens to pods that target a NodePool "
+              "whose spec.limits.cpu is 0, and what is the fix? Answer in three sentences.")
+    for label in ("cold", "warm"):
+        try:
+            resp, ms = _chat(prompt)
+            t = _timings(resp)
+            t["total_ms"] = round(ms, 1)
+            t["ttft_ms"] = t["prompt_ms"]
+            profile[label] = t
+            p(f"  {label}: prompt {t['prompt_tokens']} tok in {t['prompt_ms']} ms ({t['prompt_tok_s']} tok/s), "
+              f"decode {t['decode_tokens']} tok at {t['decode_tok_s']} tok/s")
+        except Exception as e:  # noqa: BLE001
+            p(f"  {label} completion failed: {e}")
+            profile[label] = {"error": str(e)}
+
+    gbps, note = bandwidth_estimate(INSTANCE_TYPE, INSTANCE_VCPUS)
+    size = profile.get("model_size_bytes")
+    ceiling = None
+    if gbps and size:
+        ceiling = round(gbps * 1e9 / size, 1)
+    profile["ceiling"] = {
+        "bandwidth_gb_s": gbps, "bandwidth_note": note,
+        "bytes_per_token_assumed": size,
+        "tokens_per_second_ceiling": ceiling,
+        "assumption": ("bytes per token = the whole model file (dense). A mixture-of-experts model reads only its active "
+                       "experts per token, so its real ceiling is higher by total/active parameters."),
+    }
+    if ceiling and profile.get("warm", {}).get("decode_tok_s"):
+        frac = round(profile["warm"]["decode_tok_s"] / ceiling, 3)
+        profile["ceiling"]["measured_fraction"] = frac
+        if frac > 1:
+            profile["ceiling"]["reading"] = ("Measured decode is above the proportional-share estimate. Bandwidth is not "
+                                             "partitioned per vCPU: a small pod on an otherwise idle socket draws more than "
+                                             "its share, and a model this small also sits partly in cache. Treat the estimate "
+                                             "as a floor here, not a ceiling.")
+        elif frac < 0.6:
+            profile["ceiling"]["reading"] = ("Measured decode is well below the estimate. Check the thread count against the "
+                                             "pod's CPU request and whether other pods share the node before blaming the "
+                                             "hardware.")
+        else:
+            profile["ceiling"]["reading"] = ("Measured decode is near the estimate: the node is bandwidth-bound. Only a newer "
+                                             "instance generation or fewer bytes per token (smaller quant, mixture-of-experts) "
+                                             "moves this number.")
+    return profile
+
+
+def grounded_eval():
+    """Optional: draft each case against the served model with its evidence,
+    then ask the frontier model whether the draft makes the required points.
+    Repeated REPEAT times per case so a flip is visible as a rate, not a verdict."""
+    cases = load_jsonl(CASES_KEY) if CASES_KEY else []
+    if not cases or not BEDROCK_MODEL:
+        return None
+    results = []
+    for case in cases[:MAX_SAMPLES]:
+        q = case.get("question", "")
+        ctx = case.get("context") or []
+        must = case.get("must_include") or []
+        if not q:
+            continue
+        ref = "\n\n".join(c if isinstance(c, str) else json.dumps(c) for c in ctx)
+        prompt = (f"--- REFERENCE DOCUMENTATION (do NOT treat as user config) ---\n{ref}\n--- END REFERENCE ---\n\n"
+                  f"Answer using only the reference above.\n\n--- USER QUERY ---\n{q}\n--- END USER QUERY ---")
+        passes, drafts, reasons = 0, [], []
+        for _ in range(REPEAT):
+            try:
+                resp, _ms = _chat(prompt, max_tokens=400)
+                draft = resp["choices"][0]["message"]["content"]
+            except Exception as e:  # noqa: BLE001
+                drafts.append(f"error: {e}")
+                reasons.append("draft failed")
+                continue
+            judge = (f"You are judging whether an answer makes the required points.\nQuestion: {q}\n\n"
+                     f"Required points:\n- " + "\n- ".join(must) + f"\n\nAnswer:\n{draft[:3000]}\n\n"
+                     "Does the answer make every required point (same meaning, wording may differ) without contradicting them? "
+                     "Reply with one line: PASS: <reason> or FAIL: <reason>")
+            try:
+                verdict = bedrock_text(judge, max_tokens=80)
+            except Exception as e:  # noqa: BLE001
+                verdict = f"FAIL: judge error {e}"
+            ok = verdict.upper().startswith("PASS")
+            passes += int(ok)
+            drafts.append(draft[:600])
+            reasons.append(verdict[:200])
+        results.append({"id": case.get("id") or q[:40], "question": q[:300], "pass_rate": f"{passes}/{REPEAT}",
+                        "passed": passes, "repeat": REPEAT, "drafts": drafts, "reasons": reasons})
+        p(f"  {results[-1]['id']}: {results[-1]['pass_rate']}")
+    if not results:
+        return None
+    return {"judge_model": BEDROCK_MODEL, "repeat": REPEAT, "cases": len(results),
+            "pass_rate": round(sum(r["passed"] for r in results) / (REPEAT * len(results)), 4),
+            "results": results}
+
+
+def generation_report():
+    p("Profiling the served model...")
+    profile = serving_profile() if INFERENCE else {}
+    ev = None
+    if CASES_KEY:
+        p(f"Grounded evaluation from s3://{BUCKET}/{CASES_KEY} (repeat={REPEAT})...")
+        ev = grounded_eval()
+    findings = []
+    cold = profile.get("cold") or {}
+    if cold.get("ttft_ms") and cold["ttft_ms"] > 2000:
+        findings.append(f"Cold time to first token is {cold['ttft_ms'] / 1000:.1f} s for a {cold.get('prompt_tokens', '?')}-token "
+                        "prompt. That is prompt processing: keep retrieved context tight, warm common prefixes at start, and "
+                        "stream the answer. If it still misses the budget, that is the case for an accelerator.")
+    if ev and ev["pass_rate"] < 1:
+        failed = [r["id"] for r in ev["results"] if r["passed"] < r["repeat"]]
+        findings.append(f"{len(failed)} of {ev['cases']} grounded cases did not pass every run ({', '.join(failed[:5])}). "
+                        "Check the evidence handed to the model before the model: most misses are the right chunk not "
+                        "being in the context.")
+    reading = (profile.get("ceiling") or {}).get("reading")
+    if reading and "well below" in reading:
+        findings.append(reading)
+    generic = ["Decode speed is bounded by memory bandwidth divided by bytes per token; a newer instance generation raises "
+               "the ceiling, more vCPUs on the same generation do not raise it proportionally."]
+    return {"project": PROJECT, "task": "generation", "generated_at": datetime.now(timezone.utc).isoformat(),
+            "profile": profile, "grounded_eval": ev, "serving": serving_block(),
+            "findings": findings, "guidance": findings + generic}
+
+
+# ── HTML ────────────────────────────────────────────────────────────────────────
+
+CSS = """
+:root{--bg:#fff;--fg:#0f172a;--muted:#64748b;--card:#f1f5f9;--line:#e2e8f0;--sky:#0ea5e9;--amber:#f59e0b;--violet:#7c3aed;--green:#059669;--red:#dc2626}
+@media (prefers-color-scheme:dark){:root{--bg:#0f172a;--fg:#f1f5f9;--muted:#94a3b8;--card:#1e293b;--line:#334155}}
+body{margin:0;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--fg);line-height:1.45}
+main{max-width:1100px;margin:0 auto;padding:32px 24px}
+h1{font-size:24px;margin:0 0 4px}h2{font-size:18px;margin:36px 0 12px;padding-top:12px;border-top:1px solid var(--line)}h3{font-size:14px;margin:18px 0 8px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.sub{color:var(--muted);font-size:14px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:20px 0}
+.card{background:var(--card);border-radius:10px;padding:14px 16px}.card .v{font-size:26px;font-weight:700;font-family:ui-monospace,Menlo,monospace}.card .l{font-size:12px;color:var(--muted)}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600;font-size:12px}
+code{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.ok{color:var(--green);font-weight:600}.bad{color:var(--red);font-weight:600}.warn{color:var(--amber)}
+.note{background:var(--card);border-left:4px solid var(--sky);padding:10px 14px;border-radius:6px;font-size:13px;margin:12px 0}
+ol.guide li{margin:6px 0}
+details summary{cursor:pointer;color:var(--muted);font-size:13px}
+"""
+
+
+def esc(t):
+    return (str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def fmt(v, kind="num"):
+    if v is None:
+        return "n/a"
+    if kind == "pct":
+        return f"{v * 100:.1f}%"
+    if kind == "ms":
+        return f"{v:,.0f} ms"
+    if kind == "usd":
+        return f"${v:,.2f}"
+    if isinstance(v, float):
+        return f"{v:,.3f}"
+    return f"{v:,}" if isinstance(v, int) else esc(v)
+
+
+def card(value, label):
+    return f'<div class="card"><div class="v">{value}</div><div class="l">{esc(label)}</div></div>'
+
+
+def table(headers, rows):
+    th = "".join(f"<th>{esc(h)}</th>" for h in headers)
+    trs = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
+    return f"<table><thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table>"
+
+
+def render_serving(s):
+    rows = []
+    if s.get("instance_type"):
+        rows.append(["Instance type", esc(s["instance_type"])])
+    if s.get("vcpus"):
+        rows.append(["vCPUs", fmt(s["vcpus"])])
+    if s.get("hourly_usd"):
+        rows.append(["On-demand rate, one node", f"{fmt(s['hourly_usd'], 'usd')}/hour, about {fmt(s['monthly_usd'], 'usd')}/month"])
+    if not rows:
+        return "<p class='sub'>Node details were not available to the report Job.</p>"
+    return table(["", ""], rows) + ("<p class='note'>The node is fixed capacity: it costs the same per hour whether one request arrives or a thousand. "
+                                   "Dividing it into a per-request figure needs your request rate, which the report does not know. "
+                                   "Replicas add throughput linearly and do not change the latency of one request.</p>")
+
+
+def render_guidance(items):
+    return "<ol class='guide'>" + "".join(f"<li>{esc(i)}</li>" for i in items) + "</ol>"
+
+
+def render_encoder(rep):
+    m, task = rep["metrics"], rep["task"]
+    lat, llm = rep.get("latency") or {}, rep.get("llm_baseline")
+    parts = []
+    # Summary cards
+    cards = []
+    if task == "classification":
+        cards.append(card(fmt(m.get("accuracy"), "pct"), f"exact-match accuracy, {m.get('total', 0)} held-out"))
+        base = m.get("baseline") or {}
+        if base.get("accuracy") is not None:
+            cards.append(card(fmt(base["accuracy"], "pct"), f"majority-class baseline (always '{base.get('label')}')"))
+        if llm:
+            cards.append(card(fmt(llm["accuracy"], "pct"), f"frontier model zero-shot, {llm['n']} samples"))
+    elif task == "embedding":
+        t, b = m.get("tuned") or {}, m.get("baseline") or {}
+        cards.append(card(fmt(t.get("recall@2"), "pct"), "recall@2, tuned encoder"))
+        cards.append(card(fmt(b.get("recall@2"), "pct"), "recall@2, stock encoder"))
+        cards.append(card(fmt(t.get("mrr")), "MRR, tuned"))
+    elif task == "scoring":
+        cards.append(card(fmt(m.get("mae")), "MAE"))
+        cards.append(card(fmt(m.get("baseline_mae")), "MAE, predict-the-mean baseline"))
+        cards.append(card(fmt(m.get("r2")), "R squared"))
+    elif task == "extraction":
+        cards.append(card(fmt(m.get("f1"), "pct"), "F1"))
+        cards.append(card(fmt(m.get("baseline_f1"), "pct"), "F1, gazetteer baseline"))
+    if lat.get("p50_ms") is not None:
+        cards.append(card(fmt(lat["p50_ms"], "ms"), f"endpoint latency p50 ({lat['n']} requests)"))
+    parts.append('<div class="cards">' + "".join(cards) + "</div>")
+
+    # Quality
+    parts.append("<h2>Quality</h2>")
+    if task == "classification":
+        by = m.get("by_origin") or {}
+        if by:
+            parts.append("<h3>Held-out set by origin</h3>")
+            rows = [[esc(o), fmt(g["n"]), fmt(g["correct"]), fmt(g["accuracy"], "pct")] for o, g in sorted(by.items())]
+            if llm and llm.get("by_origin"):
+                for r, (o, g) in zip(rows, sorted(by.items())):
+                    lg = llm["by_origin"].get(o)
+                    r.append(fmt(lg["accuracy"], "pct") if lg else "n/a")
+                parts.append(table(["origin", "n", "correct", "head accuracy", "frontier model"], rows))
+            else:
+                parts.append(table(["origin", "n", "correct", "accuracy"], rows))
+            if "real" not in by:
+                parts.append("<p class='note'>All held-out records are synthetic. Add human-labeled examples under "
+                             "<code>data.evaluation.labeled</code> to see how the head does on what users actually write.</p>")
+        pc = m.get("per_class") or {}
+        if pc:
+            parts.append("<h3>Per class</h3>")
+            rows = [[esc(c), fmt(v["precision"]), fmt(v["recall"]), fmt(v["f1"])]
+                    for c, v in sorted(pc.items(), key=lambda kv: kv[1]["f1"])]
+            parts.append(table(["class", "precision", "recall", "F1"], rows))
+        conf = m.get("confusions") or []
+        if conf:
+            parts.append("<h3>Most frequent confusions</h3>")
+            parts.append(table(["expected", "predicted", "count"],
+                               [[esc(c["expected"]), esc(c["predicted"]), fmt(c["count"])] for c in conf]))
+        cal = m.get("calibration") or []
+        if cal:
+            parts.append("<h3>Reliability of the head's probability</h3>")
+            rows = []
+            for b in cal:
+                gap = b["avg_confidence"] - b["accuracy"]
+                cls = "bad" if gap > 0.15 and b["n"] >= 5 else ""
+                rows.append([f"{b['low']:.1f} to {b['high']:.1f}", fmt(b["n"]), fmt(b["accuracy"], "pct"),
+                             f"<span class='{cls}'>{fmt(b['avg_confidence'], 'pct')}</span>"])
+            parts.append(table(["predicted probability", "n", "accuracy", "average claimed"], rows))
+            parts.append("<p class='sub'>A well-calibrated head has accuracy close to the claimed probability in every row. "
+                         "Rows where the claim is far above the accuracy are where to hand-check predictions.</p>")
+    elif task == "embedding":
+        t, b = m.get("tuned") or {}, m.get("baseline") or {}
+        ks = [k for k in ("recall@1", "recall@2", "recall@5", "recall@10", "mrr") if k in t]
+        parts.append("<h3>Stock versus tuned encoder</h3>")
+        parts.append(table(["metric", "stock", "tuned", "change"],
+                           [[k, fmt(b.get(k)), fmt(t.get(k)),
+                             (f"{(t[k] - b[k]):+.3f}" if b.get(k) is not None and t.get(k) is not None else "")] for k in ks]))
+        by = t.get("by_origin") or {}
+        if by:
+            parts.append("<h3>Tuned encoder by held-out origin</h3>")
+            parts.append(table(["origin", "queries", "recall@2", "recall@5", "MRR"],
+                               [[esc(o), fmt(g["eval_queries"]), fmt(g.get("recall@2"), "pct"),
+                                 fmt(g.get("recall@5"), "pct"), fmt(g.get("mrr"))] for o, g in sorted(by.items())]))
+        else:
+            parts.append("<p class='note'>All held-out queries are synthetic. Add human-written (query, gold chunk) pairs under "
+                         "<code>data.evaluation.labeled</code> to measure retrieval on real questions.</p>")
+        parts.append(f"<p class='sub'>Corpus of {fmt(m.get('corpus_size'))} chunks, {fmt(m.get('eval_queries'))} held-out queries, "
+                     f"{fmt(m.get('epochs'))} epochs, {fmt(m.get('train_seconds'))} s of training on CPU.</p>")
+    elif task == "scoring":
+        parts.append(table(["metric", "value"], [["MAE", fmt(m.get("mae"))], ["RMSE", fmt(m.get("rmse"))],
+                                                 ["R squared", fmt(m.get("r2"))], ["correlation", fmt(m.get("correlation"))],
+                                                 ["baseline MAE (predict the mean)", fmt(m.get("baseline_mae"))]]))
+    elif task == "extraction":
+        pe = m.get("per_entity") or {}
+        parts.append(table(["entity", "precision", "recall", "F1"],
+                           [[esc(e), fmt(v["precision"]), fmt(v["recall"]), fmt(v["f1"])] for e, v in sorted(pe.items())]))
+
+    # Predictions
+    preds = rep.get("predictions") or []
+    if preds:
+        parts.append("<h2>Held-out predictions</h2>")
+        if task == "classification":
+            preds = sorted(preds, key=lambda r: (r.get("correct", True), -r.get("probability", 0)))
+            rows = [[esc(r.get("input", "")[:200]), f"<code>{esc(r.get('expected'))}</code>", f"<code>{esc(r.get('predicted'))}</code>",
+                     fmt(r.get("probability"), "pct"), esc(r.get("origin", "")),
+                     "<span class='ok'>yes</span>" if r.get("correct") else "<span class='bad'>no</span>"] for r in preds]
+            parts.append("<details><summary>Show all rows (incorrect first)</summary>" +
+                         table(["input", "expected", "predicted", "probability", "origin", "correct"], rows) + "</details>")
+        elif task == "embedding":
+            preds = sorted(preds, key=lambda r: (r.get("rank_tuned") or 999), reverse=True)
+            rows = [[esc(r.get("query", "")[:200]), esc(r.get("origin", "")), fmt(r.get("rank_stock")) if r.get("rank_stock") else "> 10",
+                     fmt(r.get("rank_tuned")) if r.get("rank_tuned") else "> 10", esc(r.get("positive", "")[:120])] for r in preds]
+            parts.append("<details><summary>Show all queries (worst tuned rank first)</summary>" +
+                         table(["query", "origin", "rank stock", "rank tuned", "gold chunk"], rows) + "</details>")
+
+    # Latency and serving
+    parts.append("<h2>Latency</h2>")
+    if lat.get("p50_ms") is not None:
+        parts.append(table(["", "value"], [["requests", fmt(lat["n"])], ["p50", fmt(lat["p50_ms"], "ms")],
+                                           ["p95", fmt(lat["p95_ms"], "ms")], ["max", fmt(lat["max_ms"], "ms")]]))
+        parts.append("<p class='sub'>Measured one request at a time against the served endpoint from inside the cluster, "
+                     "on real held-out inputs, after one warm-up request.</p>")
+    else:
+        parts.append(f"<p class='sub'>Not measured: {esc(lat.get('error', 'endpoint unavailable'))}</p>")
+    parts.append("<h2>Serving</h2>")
+    parts.append(render_serving(rep.get("serving") or {}))
+    parts.append("<h2>When a number is low</h2>")
+    parts.append(render_guidance(rep.get("guidance") or []))
+    return "".join(parts)
+
+
+def render_generation(rep):
+    pr = rep.get("profile") or {}
+    cold, warm, ceil = pr.get("cold") or {}, pr.get("warm") or {}, pr.get("ceiling") or {}
+    parts = []
+    cards = []
+    if warm.get("decode_tok_s"):
+        cards.append(card(f"{warm['decode_tok_s']:.1f}", "decode tokens per second, warm"))
+    if cold.get("ttft_ms") is not None:
+        cards.append(card(fmt(cold["ttft_ms"], "ms"), f"time to first token, cold prefix ({cold.get('prompt_tokens')} prompt tokens)"))
+    if warm.get("ttft_ms") is not None:
+        cards.append(card(fmt(warm["ttft_ms"], "ms"), "time to first token, warm prefix"))
+    if ceil.get("tokens_per_second_ceiling"):
+        cards.append(card(f"{ceil['tokens_per_second_ceiling']:.0f}", "tokens per second ceiling (estimate)"))
+    parts.append('<div class="cards">' + "".join(cards) + "</div>")
+
+    parts.append("<h2>Model</h2>")
+    rows = [["file", f"<code>{esc(pr.get('model_path') or 'n/a')}</code>"],
+            ["size on disk", f"{pr['model_size_bytes'] / 1e9:.2f} GB" if pr.get("model_size_bytes") else "n/a"],
+            ["parameters (total)", f"{pr['n_params_total'] / 1e9:.1f} B" if pr.get("n_params_total") else "n/a"],
+            ["context (served / trained)", f"{fmt(pr.get('n_ctx'))} / {fmt(pr.get('n_ctx_train'))}"],
+            ["slots", fmt(pr.get("slots"))]]
+    parts.append(table(["", ""], rows))
+
+    parts.append("<h2>Prefill and decode</h2>")
+    rows = []
+    for label, t in (("cold prefix", cold), ("warm prefix", warm)):
+        if t.get("error"):
+            rows.append([label, f"<span class='bad'>{esc(t['error'])}</span>", "", "", "", ""])
+        else:
+            rows.append([label, fmt(t.get("prompt_tokens")), fmt(t.get("prompt_ms"), "ms"), f"{t.get('prompt_tok_s', 0):.0f}",
+                         fmt(t.get("decode_tokens")), f"{t.get('decode_tok_s', 0):.1f}"])
+    parts.append(table(["request", "prompt tokens", "prompt time", "prompt tok/s", "decode tokens", "decode tok/s"], rows))
+    parts.append("<p class='sub'>Prefill (the prompt) is compute-bound and parallel; decode (the answer) reads the active weights "
+                 "once per token and is bound by memory bandwidth. The second request repeats the first so the prompt-prefix "
+                 "cache serves it: that difference is what warming a prompt at startup buys.</p>")
+
+    parts.append("<h2>Bandwidth ceiling</h2>")
+    rows = [["node", esc(rep.get("serving", {}).get("instance_type") or "unknown")],
+            ["bandwidth available (estimate)", f"{ceil.get('bandwidth_gb_s') or 'n/a'} GB/s"],
+            ["basis", esc(ceil.get("bandwidth_note") or "")],
+            ["bytes read per token (assumed)", f"{ceil['bytes_per_token_assumed'] / 1e9:.2f} GB" if ceil.get("bytes_per_token_assumed") else "n/a"],
+            ["ceiling", f"{ceil['tokens_per_second_ceiling']:.0f} tokens/s" if ceil.get("tokens_per_second_ceiling") else "n/a"],
+            ["measured warm decode as a fraction of the ceiling", fmt(ceil.get("measured_fraction"))]]
+    parts.append(table(["", ""], rows))
+    if ceil.get("reading"):
+        parts.append(f"<p>{esc(ceil['reading'])}</p>")
+    parts.append(f"<p class='note'>{esc(ceil.get('assumption', ''))} The bandwidth figure is a published per-socket number scaled by "
+                 "this node's share of the socket; it is an estimate for the arithmetic, not a measurement.</p>")
+
+    ev = rep.get("grounded_eval")
+    parts.append("<h2>Grounded evaluation</h2>")
+    if ev:
+        parts.append(f"<p>{fmt(ev['pass_rate'], 'pct')} of drafts made every required point, {ev['cases']} cases, "
+                     f"each run {ev['repeat']} times, judged by <code>{esc(ev['judge_model'])}</code>.</p>")
+        rows = [[esc(r["id"]), esc(r["question"][:160]), r["pass_rate"], esc((r["reasons"] or [""])[-1][:160])] for r in ev["results"]]
+        parts.append(table(["case", "question", "passes", "last verdict"], rows))
+        parts.append("<p class='sub'>A case that passes some repeats and fails others is judge noise, not a verdict; "
+                     "re-run it before treating it as a regression.</p>")
+    else:
+        parts.append("<p class='sub'>Not run. Point <code>report.cases</code> in the expert config at a JSONL file of "
+                     "{question, context, must_include} cases to score grounded answers with a frontier-model judge.</p>")
+
+    parts.append("<h2>Serving</h2>")
+    parts.append(render_serving(rep.get("serving") or {}))
+    parts.append("<h2>When a number is low</h2>")
+    parts.append(render_guidance(rep.get("guidance") or []))
+    return "".join(parts)
+
+
+def render_html(rep):
+    body = render_generation(rep) if rep["task"] == "generation" else render_encoder(rep)
+    when = rep.get("generated_at", "")[:19].replace("T", " ")
+    return (f"<!doctype html><html><head><meta charset='utf-8'><title>Slemify report: {esc(PROJECT)}</title>"
+            f"<style>{CSS}</style></head><body><main>"
+            f"<h1>{esc(PROJECT)}</h1><p class='sub'>task <code>{esc(rep['task'])}</code>, generated {esc(when)} UTC. "
+            "Numbers are measured; nothing here is a verdict.</p>"
+            f"{body}</main></body></html>")
+
+
+# ── Main ────────────────────────────────────────────────────────────────────────
 
 def main():
-    p("=== Slemify Report ===")
-    tool_name = os.environ.get("TOOL_NAME", PROJECT)
-    tool_desc = os.environ.get("TOOL_DESC", "")
-
-    # 1. Data analysis
-    train = load_jsonl(f"{PROJECT}/processed/train.jsonl")
-    evl = load_jsonl(f"{PROJECT}/processed/eval.jsonl")
-    data_info = analyze_data(train, evl)
-    p(f"Data: {data_info['total']} records")
-
-    # 2. Training metrics
-    p("Loading training state...")
-    training = load_training_state()
-    if training["available"]:
-        p(f"Training: {training['total_steps']} steps, final loss {training.get('final_loss', '?')}")
+    p(f"=== Slemify report: {PROJECT} ({TASK}) ===")
+    if not BUCKET or not PROJECT:
+        raise SystemExit("BUCKET and PROJECT are required")
+    if TASK == "generation":
+        rep = generation_report()
+    elif TASK in ("classification", "embedding", "scoring", "extraction"):
+        rep = encoder_report(TASK)
     else:
-        p("  No training state found")
-
-    # 3. SLM inference + confidence
-    samples = evl[:MAX_SAMPLES]
-    p(f"Running SLM inference ({len(samples)} samples)...")
-    predictions = run_inference(samples)
-    p(f"  Collected {len(predictions)} predictions")
-
-    # 4. LLM-as-judge
-    p(f"Judging predictions via Bedrock ({len(predictions)} samples)...")
-    judge_predictions(predictions, tool_desc)
-    correct = sum(1 for r in predictions if r["correct"])
-    p(f"  Judge: {correct}/{len(predictions)} correct ({correct/len(predictions)*100:.1f}%)")
-
-    # 5. LLM baseline (zero-shot, same samples)
-    p(f"Running LLM baseline ({len(samples)} samples)...")
-    llm_results = run_llm_baseline(samples)
-    p(f"  LLM p50: {_pct(sorted(r['latency_ms'] for r in llm_results), 0.5):.0f}ms")
-
-    # 6. Cost analysis
-    p("Getting pricing...")
-    latencies = [r["latency_ms"] for r in predictions]
-    latencies.sort()
-    ttfts = sorted(r["ttft_ms"] for r in predictions if r["ttft_ms"] > 0)
-    itls = sorted(r["itl_ms"] for r in predictions if r["itl_ms"] > 0)
-    tok_s_vals = [r["tok_s"] for r in predictions if r["tok_s"] > 0]
-    slm_stats = {
-        "p50": _pct(latencies, 0.5),
-        "p95": _pct(latencies, 0.95),
-        "p99": _pct(latencies, 0.99),
-        "avg": round(statistics.mean(latencies), 1) if latencies else 0,
-        "min": round(min(latencies), 1) if latencies else 0,
-        "max": round(max(latencies), 1) if latencies else 0,
-        "ttft_p50": _pct(ttfts, 0.5),
-        "ttft_p95": _pct(ttfts, 0.95),
-        "itl_p50": _pct(itls, 0.5),
-        "itl_p95": _pct(itls, 0.95),
-        "tok_s_avg": round(statistics.mean(tok_s_vals), 1) if tok_s_vals else 0,
-    }
-    llm_latencies = sorted(r["latency_ms"] for r in llm_results)
-    llm_stats = {
-        "p50": _pct(llm_latencies, 0.5),
-        "p95": _pct(llm_latencies, 0.95),
-        "avg": round(statistics.mean(llm_latencies), 1) if llm_latencies else 0,
-    }
-    pricing = get_pricing(slm_stats)
-
-    # 7. Render report
-    p("Rendering HTML...")
-    html = render_html(data_info, training, predictions, llm_results, slm_stats, llm_stats, pricing, tool_name)
+        raise SystemExit(f"unknown task {TASK}")
+    html = render_html(rep)
+    s3.put_object(Bucket=BUCKET, Key=f"{PROJECT}/report/report.json",
+                  Body=json.dumps(rep, indent=2, default=str).encode(), ContentType="application/json")
     s3.put_object(Bucket=BUCKET, Key=f"{PROJECT}/report/report.html",
                   Body=html.encode(), ContentType="text/html")
     p(f"Report: s3://{BUCKET}/{PROJECT}/report/report.html")
     p("=== Done ===")
-
-
-# ── Data ───────────────────────────────────────────────────────────────────────
-
-def load_jsonl(key):
-    obj = s3.get_object(Bucket=BUCKET, Key=key)
-    return [json.loads(l) for l in obj["Body"].read().decode().strip().split("\n") if l.strip()]
-
-
-def analyze_data(train, evl):
-    all_r = train + evl
-    dist = {}
-    for r in all_r:
-        out = r.get("output", "").strip()
-        # Use second field if pipe-delimited (first is often confidence)
-        parts = [x.strip() for x in out.split("|") if x.strip()]
-        label = parts[1] if len(parts) >= 2 else parts[0] if parts else out
-        dist[label] = dist.get(label, 0) + 1
-    sd = sorted(dist.items(), key=lambda x: -x[1])
-    return {"train": len(train), "eval": len(evl), "total": len(all_r),
-            "classes": len(dist), "distribution": sd}
-
-
-# ── Training State ─────────────────────────────────────────────────────────────
-
-def load_training_state():
-    """Read trainer_state.json from the latest checkpoint in S3."""
-    result = {"available": False}
-    try:
-        paginator = s3.get_paginator("list_objects_v2")
-        prefix = f"models/{PROJECT}/"
-        checkpoints = []
-        for page in paginator.paginate(Bucket=BUCKET, Prefix=prefix, Delimiter="/"):
-            for cp in page.get("CommonPrefixes", []):
-                name = cp["Prefix"].rstrip("/").split("/")[-1]
-                if name.startswith("checkpoint-"):
-                    step = int(name.split("-")[1])
-                    checkpoints.append((step, cp["Prefix"]))
-        checkpoints.sort(key=lambda x: -x[0])
-
-        if not checkpoints:
-            return result
-
-        latest_step, latest_prefix = checkpoints[0]
-        key = f"{latest_prefix}trainer_state.json"
-        obj = s3.get_object(Bucket=BUCKET, Key=key)
-        state = json.loads(obj["Body"].read().decode())
-
-        log_history = state.get("log_history", [])
-        losses = [(e["step"], e["loss"]) for e in log_history if "loss" in e]
-        eval_losses = [(e["step"], e["eval_loss"]) for e in log_history if "eval_loss" in e]
-
-        result = {
-            "available": True,
-            "total_steps": state.get("global_step", 0),
-            "losses": losses,
-            "eval_losses": eval_losses,
-            "final_loss": round(losses[-1][1], 4) if losses else None,
-            "start_loss": round(losses[0][1], 4) if losses else None,
-            "min_loss": round(min(l for _, l in losses), 4) if losses else None,
-            "duration_min": 0,
-        }
-
-        # Training runtime from training_log.json
-        try:
-            obj2 = s3.get_object(Bucket=BUCKET, Key=f"models/{PROJECT}/training_log.json")
-            tlog = json.loads(obj2["Body"].read().decode())
-            if isinstance(tlog, list) and tlog:
-                summary = tlog[-1]
-                rt = summary.get("train_runtime", 0)
-                if rt > 0:
-                    result["duration_min"] = round(rt / 60, 1)
-        except Exception:
-            pass
-
-        # GPU info from pod log
-        try:
-            obj3 = s3.get_object(Bucket=BUCKET, Key=f"models/{PROJECT}/training-pod.log")
-            podlog = obj3["Body"].read().decode()
-            gpu_match = re.search(r'(NVIDIA\s+\S+)', podlog)
-            result["gpu_type"] = gpu_match.group(1) if gpu_match else None
-        except Exception:
-            pass
-
-    except Exception as e:
-        p(f"  Warning: could not load training state: {e}")
-    return result
-
-
-# ── Inference ──────────────────────────────────────────────────────────────────
-
-def run_inference(samples):
-    """Run samples through the SLM sequentially with progress reporting."""
-    avg_output_len = sum(len(r.get("output", "")) for r in samples) / max(len(samples), 1)
-    # Set max_tokens based on actual output lengths in eval data (chars/4 ≈ tokens)
-    # Use p95 output length + 50% headroom, minimum 32 for classification
-    output_lengths = sorted(len(r.get("output", "")) // 4 for r in samples if r.get("output"))
-    if output_lengths:
-        p95_tokens = output_lengths[int(len(output_lengths) * 0.95)]
-        max_tokens = max(32, int(p95_tokens * 1.5))
-    else:
-        max_tokens = 512 if avg_output_len > 50 else 32
-    results = []
-
-    for i, rec in enumerate(samples):
-        expected = rec.get("output", "").strip()
-        query = rec.get("input", "")
-        instruction = rec.get("instruction", "")
-        prompt = f"{instruction}\n\n{query}" if instruction else query
-
-        body = json.dumps({
-            "model": "model",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": 0.1,
-            "logprobs": True,
-        }).encode()
-
-        start = time.time()
-        try:
-            req = urllib.request.Request(
-                f"{INFERENCE}/v1/chat/completions", data=body,
-                headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=max(60, max_tokens // 4)) as resp:
-                rj = json.loads(resp.read())
-            ms = (time.time() - start) * 1000
-        except Exception as e:
-            p(f"  SLM {i+1} failed: {e}")
-            continue
-
-        choice = rj.get("choices", [{}])[0]
-        text = choice.get("message", {}).get("content", "").strip()
-        if "</think>" in text:
-            text = text.split("</think>")[-1].strip()
-        text = text.replace("<think>", "").strip()
-
-        confidence = _compute_confidence(choice)
-        timings = rj.get("timings", {})
-
-        results.append({
-            "input": query,
-            "expected": expected,
-            "predicted": text,
-            "confidence": confidence,
-            "latency_ms": round(ms, 1),
-            "ttft_ms": round(timings.get("prompt_ms", 0), 1),
-            "itl_ms": round(timings.get("predicted_per_token_ms", 0), 1),
-            "tok_s": round(timings.get("predicted_per_second", 0), 1),
-            "prompt_tok_s": round(timings.get("prompt_per_second", 0), 1),
-            "correct": False,
-            "reasoning": "",
-        })
-        if (i + 1) % 10 == 0:
-            p(f"  SLM {i+1}/{len(samples)}")
-
-    return results
-
-
-def _compute_confidence(choice):
-    """Confidence from logprobs: geometric mean probability of classification tokens."""
-    logprobs = choice.get("logprobs", {}).get("content", [])
-    if not logprobs:
-        return -1.0
-
-    # Skip think tokens
-    start = 0
-    for i, t in enumerate(logprobs):
-        if "</think>" in t.get("token", ""):
-            start = i + 1
-            break
-
-    # Score only until first newline (the classification line)
-    tokens = []
-    for t in logprobs[start:]:
-        if "\n" in t.get("token", "") and tokens:
-            break
-        if t.get("token", "").strip():
-            tokens.append(t)
-
-    if not tokens:
-        return -1.0
-
-    avg_logprob = sum(t["logprob"] for t in tokens) / len(tokens)
-    return round(math.exp(avg_logprob) * 100, 1)
-
-
-# ── LLM-as-Judge ──────────────────────────────────────────────────────────────
-
-def judge_predictions(results, tool_desc):
-    """Use Bedrock to semantically judge each prediction. Updates results in-place."""
-
-    def judge_one(r):
-        prompt = f"""You are judging whether a model's prediction is semantically correct.
-
-Task: {tool_desc}
-
-Input: {r['input'][:500]}
-Expected output: {r['expected']}
-Model's prediction: {r['predicted'][:200]}
-
-Is the model's prediction semantically correct? Consider:
-- Does the prediction contain the same primary category/intent as expected?
-- The model may output additional secondary labels after the primary one — this is acceptable and often useful (e.g., "spot_interruption|karpenter_config" when the query involves both topics).
-- Minor wording differences, extra detail, or more specific labels are acceptable (e.g., "spot_interruption_handling" for "spot_interruption").
-- Confidence level disagreements (e.g., high vs medium) are acceptable if the primary classification is correct.
-- Only mark INCORRECT if the primary category is fundamentally wrong (e.g., routing a Karpenter question as noise).
-
-Respond with exactly one line:
-CORRECT: <one sentence reasoning>
-or
-INCORRECT: <one sentence reasoning>"""
-        try:
-            resp = bedrock.converse(
-                modelId=BEDROCK_MODEL,
-                messages=[{"role": "user", "content": [{"text": prompt}]}],
-                inferenceConfig={"maxTokens": 100, "temperature": 0})
-            text = resp["output"]["message"]["content"][0]["text"].strip()
-            line = text.split("\n")[0].strip()
-            if line.upper().startswith("CORRECT"):
-                r["correct"] = True
-                r["reasoning"] = line.split(":", 1)[1].strip() if ":" in line else ""
-            else:
-                r["correct"] = False
-                r["reasoning"] = line.split(":", 1)[1].strip() if ":" in line else line
-        except Exception as e:
-            r["correct"] = False
-            r["reasoning"] = f"judge error: {e}"
-
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        futures = [pool.submit(judge_one, r) for r in results]
-        for f in as_completed(futures):
-            f.result()
-
-
-# ── LLM Baseline ───────────────────────────────────────────────────────────────
-
-def run_llm_baseline(samples):
-    """Run the same samples through Bedrock (zero-shot) for comparison."""
-    results = []
-    instruction = samples[0].get("instruction", "") if samples else ""
-    for i, rec in enumerate(samples[:15]):
-        query = rec.get("input", "")
-        prompt = f"{instruction}\n\n{query}" if instruction else query
-        start = time.time()
-        try:
-            resp = bedrock.converse(
-                modelId=BEDROCK_MODEL,
-                messages=[{"role": "user", "content": [{"text": prompt}]}],
-                inferenceConfig={"maxTokens": 64, "temperature": 0})
-            predicted = resp["output"]["message"]["content"][0]["text"].strip()
-            ms = (time.time() - start) * 1000
-        except Exception as e:
-            p(f"  LLM {i+1} failed: {e}")
-            continue
-        results.append({
-            "input": query[:100],
-            "predicted": predicted,
-            "latency_ms": round(ms, 1),
-        })
-        if (i + 1) % 10 == 0:
-            p(f"  LLM {i+1}/15")
-    return results
-
-
-# ── Pricing ────────────────────────────────────────────────────────────────────
-
-def get_pricing(slm_stats):
-    # CPU on-demand pricing (Graviton)
-    try:
-        resp = ec2.describe_spot_price_history(
-            InstanceTypes=["c7g.4xlarge", "c7g.2xlarge", "c8g.4xlarge", "c8g.2xlarge"],
-            ProductDescriptions=["Linux/UNIX"], MaxResults=10)
-        prices = {pr["InstanceType"]: float(pr["SpotPrice"]) for pr in resp["SpotPriceHistory"]}
-    except Exception:
-        prices = {}
-    # On-demand is roughly 2.5x Spot price for Graviton
-    spot_hourly = min(prices.values()) if prices else 0.16
-    ondemand_hourly = round(spot_hourly * 2.5, 3)
-    cpu_ondemand_monthly = round(ondemand_hourly * 730, 2)
-    cpu_spot_monthly = round(spot_hourly * 730, 2)
-
-    # GPU pricing (g5.xlarge for SLM inference — much faster per request)
-    try:
-        gpu_resp = ec2.describe_spot_price_history(
-            InstanceTypes=["g5.xlarge", "g5.2xlarge"],
-            ProductDescriptions=["Linux/UNIX"], MaxResults=5)
-        gpu_prices = {pr["InstanceType"]: float(pr["SpotPrice"]) for pr in gpu_resp["SpotPriceHistory"]}
-    except Exception:
-        gpu_prices = {}
-    gpu_spot_hourly = min(gpu_prices.values()) if gpu_prices else 0.50
-    gpu_ondemand_hourly = round(gpu_spot_hourly * 3.0, 3)  # GPU on-demand ~3x Spot
-    gpu_monthly = round(gpu_ondemand_hourly * 730, 2)
-    # GPU inference is ~10-20x faster than CPU for SLMs
-    gpu_rps_per_replica = (1000.0 / slm_stats["avg"] if slm_stats["avg"] > 0 else 1) * 15
-
-    # SLM CPU capacity
-    rps_per_replica = 1000.0 / slm_stats["avg"] if slm_stats["avg"] > 0 else 1
-
-    tiers = []
-    for daily in [1000, 10000, 100000, 1000000]:
-        rps_needed = daily / 86400
-        # CPU replicas needed
-        cpu_replicas = max(1, math.ceil(rps_needed / rps_per_replica))
-        cpu_od_cost = round(cpu_ondemand_monthly * cpu_replicas, 2)
-        cpu_spot_cost = round(cpu_spot_monthly * cpu_replicas, 2)
-        # GPU replicas needed
-        gpu_replicas = max(1, math.ceil(rps_needed / gpu_rps_per_replica))
-        gpu_cost = round(gpu_monthly * gpu_replicas, 2)
-        tiers.append({
-            "daily": daily, "rps_needed": round(rps_needed, 2),
-            "cpu_replicas": cpu_replicas, "cpu_od": cpu_od_cost, "cpu_spot": cpu_spot_cost,
-            "gpu_replicas": gpu_replicas, "gpu": gpu_cost,
-        })
-    return {"cpu_ondemand_monthly": cpu_ondemand_monthly, "cpu_spot_monthly": cpu_spot_monthly,
-            "gpu_monthly": gpu_monthly,
-            "tiers": tiers, "rps_per_replica": round(rps_per_replica, 2),
-            "gpu_rps_per_replica": round(gpu_rps_per_replica, 2)}
-
-
-# ── HTML Rendering ─────────────────────────────────────────────────────────────
-
-def render_html(data_info, training, predictions, llm_results, slm_stats, llm_stats, pricing, tool_name):
-    correct = sum(1 for r in predictions if r["correct"])
-    total = len(predictions)
-    acc = correct / total * 100 if total else 0
-    confidences = [r["confidence"] for r in predictions if r["confidence"] >= 0]
-    avg_conf = round(sum(confidences) / len(confidences), 1) if confidences else 0
-    llm_p50 = llm_stats["p50"]
-
-    # Training loss SVG
-    loss_svg = _render_loss_svg(training.get("losses", []), training.get("eval_losses", []))
-
-    # Predictions table
-    pred_rows = ""
-    for r in predictions:
-        conf_color = "var(--green)" if r["confidence"] >= 80 else "var(--yellow)" if r["confidence"] >= 50 else "var(--red)"
-        judge_color = "var(--green)" if r["correct"] else "var(--red)"
-        judge_icon = "&#10003;" if r["correct"] else "&#10007;"
-        pred_rows += f"""<tr>
-          <td style="max-width:300px;white-space:pre-wrap;font-size:12px">{_esc(r['input'][:200])}</td>
-          <td><code>{_esc(r['expected'])}</code></td>
-          <td><code>{_esc(r['predicted'].split(chr(10))[0][:80])}</code></td>
-          <td style="color:{conf_color};font-weight:600">{r['confidence']:.0f}%</td>
-          <td style="color:{judge_color}">{judge_icon}</td>
-          <td style="color:var(--muted);font-size:12px">{_esc(r.get('reasoning','')[:100])}</td>
-          <td>{r['latency_ms']}ms</td>
-        </tr>"""
-
-    # Data distribution
-    dist_rows = "".join(
-        f'<tr><td>{_esc(label)}</td><td>{count}</td></tr>'
-        for label, count in data_info["distribution"][:15])
-
-    # SLM vs LLM comparison (side-by-side)
-    compare_rows = ""
-    for i in range(min(15, len(predictions), len(llm_results))):
-        sr = predictions[i]
-        lr = llm_results[i] if i < len(llm_results) else {"predicted": "—", "latency_ms": 0}
-        compare_rows += f"""<tr>
-          <td style="max-width:200px;font-size:12px;white-space:pre-wrap">{_esc(sr['input'][:150])}</td>
-          <td><code>{_esc(sr['expected'])}</code></td>
-          <td><code>{_esc(sr['predicted'].split(chr(10))[0][:60])}</code><br><span style="color:var(--muted);font-size:11px">{sr['latency_ms']}ms | {sr['confidence']:.0f}% conf</span></td>
-          <td style="font-size:12px">{_esc(lr['predicted'][:100])}<br><span style="color:var(--muted);font-size:11px">{lr['latency_ms']}ms</span></td>
-        </tr>"""
-
-    # Cost tiers
-    cost_rows = "".join(
-        f'<tr><td>{t["daily"]:,}/day</td><td>{t["rps_needed"]:.2f}</td><td>{t["cpu_replicas"]} node{"s" if t["cpu_replicas"]>1 else ""}</td><td>${t["cpu_od"]}</td><td style="color:var(--green)">${t["cpu_spot"]}</td><td>{t["gpu_replicas"]} node{"s" if t["gpu_replicas"]>1 else ""}</td><td style="color:var(--purple)">${t["gpu"]}</td></tr>'
-        for t in pricing["tiers"])
-
-    import datetime
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M UTC")
-
-    return f"""<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Slemify Report — {_esc(tool_name)}</title>
-<style>
-:root{{--bg:#0f1117;--surface:#161b22;--border:#30363d;--text:#e6edf3;--muted:#8b949e;--accent:#58a6ff;--green:#3fb950;--yellow:#d29922;--red:#f85149;--purple:#a371f7;--teal:#39d353;--font:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}}
-[data-theme="light"]{{--bg:#ffffff;--surface:#f6f8fa;--border:#d0d7de;--text:#1f2328;--muted:#656d76;--accent:#0969da;--green:#1a7f37;--yellow:#9a6700;--red:#cf222e;--purple:#8250df;--teal:#0e6d31}}
-*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:var(--font);background:var(--bg);color:var(--text);line-height:1.6;transition:background .2s,color .2s}}
-.container{{max-width:1400px;margin:0 auto;padding:24px}}
-header{{padding:24px 0;border-bottom:1px solid var(--border);margin-bottom:24px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap}}
-header h1{{font-size:24px;font-weight:600}}header p{{color:var(--muted);font-size:14px}}
-.theme-toggle{{cursor:pointer;padding:6px 12px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--muted);font-size:12px}}
-.tabs{{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:24px;overflow-x:auto}}
-.tab{{padding:10px 20px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;font-size:14px;white-space:nowrap;transition:all .2s}}
-.tab:hover{{color:var(--text)}}.tab.active{{color:var(--accent);border-bottom-color:var(--accent)}}
-.panel{{display:none}}.panel.active{{display:block}}
-.card{{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:16px}}
-.card h3{{font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:16px}}
-.metric{{text-align:center}}.metric .value{{font-size:28px;font-weight:700}}.metric .label{{font-size:12px;color:var(--muted)}}
-table{{width:100%;border-collapse:collapse;font-size:13px}}th{{text-align:left;padding:8px;color:var(--muted);font-weight:500;border-bottom:1px solid var(--border)}}
-td{{padding:8px;border-bottom:1px solid var(--border);vertical-align:top}}tr:hover{{background:rgba(88,166,255,.04)}}
-code{{background:var(--bg);padding:2px 6px;border-radius:4px;font-size:12px}}
-.tag{{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}}
-.tag-slm{{background:rgba(88,166,255,.15);color:var(--accent)}}.tag-llm{{background:rgba(163,113,247,.15);color:var(--purple)}}
-footer{{text-align:center;padding:24px 0;color:var(--muted);font-size:12px;border-top:1px solid var(--border);margin-top:32px}}
-</style></head><body><div class="container">
-<header><div><h1>Slemify Report</h1><p>{_esc(tool_name)} &mdash; {ts}</p></div><button class="theme-toggle" onclick="toggleTheme()">&#9681; Toggle Theme</button></header>
-
-<div class="grid">
-  <div class="card"><div class="metric"><span class="value" style="color:var(--green)">{acc:.0f}%</span><br><span class="label">Judge Accuracy ({correct}/{total})</span></div></div>
-  <div class="card"><div class="metric"><span class="value" style="color:var(--accent)">{avg_conf:.0f}%</span><br><span class="label">Avg Model Confidence</span></div></div>
-  <div class="card"><div class="metric"><span class="value" style="color:var(--teal)">{slm_stats['p50']:.0f}ms</span><br><span class="label">SLM Latency (p50)</span></div></div>
-  <div class="card"><div class="metric"><span class="value" style="color:var(--purple)">{llm_p50:.0f}ms</span><br><span class="label">LLM Latency (p50)</span></div></div>
-  <div class="card"><div class="metric"><span class="value" style="color:var(--yellow)">${pricing['cpu_spot_monthly']}</span><br><span class="label">CPU Spot/replica/mo</span></div></div>
-</div>
-
-<div class="tabs">
-  <div class="tab active" onclick="showTab('predictions')">Predictions</div>
-  <div class="tab" onclick="showTab('comparison')">SLM vs LLM</div>
-  <div class="tab" onclick="showTab('training')">Training</div>
-  <div class="tab" onclick="showTab('cost')">Capacity Planning</div>
-</div>
-
-<div id="predictions" class="panel active">
-  <div class="card"><h3>Predictions</h3>
-    <p style="color:var(--muted);margin-bottom:12px">Each prediction judged by Bedrock ({BEDROCK_MODEL}). Confidence from token logprobs.</p>
-    <table><thead><tr><th>Input</th><th>Expected</th><th>Predicted</th><th>Confidence</th><th>Judge</th><th>Reasoning</th><th>Latency</th></tr></thead>
-    <tbody>{pred_rows}</tbody></table>
-  </div>
-</div>
-
-<div id="comparison" class="panel">
-  <div class="card"><h3>Latency Comparison</h3>
-    <table><thead><tr><th>Metric</th><th><span class="tag tag-slm">SLM</span></th><th><span class="tag tag-llm">LLM API</span></th></tr></thead><tbody>
-      <tr><td>End-to-end p50</td><td style="color:var(--teal)">{slm_stats['p50']:.0f}ms</td><td style="color:var(--purple)">{llm_p50:.0f}ms</td></tr>
-      <tr><td>End-to-end p95</td><td>{slm_stats['p95']:.0f}ms</td><td>{llm_stats['p95']:.0f}ms</td></tr>
-      <tr><td>End-to-end p99</td><td>{slm_stats['p99']:.0f}ms</td><td style="color:var(--muted)">—</td></tr>
-      <tr><td>Min / Max</td><td>{slm_stats['min']:.0f}ms / {slm_stats['max']:.0f}ms</td><td style="color:var(--muted)">—</td></tr>
-      <tr><td>TTFT (Time to First Token) p50</td><td>{slm_stats['ttft_p50']:.0f}ms</td><td style="color:var(--muted)">—</td></tr>
-      <tr><td>TTFT p95</td><td>{slm_stats['ttft_p95']:.0f}ms</td><td style="color:var(--muted)">—</td></tr>
-      <tr><td>ITL (Inter-Token Latency) p50</td><td>{slm_stats['itl_p50']:.1f}ms</td><td style="color:var(--muted)">—</td></tr>
-      <tr><td>ITL p95</td><td>{slm_stats['itl_p95']:.1f}ms</td><td style="color:var(--muted)">—</td></tr>
-      <tr><td>Generation throughput (avg)</td><td>{slm_stats['tok_s_avg']:.1f} tok/s</td><td style="color:var(--muted)">—</td></tr>
-
-    </tbody></table>
-  </div>
-  <div class="card"><h3>Side-by-Side Predictions</h3>
-    <p style="color:var(--muted);margin-bottom:12px">Same inputs sent to both the fine-tuned SLM and an LLM API (zero-shot). The SLM produces structured pipe-delimited output. The LLM gets the intent right but in varying formats.</p>
-    <table><thead><tr><th>Input</th><th>Expected</th><th><span class="tag tag-slm">SLM</span> Output</th><th><span class="tag tag-llm">LLM</span> Output</th></tr></thead>
-    <tbody>{compare_rows}</tbody></table>
-  </div>
-</div>
-
-<div id="training" class="panel">
-  <div class="card"><h3>Training</h3>
-    <p style="color:var(--muted);margin-bottom:12px">{training.get('total_steps',0)} steps | Loss: {training.get('start_loss','?')} &rarr; {training.get('final_loss','?')} (min: {training.get('min_loss','?')}) | {training.get('duration_min',0)} min{' | ' + training.get('gpu_type','') if training.get('gpu_type') else ''}</p>
-    {loss_svg}
-  </div>
-  <div class="card"><h3>Data Distribution</h3>
-    <table><thead><tr><th>Class</th><th>Count</th></tr></thead><tbody>{dist_rows}</tbody></table>
-  </div>
-</div>
-
-<div id="cost" class="panel">
-  <div class="card"><h3>Capacity Planning — Monthly Estimates</h3>
-    <p style="color:var(--muted);margin-bottom:12px">CPU capacity: {pricing['rps_per_replica']:.1f} req/s per node (avg latency {slm_stats['avg']:.0f}ms). GPU capacity: ~{pricing['gpu_rps_per_replica']:.0f} req/s per node (~15x faster). All prices monthly.</p>
-    <table><thead><tr><th>Volume</th><th>Req/s</th><th>CPU Nodes</th><th>CPU On-Demand</th><th>CPU Spot</th><th>GPU Nodes</th><th>GPU</th></tr></thead><tbody>{cost_rows}</tbody></table>
-    <div style="margin-top:16px;padding:16px;border-radius:6px;border:1px solid var(--border);background:var(--bg)">
-      <p style="font-size:13px;color:var(--muted);margin-bottom:8px"><strong style="color:var(--text)">Note:</strong> These are reference estimates to help with infrastructure sizing. Actual costs depend on:</p>
-      <ul style="font-size:13px;color:var(--muted);padding-left:20px;line-height:2">
-        <li><strong>Instance selection</strong> — Karpenter picks the cheapest instance that meets resource requests. Actual types (c8g.medium, g5.xlarge, etc.) vary by availability and region.</li>
-        <li><strong>Capacity vs cost</strong> — CPU nodes are cheap but slow per request. GPU nodes are expensive but handle 10-20x more throughput. At high volumes, fewer GPU nodes can be cheaper than many CPU nodes.</li>
-        <li><strong>Latency requirements</strong> — If sub-100ms latency is needed, GPU inference or a smaller model is required. CPU inference at 1-2s may be acceptable for async workloads.</li>
-        <li><strong>Scaling behavior</strong> — HPA scales replicas based on request rate. More replicas means more nodes. Spot pricing reduces cost but may introduce interruptions.</li>
-      </ul>
-      <p style="font-size:12px;color:var(--muted);margin-top:8px">Use this table as a starting point for infrastructure planning. Test with your actual traffic patterns to validate.</p>
-    </div>
-  </div>
-</div>
-
-<footer>Generated by Slemify &mdash; {ts}</footer>
-</div>
-<script>
-function showTab(id){{document.querySelectorAll('.panel').forEach(function(el){{el.classList.remove('active')}});document.querySelectorAll('.tab').forEach(function(el){{el.classList.remove('active')}});document.getElementById(id).classList.add('active');event.target.classList.add('active')}}
-function toggleTheme(){{var h=document.documentElement;h.dataset.theme=h.dataset.theme==='light'?'':'light'}}
-</script>
-</body></html>"""
-
-
-def _render_loss_svg(losses, eval_losses):
-    if not losses:
-        return "<p style='color:var(--muted)'>No training loss data available</p>"
-    max_step = max(s for s, _ in losses)
-    max_loss = max(l for _, l in losses)
-    w, h = 700, 200
-    # Training loss line
-    points = " ".join(f"{s/max_step*w:.1f},{h - l/max_loss*h:.1f}" for s, l in losses)
-    svg = f'<svg viewBox="0 0 {w} {h}" style="width:100%;height:200px;background:var(--bg);border-radius:4px">'
-    svg += f'<polyline points="{points}" fill="none" stroke="var(--accent)" stroke-width="1.5"/>'
-    # Eval loss points
-    if eval_losses:
-        for s, l in eval_losses:
-            x = s / max_step * w
-            y = h - l / max_loss * h
-            svg += f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="var(--yellow)"/>'
-    svg += '</svg>'
-    svg += '<p style="font-size:11px;color:var(--muted);margin-top:4px"><span style="color:var(--accent)">&#9644;</span> Training loss <span style="color:var(--yellow)">&#9679;</span> Eval loss</p>'
-    return svg
-
-
-def _pct(sl, pctile):
-    if not sl:
-        return 0
-    return round(sl[min(int(len(sl) * pctile), len(sl) - 1)], 1)
-
-
-def _esc(t):
-    if not t:
-        return ""
-    return str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 if __name__ == "__main__":

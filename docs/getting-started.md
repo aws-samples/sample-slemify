@@ -213,14 +213,19 @@ slemify report --config triage/expert.yaml
 slemify report --config analyst/expert.yaml
 ```
 
-The HTML report shows:
-- Accuracy per label (does the model classify correctly?)
-- Confidence calibration (when it says "high confidence," is it right?)
-- SLM vs LLM comparison (how does it compare to the Bedrock LLM on the same queries?)
-- Latency benchmarks (TTFT, tokens/second, throughput)
-- Cost projections (what does this cost at 1K, 10K, 100K queries/day?)
+Each command prints the summary and opens the HTML report. For the triage classifier:
 
-If accuracy is below your threshold, add more training queries for the weak categories and retrain.
+- Accuracy on the held-out set next to the majority-class baseline (what always guessing the most common label would score)
+- Accuracy on the 43 human-labeled queries in `data/eval-labeled/` and on the generated held-out set, separately
+- Confusion pairs, per-class precision and recall, and calibration (when the head says 90%, how often is it right?)
+- Endpoint latency (p50, p95) and the instance type the pod landed on with its on-demand hourly rate
+
+For the analyst (a generation model served stock):
+
+- Model size, decode tokens per second, cold and warm time to first token
+- The memory-bandwidth ceiling for that instance generation next to the measured decode speed
+
+If the classifier's accuracy on real queries is well below its accuracy on synthetic ones, the fix is the domain description and more seed queries for the weak categories, not the model. See the [Report deep dive](deep-dive/report.md).
 
 ## Step 6: Set up the demo
 

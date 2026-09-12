@@ -12,13 +12,21 @@ import (
 
 	"github.com/aws-samples/sample-slemify/pkg/config"
 	"github.com/aws-samples/sample-slemify/pkg/k8s"
+	"github.com/aws-samples/sample-slemify/pkg/report"
 	"github.com/spf13/cobra"
 )
 
 var reportCmd = &cobra.Command{
 	Use:   "report",
-	Short: "Show the classification accuracy report for a deployed model",
-	Long:  "Downloads the HTML report from S3 (generated during deploy), saves it locally, and opens it in the browser.",
+	Short: "Show the report for a deployed model",
+	Long: `Prints the summary of the report the deploy step generated and downloads the
+full HTML report from S3. Works for every task family: classifiers and
+extractors report accuracy against a majority-class baseline, embedding models
+report recall against the stock encoder, and generation models report a
+serving profile (decode speed, time to first token, bandwidth ceiling).
+
+Optional sections cost frontier-model calls and are off unless set in
+expert.yaml under report: (llm_baseline, cases, repeat).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 
@@ -36,6 +44,14 @@ var reportCmd = &cobra.Command{
 		client, err := k8s.NewClient(kubeconfig, namespace)
 		if err != nil {
 			return fmt.Errorf("creating K8s client: %w", err)
+		}
+
+		// Terminal summary first; the HTML is the long form of the same data.
+		summaryKey := fmt.Sprintf("%s/report/report.json", cfg.Project.Name)
+		if data, err := client.DownloadFromS3(ctx, cfg.Data.Bucket, summaryKey); err == nil {
+			if s, err := report.ParseSummary(data); err == nil {
+				report.PrintSummary(s)
+			}
 		}
 
 		// Download existing report from S3

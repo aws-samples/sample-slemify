@@ -43,6 +43,13 @@ if [ -d "$EVAL_DIR" ]; then
     aws s3 sync "$EVAL_DIR" "s3://$BUCKET/$EVAL_PREFIX/" --exclude "*" --include "*.txt"
 fi
 
+# Upload human-labeled held-out sets if they exist
+LABELED_DIR="$(dirname "$0")/data/eval-labeled"
+LABELED_PREFIX="k8s-autoscaling/data/eval-labeled"
+if [ -d "$LABELED_DIR" ]; then
+    echo "Uploading labeled held-out sets to s3://$BUCKET/$LABELED_PREFIX/"
+    aws s3 sync "$LABELED_DIR" "s3://$BUCKET/$LABELED_PREFIX/" --exclude "*" --include "*.jsonl"
+fi
 echo ""
 echo "Done. Bucket: $BUCKET"
 echo "Use this in your expert.yaml:"

@@ -65,8 +65,10 @@ func DefaultBuildSpecs() []BuildInstanceSpec {
 
 // UserDataScript returns the cloud-init script that installs Docker.
 // It retries the package install (transient repo/mirror failures are the main
-// source of build flakiness) and writes /tmp/build-ready only after Docker is
-// confirmed running, so the controller can wait on a definitive signal.
+// source of build flakiness) and writes /var/lib/slemify-build-ready only after
+// Docker is confirmed running, so the controller can wait on a definitive
+// signal. The marker lives outside /tmp because the AMI can reboot once after
+// first boot (kernel update), which empties /tmp and would lose the signal.
 func UserDataScript() string {
 	return `#!/bin/bash
 # Do NOT 'set -e' for the whole script: a single transient yum failure must not
@@ -88,7 +90,7 @@ usermod -aG docker ec2-user
 # Wait until the daemon actually answers before signalling readiness.
 for i in $(seq 1 30); do
   if docker info >/dev/null 2>&1; then
-    touch /tmp/build-ready
+    touch /var/lib/slemify-build-ready
     echo "build-ready"
     exit 0
   fi

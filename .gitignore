@@ -72,6 +72,8 @@ logs/
 data/raw/
 data/processed/
 *.jsonl
+# Human-labeled held-out sets are source, not artifacts
+!examples/**/data/eval-labeled/*.jsonl
 
 # Model artifacts
 models/

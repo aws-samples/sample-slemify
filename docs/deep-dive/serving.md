@@ -113,13 +113,13 @@ Readiness probe confirms the server is healthy
 Prometheus metrics available at /metrics
         │
         ▼
-Report Job evaluates accuracy against eval data
+Report Job measures the endpoint and writes report.json + report.html
 ```
 
 1. **Model loading.** Slemify auto-detects whether the [Mountpoint for Amazon S3 CSI driver](https://docs.aws.amazon.com/eks/latest/userguide/s3-csi-create.html) is installed. If it is, the GGUF file is mounted directly from S3 as a read-only PersistentVolume. llama.cpp reads it via mmap with no download step. If the CSI driver is not installed, an init container downloads the GGUF file from S3 into an emptyDir volume (the fallback behavior).
 2. **Server start.** The llama.cpp server loads the GGUF model and exposes an OpenAI-compatible API on port 8080. A Prometheus-compatible metrics endpoint is enabled at `/metrics` for observability and autoscaling.
 3. **Health checks.** Readiness and liveness probes hit the `/health` endpoint. The Deployment won't receive traffic until the model is loaded and responding.
-4. **Report.** A K8s Job runs the production readiness report against the live endpoint (covered in the [Report Stage](report.md)).
+4. **Report.** A K8s Job measures the live endpoint (latency for every task, a serving profile for generation) and combines it with the held-out metrics from training into the report (covered in the [Report Stage](report.md)).
 
 ### S3 mount vs init container download
 
@@ -134,7 +134,7 @@ Report Job evaluates accuracy against eval data
 
 The S3 mount approach is preferred for production because it eliminates the download bottleneck during scaling events. When KEDA scales up a new replica, the pod starts immediately and begins serving (with slightly higher latency on the first few requests as pages are faulted in from S3). The init container approach is simpler and works without any additional cluster setup.
 
-With S3 mount, the `--mlock` flag is important. Without it, the kernel can evict model pages from the page cache under memory pressure (other pods on the same node, KV cache growth). When pages are evicted, subsequent requests must re-fetch them from S3 over the network, degrading throughput from 55 tok/s to as low as 4 tok/s. The `--mlock` flag locks the model in RAM at startup, preventing eviction entirely.
+With S3 mount, locking the model in RAM (`--load-mode mmap+mlock`) is important. Without it, the kernel can evict model pages from the page cache under memory pressure (other pods on the same node, KV cache growth). When pages are evicted, subsequent requests must re-fetch them from S3 over the network, degrading throughput from 55 tok/s to as low as 4 tok/s. The `mlock` part of the load mode locks the model in RAM at startup, preventing eviction entirely.
 
 ## Why CPU inference
 
@@ -263,7 +263,7 @@ The server is configured with flags tuned for classification workloads:
 | `--batch-size 512` | Prompt processing batch | How many tokens are processed at once during the prompt phase. 512 is a good balance between throughput and memory. |
 | `--repeat-penalty 1.1` | Mild repetition penalty | Prevents the model from getting stuck in loops when generating output. |
 | `--min-p 0` | No minimum probability filter | Allows the model to consider all tokens. For classification, the output is constrained enough that aggressive filtering isn't needed. |
-| `--mlock` | Lock model in RAM | Prevents the kernel from evicting model pages under memory pressure. Without this, idle pods can degrade from 55 tok/s to 4 tok/s as pages are evicted and must be re-fetched from S3. |
+| `--load-mode mmap+mlock` | mmap the file and lock it in RAM | Prevents the kernel from evicting model pages under memory pressure. Without this, idle pods can degrade from 55 tok/s to 4 tok/s as pages are evicted and must be re-fetched from S3. |
 | `--cache-prompt` | Reuse KV cache across requests | Keeps the KV cache from the previous request in memory. If the next request shares a prefix (e.g., same system instruction), the cached tokens are reused without re-processing. Reduces TTFT on subsequent requests when prompts share common prefixes. |
 
 For models that support a "thinking" mode, Slemify adds `--reasoning-budget 0` to disable it. The fine-tuned model produces output directly without needing internal reasoning tokens. Thinking mode adds latency (5-10s of thinking overhead) without improving output quality for fine-tuned models.

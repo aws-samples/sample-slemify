@@ -15,6 +15,7 @@ type PipelineContext struct {
 	ServiceAccount string // K8s service account name for Pod Identity
 	NoWait         bool   // Submit Jobs without waiting for completion
 	UseS3Mount     bool   // Mount model from S3 via CSI driver (vs init container download)
+	Region         string // AWS region the cluster runs in (for price lookups in the report)
 }
 
 // NewPipelineContext creates a PipelineContext with default values.

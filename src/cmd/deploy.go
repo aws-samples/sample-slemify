@@ -67,21 +67,29 @@ func deploySingleExpert(ctx context.Context, cmd *cobra.Command, cfg *config.Exp
 		}
 	}
 
-	// Load persisted state from S3 (enables resume after crashes)
-	var state *pipeline.State
-	store, storeErr := pipeline.NewStateStore(ctx, cfg.Data.Bucket)
-	if storeErr == nil {
-		state, _ = store.Load(ctx, cfg.Project.Name)
-	} else {
-		state = pipeline.NewState(cfg.Project.Name)
+	// Load persisted state from S3 (enables resume after crashes). A dry run
+	// touches nothing: it neither reads nor writes the persisted state, so it
+	// cannot leave a "completed" record behind that a later real deploy skips.
+	state := pipeline.NewState(cfg.Project.Name)
+	var store *pipeline.StateStore
+	if !dryRun {
+		if s, err := pipeline.NewStateStore(ctx, cfg.Data.Bucket); err == nil {
+			store = s
+			if loaded, err := store.Load(ctx, cfg.Project.Name); err == nil && loaded != nil {
+				state = loaded
+			}
+		}
 	}
 
 	runner := pipeline.NewRunner(cfg.Project.Name, state)
-	if storeErr == nil {
+	if store != nil {
 		runner.SetStateStore(store)
 	}
 
 	pc := pipeline.NewPipelineContext()
+	if awsCfg, err := awsconfig.LoadDefaultConfig(ctx); err == nil {
+		pc.Region = awsCfg.Region
+	}
 
 	// Set image registry for all stages
 	// Auto-detect ECR registry from AWS account when not explicitly set

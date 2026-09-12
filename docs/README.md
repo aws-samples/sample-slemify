@@ -42,7 +42,7 @@ The deep dives below note where the two paths differ.
 | Data | [data.md](deep-dive/data.md) | Raw data quality, synthetic generation, label taxonomy, class balance, independent evaluation |
 | Training | [training.md](deep-dive/training.md) | Generation: served stock (download → GGUF → quantize) on CPU, no fine-tuning. Encoder-head: frozen-encoder + head fit on CPU. Embedding: contrastive fine-tune on CPU |
 | Serving | [serving.md](deep-dive/serving.md) | Generation: llama.cpp + GGUF. Encoder family: encoder + head/vector via ONNX. CPU inference, latency, autoscaling |
-| Report | [report.md](deep-dive/report.md) | Generation: LLM-as-judge. Classification: accuracy + per-class P/R/F1. Scoring: MAE/R². Embedding: recall@k/MRR. Cost projections |
+| Report | [report.md](deep-dive/report.md) | Classification: accuracy vs majority-class baseline, real-vs-synthetic split, confusions, calibration. Scoring: MAE/R². Embedding: stock-vs-tuned recall@k/MRR. Generation: serving profile and bandwidth ceiling, optional grounded eval. Endpoint latency and node rate for all |
 
 ## Further Reading
 

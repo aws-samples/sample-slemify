@@ -292,7 +292,10 @@ func llamaCppArgs(cfg *config.ExpertConfig, modelPath string, sized config.Sized
 		"--min-p", "0",
 		"--batch-size", "512",
 		"--metrics",
-		"--mlock",
+		// mmap the GGUF and lock it in RAM. llama.cpp replaced the old --mlock
+		// and --no-mmap switches with --load-mode; "mmap+mlock" is the same
+		// behavior: pages come straight from the file and cannot be evicted.
+		"--load-mode", "mmap+mlock",
 		"--cache-prompt",
 	}
 	// Pin the thread count to the pod's actual CPU request. Without this,

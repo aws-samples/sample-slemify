@@ -41,14 +41,14 @@ func RemoteBuild(ctx context.Context, cfg RemoteBuildConfig) error {
 		return fmt.Errorf("SSM connect: %w", err)
 	}
 
-	// Wait for Docker to be ready. The user-data script writes /tmp/build-ready
+	// Wait for Docker to be ready. The user-data script writes the ready marker
 	// only after the Docker daemon answers, so we wait on that definitive marker
 	// rather than racing the daemon directly. Package install can be slow on
 	// first boot (repo/mirror latency), so allow up to 10 minutes.
 	fmt.Printf("  [%s] Waiting for Docker (build-ready marker)...\n", cfg.Instance.Arch)
 	ready := false
 	for i := 0; i < 120; i++ {
-		if _, err := client.Run(ctx, "test -f /tmp/build-ready && sudo docker info"); err == nil {
+		if _, err := client.Run(ctx, "test -f /var/lib/slemify-build-ready && sudo docker info"); err == nil {
 			ready = true
 			break
 		}

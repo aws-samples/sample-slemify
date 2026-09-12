@@ -53,6 +53,11 @@ data:
     sources:
       - path: eval-queries/
         type: raw
+    # Human-labeled held-out queries (the same 43 the demo's eval/triage_acc.py
+    # scores). The report scores them separately from the generated eval set,
+    # so a gap between "real" and "synthetic" accuracy is visible.
+    labeled:
+      - path: eval-labeled/triage-heldout.jsonl
 
 training:
   spot: true

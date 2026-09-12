@@ -90,9 +90,65 @@ def to_xy(rows):
             label = segments[0]
         X.append(text)
         y.append(label)
+        _LAST_ORIGINS.append(r.get("origin", "synthetic"))
+        _LAST_INPUTS.append(r.get("input", ""))
     if dropped:
         log(f"  Dropped {dropped} row(s) with labels outside the configured taxonomy")
     return X, y
+
+
+# Side channel for to_xy: the origin ("real" or "synthetic") and raw input of
+# every kept row, in order, so the eval predictions can be split and displayed
+# without changing to_xy's signature for the other callers.
+_LAST_ORIGINS: list = []
+_LAST_INPUTS: list = []
+
+
+def to_xy_with_meta(rows):
+    """to_xy plus the aligned origin and raw input of each kept row."""
+    _LAST_ORIGINS.clear()
+    _LAST_INPUTS.clear()
+    X, y = to_xy(rows)
+    return X, y, list(_LAST_ORIGINS), list(_LAST_INPUTS)
+
+
+def _by_origin(origins, correct_flags):
+    """Accuracy per origin group ({"real": {"n", "correct", "accuracy"}, ...})."""
+    out = {}
+    for o, c in zip(origins, correct_flags):
+        g = out.setdefault(o, {"n": 0, "correct": 0})
+        g["n"] += 1
+        g["correct"] += int(c)
+    for g in out.values():
+        g["accuracy"] = round(g["correct"] / g["n"], 4) if g["n"] else None
+    return out
+
+
+def _confusions(expected, predicted, top=10):
+    """Most frequent (expected -> predicted) mistakes."""
+    counts = {}
+    for e, p in zip(expected, predicted):
+        if e != p:
+            counts[(e, p)] = counts.get((e, p), 0) + 1
+    pairs = sorted(counts.items(), key=lambda kv: -kv[1])[:top]
+    return [{"expected": e, "predicted": p, "count": n} for (e, p), n in pairs]
+
+
+def _calibration(probs, correct_flags, edges=(0.0, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0001)):
+    """Reliability table: for each predicted-probability bucket, how often the
+    prediction was right and what the model claimed on average. Buckets where
+    accuracy is far below average confidence are where the head is
+    over-confident; those are the cases to hand-check first."""
+    buckets = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        idx = [i for i, pr in enumerate(probs) if lo <= pr < hi]
+        if not idx:
+            continue
+        acc = sum(correct_flags[i] for i in idx) / len(idx)
+        conf = sum(probs[i] for i in idx) / len(idx)
+        buckets.append({"low": lo, "high": min(hi, 1.0), "n": len(idx),
+                        "accuracy": round(acc, 4), "avg_confidence": round(conf, 4)})
+    return buckets
 
 
 def to_xy_scoring(rows):
@@ -179,7 +235,7 @@ def _export_and_upload_encoder(prefix, source=None):
 
 def train_classification(model, train_rows, eval_rows):
     Xtr_txt, ytr = to_xy(train_rows)
-    Xev_txt, yev = to_xy(eval_rows)
+    Xev_txt, yev, ev_origins, ev_inputs = to_xy_with_meta(eval_rows)
     if not Xtr_txt:
         log("ERROR: no training records")
         sys.exit(1)
@@ -208,18 +264,41 @@ def train_classification(model, train_rows, eval_rows):
                "num_classes": len(classes), "train_samples": len(ytr),
                "eval_samples": len(yev)}
 
+    eval_predictions = []
     if Xev_txt:
-        pred = clf.predict(Xev)
+        proba = clf.predict_proba(Xev)
+        pred = [str(clf.classes_[i]) for i in proba.argmax(axis=1)]
+        top_prob = [float(proba[i].max()) for i in range(len(pred))]
+        correct = [int(a == b) for a, b in zip(pred, yev)]
         acc = float(accuracy_score(yev, pred))
         per_query_embed_ms = embed_ms / max(len(Xev_txt), 1)
         p, r, f1, _ = precision_recall_fscore_support(
             yev, pred, labels=clf.classes_, average=None, zero_division=0)
         per_class = {c: {"precision": float(p[i]), "recall": float(r[i]), "f1": float(f1[i])}
                      for i, c in enumerate(clf.classes_)}
-        metrics.update({"accuracy": acc, "correct": int(round(acc * len(yev))),
+        # The trivial baseline: always predict the most frequent training
+        # label. Any head has to clear this by a wide margin to be worth
+        # serving; the report shows both.
+        majority = max(set(ytr), key=ytr.count)
+        baseline_acc = float(sum(1 for y in yev if y == majority) / len(yev))
+        metrics.update({"accuracy": acc, "correct": int(sum(correct)),
                         "total": len(yev), "per_class": per_class,
-                        "embed_ms_per_query": round(per_query_embed_ms, 1)})
+                        "embed_ms_per_query": round(per_query_embed_ms, 1),
+                        "classes": list(clf.classes_),
+                        "baseline": {"kind": "majority_class", "label": majority,
+                                     "accuracy": round(baseline_acc, 4)},
+                        "by_origin": _by_origin(ev_origins, correct),
+                        "confusions": _confusions(yev, pred),
+                        "calibration": _calibration(top_prob, correct)})
         log(f"\n  Accuracy (exact match): {acc * 100:.1f}% ({metrics['correct']}/{len(yev)})")
+        log(f"  Majority-class baseline: {baseline_acc * 100:.1f}% (always '{majority}')")
+        for o, g in metrics["by_origin"].items():
+            log(f"  Held-out {o}: {g['accuracy'] * 100:.1f}% ({g['correct']}/{g['n']})")
+        eval_predictions = [
+            {"input": ev_inputs[i][:400], "expected": yev[i], "predicted": pred[i],
+             "probability": round(top_prob[i], 4), "correct": bool(correct[i]),
+             "origin": ev_origins[i]}
+            for i in range(len(pred))]
 
     head_obj = {"type": "classification", "head": HEAD, "embedding_dim": dim,
                 "pooling": "cls", "classes": list(clf.classes_),
@@ -235,6 +314,10 @@ def train_classification(model, train_rows, eval_rows):
     s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}/metrics.json",
                   Body=json.dumps(metrics, indent=2).encode(), ContentType="application/json")
 
+    if eval_predictions:
+        s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}/eval_predictions.jsonl",
+                      Body="\n".join(json.dumps(r, ensure_ascii=False) for r in eval_predictions).encode(),
+                      ContentType="application/json")
     _export_and_upload_encoder(prefix)
     log(f"Artifacts uploaded to s3://{S3_BUCKET}/{prefix}/")
     log("=== Training complete ===")
@@ -309,45 +392,55 @@ def train_scoring(model, train_rows, eval_rows):
     log("=== Training complete ===")
 
 
-def _retrieval_metrics(model, eval_pairs, corpus_texts, ks=(1, 5, 10)):
+def _retrieval_metrics(model, eval_pairs, corpus_texts, ks=(1, 2, 5, 10), ranks_out=None):
     """Compute recall@k and MRR for query->positive retrieval over the corpus.
 
     Each eval pair's positive document is located in the corpus; we embed all
-    corpus docs once and each query, then rank by cosine similarity.
+    corpus docs once and each query, then rank by cosine similarity. Metrics
+    are also broken down by the pair's origin (synthetic or real). When
+    ranks_out is a list, the per-query rank of the gold document (or None when
+    outside the top max_k) is appended to it, aligned with the kept pairs.
     """
     if not eval_pairs or not corpus_texts:
         return {}
     # Map positive text -> its index in the corpus (exact match on chunk text).
     corpus_index = {t: i for i, t in enumerate(corpus_texts)}
-    queries, gold = [], []
+    queries, gold, origins = [], [], []
     for p in eval_pairs:
         pos = p.get("positive", "")
         if pos in corpus_index:
             queries.append(p.get("query", ""))
             gold.append(corpus_index[pos])
+            origins.append(p.get("origin", "synthetic"))
     if not queries:
         return {}
-
     doc_vecs = _embed(model, corpus_texts)
     q_vecs = _embed(model, queries)
     # Cosine similarity (vectors are already L2-normalized) -> [n_queries, n_docs].
     sims = q_vecs @ doc_vecs.T
-
     max_k = max(ks)
     # Top-k doc indices per query, best first.
     topk = np.argsort(-sims, axis=1)[:, :max_k]
-    metrics = {}
-    for k in ks:
-        hits = sum(1 for i, g in enumerate(gold) if g in topk[i, :k])
-        metrics[f"recall@{k}"] = hits / len(gold)
-    # MRR over the top max_k.
-    rr = 0.0
+    ranks = []
     for i, g in enumerate(gold):
         row = topk[i].tolist()
-        if g in row:
-            rr += 1.0 / (row.index(g) + 1)
-    metrics["mrr"] = rr / len(gold)
-    metrics["eval_queries"] = len(gold)
+        ranks.append(row.index(g) + 1 if g in row else None)
+    if ranks_out is not None:
+        ranks_out.extend(ranks)
+
+    def summarize(idx):
+        m = {}
+        for k in ks:
+            m[f"recall@{k}"] = sum(1 for i in idx if ranks[i] is not None and ranks[i] <= k) / len(idx)
+        m["mrr"] = sum(1.0 / ranks[i] for i in idx if ranks[i] is not None) / len(idx)
+        m["eval_queries"] = len(idx)
+        return m
+
+    metrics = summarize(range(len(gold)))
+    groups = sorted(set(origins))
+    if len(groups) > 1:
+        metrics["by_origin"] = {o: summarize([i for i, oo in enumerate(origins) if oo == o])
+                                for o in groups}
     return metrics
 
 
@@ -388,7 +481,8 @@ def train_embedding(model, train_rows, eval_rows):
     log(f"Retrieval corpus: {len(corpus_texts)} documents")
 
     # Baseline retrieval metrics (stock encoder) for a before/after comparison.
-    baseline = _retrieval_metrics(model, eval_rows, corpus_texts)
+    stock_ranks = []
+    baseline = _retrieval_metrics(model, eval_rows, corpus_texts, ranks_out=stock_ranks)
     if baseline:
         log(f"Baseline (stock encoder): recall@5={baseline.get('recall@5', 0):.3f} "
             f"mrr={baseline.get('mrr', 0):.3f}")
@@ -410,10 +504,13 @@ def train_embedding(model, train_rows, eval_rows):
     train_s = time.time() - t0
     log(f"Fine-tune complete in {train_s:.0f}s")
 
-    tuned = _retrieval_metrics(model, eval_rows, corpus_texts)
+    tuned_ranks = []
+    tuned = _retrieval_metrics(model, eval_rows, corpus_texts, ranks_out=tuned_ranks)
     if tuned:
         log(f"Tuned encoder: recall@5={tuned.get('recall@5', 0):.3f} "
             f"mrr={tuned.get('mrr', 0):.3f}")
+        for o, g in (tuned.get("by_origin") or {}).items():
+            log(f"  Held-out {o}: recall@2={g['recall@2']:.3f} mrr={g['mrr']:.3f} ({g['eval_queries']} queries)")
 
     dim = int(model.get_sentence_embedding_dimension())
     metrics = {"task": "embedding", "embedding_dim": dim,
@@ -431,6 +528,17 @@ def train_embedding(model, train_rows, eval_rows):
     s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}/metrics.json",
                   Body=json.dumps(metrics, indent=2).encode(), ContentType="application/json")
 
+    # Per-query ranks under both encoders, for the report's predictions table.
+    corpus_set = set(corpus_texts)
+    kept = [p for p in eval_rows if p.get("positive", "") in corpus_set]
+    if kept and len(stock_ranks) == len(kept) == len(tuned_ranks):
+        rows = [{"query": p.get("query", "")[:400], "origin": p.get("origin", "synthetic"),
+                 "rank_stock": stock_ranks[i], "rank_tuned": tuned_ranks[i],
+                 "positive": p.get("positive", "")[:200]}
+                for i, p in enumerate(kept)]
+        s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}/eval_predictions.jsonl",
+                      Body="\n".join(json.dumps(r, ensure_ascii=False) for r in rows).encode(),
+                      ContentType="application/json")
     _export_and_upload_encoder(prefix, source=tuned_dir)
     log(f"Artifacts uploaded to s3://{S3_BUCKET}/{prefix}/")
     log("=== Training complete ===")

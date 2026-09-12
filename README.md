@@ -47,15 +47,15 @@ The inference endpoint exposes an OpenAI-compatible API (`/v1/chat/completions`)
 expert.yaml → [DATA] → [TRAINING] → [SERVING + VALIDATION]
                  │          │                   │
             Ingest +    CPU train, or      Deploy model,
-            Synthetic   convert+quantize   run eval report,
-            via Bedrock (generation)       generate HTML
+            Synthetic   convert+quantize   measure it live,
+            via Bedrock (generation)       write the report
 ```
 
 1. **Data**. Ingests your raw data from S3. For trained tasks, Bedrock generates synthetic training pairs from your source content and you verify them before training. Generation is served stock, so it skips synthetic data.
 2. **Training**. Encoder tasks fit a head or contrastively tune an encoder on CPU in seconds to minutes. Generation has nothing to fine-tune, so this stage downloads the base model, converts it to GGUF, and quantizes it on CPU. Either way the output is uploaded to S3.
-3. **Serving + Validation**. Deploys the model on a live endpoint, runs the evaluation dataset through it, and generates an HTML report with accuracy, latency, and cost projections.
+3. **Serving + Validation**. Deploys the model on a live endpoint and runs the report Job against it: held-out accuracy against a majority-class baseline for classifiers, stock-vs-tuned recall for embedding models, a serving profile (decode speed, time to first token, bandwidth ceiling) for generation models, plus endpoint latency and the on-demand rate of the node it landed on.
 
-The output is a GGUF model file in S3 and a production readiness report. The serving deployment that Slemify creates is production-quality and serves as a reference for your own infrastructure. You can use it as-is, adapt it, or serve the GGUF with any compatible runtime (llama.cpp, vLLM, Ollama). See the [Serving deep dive](docs/deep-dive/serving.md) for deployment guidance and best practices.
+The output is a model in S3 and a report you can read in the terminal or as HTML. The serving deployment that Slemify creates is production-quality and serves as a reference for your own infrastructure. You can use it as-is, adapt it, or serve the GGUF with any compatible runtime (llama.cpp, vLLM, Ollama). See the [Serving deep dive](docs/deep-dive/serving.md) for deployment guidance and best practices.
 
 ## Quick Start
 
@@ -134,7 +134,7 @@ Slemify handles data processing, synthetic pair generation, training, quantizati
 slemify report --config expert.yaml
 ```
 
-Downloads the HTML report from S3 and opens it in your browser. The report includes accuracy metrics, latency benchmarks, SLM vs LLM comparison, and cost projections.
+Prints the report summary and opens the HTML version in your browser. What it contains depends on the task: accuracy against the majority-class baseline, real-vs-synthetic split, confusions, and calibration for classifiers; stock-vs-tuned recall@k for embedding models; a serving profile for generation models. Endpoint latency and the instance type's on-demand rate are in every report. See the [Report deep dive](docs/deep-dive/report.md).
 
 ## How Much Data Do I Need?
 
@@ -173,7 +173,7 @@ Technical docs covering the design decisions, best practices, and research behin
 - [Data Stage](docs/deep-dive/data.md). Raw data quality, synthetic generation, label taxonomy, verification
 - [Training Stage](docs/deep-dive/training.md). Encoder-head and embedding training on CPU, the stock generation convert/quantize path, model sizing, quantization
 - [Serving Stage](docs/deep-dive/serving.md). Reference deployment, CPU inference, autoscaling guidance
-- [Report Stage](docs/deep-dive/report.md). Accuracy measurement, SLM vs LLM comparison, cost projections
+- [Report Stage](docs/deep-dive/report.md). Held-out metrics against baselines, real-vs-synthetic split, endpoint latency, generation serving profile
 
 ## Architecture
 
@@ -195,7 +195,7 @@ The reference serving deployment (llama.cpp on CPU) is included for validation a
 | `slemify status my-project` | Show pipeline progress |
 | `slemify status my-project -o json` | Machine-readable status for agents |
 | `slemify validate` | Validate config without deploying |
-| `slemify report` | Download and open the accuracy report in the browser |
+| `slemify report` | Print the report summary and open the HTML report in the browser |
 | `slemify report --output my-report.html` | Save report to a custom path |
 | `slemify report --no-open` | Download without opening the browser |
 | `slemify build` | Build container images to ECR |
@@ -219,7 +219,7 @@ A: No, and Slemify is deliberate about this. Fine-tuning helps most when the mod
 - **Extraction** — *domain-dependent*, and the example shows both sides. Pulling entities from open-vocabulary prose (support tickets) a trained tagger beats a regex/gazetteer baseline by a wide margin (F1 0.63 → 0.89, driven by open-vocab service/error names). But pulling fields from *structured* text (k8s YAML configs) a plain parser already wins, so there a trained model adds nothing. The [extractor example](examples/support-tickets/entity-extraction/) documents both.
 - **Reranking** — *not a Slemify task*, on purpose. A strong general-purpose cross-encoder is already excellent at judging (query, document) relevance, and fine-tuning it reliably needs curated hard negatives (human-labeled "looks relevant but isn't"). We tested it: synthesizing those over an overlapping technical corpus produces false negatives that *degrade* a good model (NDCG@5 0.85 → 0.58 on a fair eval). Since fine-tuning doesn't help, Slemify doesn't do it — running a stock cross-encoder reranker on CPU with no GPU is a serving pattern, shown in the [k8s-autoscaling demo](examples/k8s-autoscaling/demo/), not a model Slemify builds.
 
-The reports always show the metric against an honest baseline (stock-vs-tuned for embedding, a trivial baseline for scoring, a regex/memorization baseline for extraction) so you can see whether training actually helped on *your* data — not just trust that it did.
+The reports always show the metric against an honest baseline (majority class for classification, stock-vs-tuned for embedding, predict-the-mean for scoring, a regex/memorization baseline for extraction) so you can see whether training actually helped on *your* data — not just trust that it did. Give the report human-labeled held-out records (`data.evaluation.labeled`) and it also scores real and synthetic inputs separately, which is where synthetic-data drift shows up first.
 
 **Q: How much context can the router/classifier handle?**
 A: The default text encoder caps at ~512 tokens (roughly 350-400 words) and silently truncates beyond that — but that's usually fine, because a router only needs the decision-relevant slice, not the whole input. Feed it the question, the latest turn, or one retrieved chunk at a time, and scale by sending it *less, more often*. If the signal is genuinely buried in long text, trim or summarize to the relevant part first, or point `model.base` at a longer-context encoder. See the [k8s-autoscaling routing example](examples/k8s-autoscaling/) and the [serving deep dive](docs/deep-dive/serving.md) for the right-tool / wrong-tool guide.

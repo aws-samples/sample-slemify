@@ -6,6 +6,7 @@ package serving
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -16,6 +17,7 @@ import (
 	"github.com/aws-samples/sample-slemify/pkg/config"
 	"github.com/aws-samples/sample-slemify/pkg/k8s"
 	"github.com/aws-samples/sample-slemify/pkg/pipeline"
+	"github.com/aws-samples/sample-slemify/pkg/pricing"
 	"github.com/aws-samples/sample-slemify/pkg/report"
 )
 
@@ -73,92 +75,130 @@ func Stage(client *k8s.Client, cfg *config.ExpertConfig, sized config.SizedConfi
 
 		endpoint := fmt.Sprintf("http://%s-inference.%s.svc.cluster.local:8080", cfg.Project.Name, ns)
 
-		if cfg.Project.IsEncoderHead() || cfg.Project.IsEmbedding() {
-			// Encoder family metrics were computed by the training job and written
-			// to metrics.json. Surface those instead of the generative
-			// LLM-as-judge report. Scoring uses regression metrics (MAE/R²);
-			// embedding uses retrieval metrics (recall@k/MRR, baseline vs tuned);
-			// classification uses exact-match accuracy + per-class P/R/F1.
-			if cfg.Project.IsEmbedding() {
-				if m, err := report.LoadEmbeddingMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
-					fmt.Printf("  ⚠ Could not load embedding metrics: %v\n", err)
-				} else {
-					report.PrintEmbeddingMetrics(m)
-				}
-			} else if cfg.Project.IsScoring() {
-				if m, err := report.LoadScoringMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
-					fmt.Printf("  ⚠ Could not load scoring metrics: %v\n", err)
-				} else {
-					report.PrintScoringMetrics(m)
-				}
-			} else if cfg.Project.IsExtraction() {
-				if m, err := report.LoadExtractionMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
-					fmt.Printf("  ⚠ Could not load extraction metrics: %v\n", err)
-				} else {
-					report.PrintExtractionMetrics(m)
-				}
-			} else if m, err := report.LoadClassificationMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
-				fmt.Printf("  ⚠ Could not load classification metrics: %v\n", err)
-			} else {
-				report.PrintEncoderHeadMetrics(m)
-			}
-			return []string{endpoint}, nil
-		}
-
-		// Run classification report as a K8s Job (direct access to inference service)
-		fmt.Printf("  Running classification report (in-cluster)...\n")
-		classReport, err := runReportJob(ctx, client, cfg, ns, 100, pc)
-		if err != nil {
+		// One report Job for every task family. It measures against the served
+		// endpoint, adds the baseline and the split the training job recorded,
+		// and writes report.json plus report.html to S3 for `slemify report`.
+		// If the Job fails, fall back to the metrics the training job wrote so
+		// the encoder-family numbers are never hidden by a report problem.
+		fmt.Printf("  Running the report (in-cluster)...\n")
+		if err := runReportJob(ctx, client, cfg, ns, pc); err != nil {
 			fmt.Printf("  ⚠ Report failed: %v\n", err)
-		} else if classReport != nil {
-			report.PrintReport(classReport)
+			if cfg.Project.IsEncoderHead() || cfg.Project.IsEmbedding() {
+				printTrainingMetrics(ctx, client, cfg)
+			}
+		} else if !pc.NoWait {
+			key := fmt.Sprintf("%s/report/report.json", cfg.Project.Name)
+			if data, err := client.DownloadFromS3(ctx, cfg.Data.Bucket, key); err != nil {
+				fmt.Printf("  ⚠ Could not read %s: %v\n", key, err)
+			} else if s, err := report.ParseSummary(data); err != nil {
+				fmt.Printf("  ⚠ %v\n", err)
+			} else {
+				report.PrintSummary(s)
+				fmt.Printf("  Full report: slemify report --config <expert.yaml>  (s3://%s/%s/report/report.html)\n",
+					cfg.Data.Bucket, cfg.Project.Name)
+			}
 		}
 
 		return []string{endpoint}, nil
 	}
 }
 
-// runReportJob submits a K8s Job that evaluates the model and uploads
-// the HTML report to S3.
-func runReportJob(
-	ctx context.Context,
-	client *k8s.Client,
-	cfg *config.ExpertConfig,
-	ns string,
-	maxSamples int,
-	pc *pipeline.PipelineContext,
-) (*report.ClassificationReport, error) {
-	inferenceEndpoint := fmt.Sprintf("http://%s-inference.%s.svc.cluster.local:8080", cfg.Project.Name, ns)
+// printTrainingMetrics prints the metrics.json the training job wrote.
+func printTrainingMetrics(ctx context.Context, client *k8s.Client, cfg *config.ExpertConfig) {
+	switch {
+	case cfg.Project.IsEmbedding():
+		if m, err := report.LoadEmbeddingMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
+			fmt.Printf("  ⚠ Could not load embedding metrics: %v\n", err)
+		} else {
+			report.PrintEmbeddingMetrics(m)
+		}
+	case cfg.Project.IsScoring():
+		if m, err := report.LoadScoringMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
+			fmt.Printf("  ⚠ Could not load scoring metrics: %v\n", err)
+		} else {
+			report.PrintScoringMetrics(m)
+		}
+	case cfg.Project.IsExtraction():
+		if m, err := report.LoadExtractionMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
+			fmt.Printf("  ⚠ Could not load extraction metrics: %v\n", err)
+		} else {
+			report.PrintExtractionMetrics(m)
+		}
+	default:
+		if m, err := report.LoadClassificationMetrics(ctx, client, cfg.Data.Bucket, cfg.Project.Name); err != nil {
+			fmt.Printf("  ⚠ Could not load classification metrics: %v\n", err)
+		} else {
+			report.PrintEncoderHeadMetrics(m)
+		}
+	}
+}
 
-	// Submit the report Job (report.py is baked into the container image)
-	job := ReportJobManifest(cfg, ns, inferenceEndpoint, maxSamples, pc)
+// runReportJob submits the report Job and waits for it. The Job needs to know
+// which node the inference pod landed on (for the bandwidth estimate and the
+// hourly rate), which only the CLI can look up, so that is resolved here and
+// passed in as environment.
+func runReportJob(ctx context.Context, client *k8s.Client, cfg *config.ExpertConfig, ns string, pc *pipeline.PipelineContext) error {
+	inferenceEndpoint := fmt.Sprintf("http://%s-inference.%s.svc.cluster.local:8080", cfg.Project.Name, ns)
+	env := ReportEnv{}
+	if info, err := client.InferenceNodeInfo(ctx, cfg.Project.Name); err != nil {
+		fmt.Printf("  (node details unavailable: %v)\n", err)
+	} else {
+		env.InstanceType, env.VCPUs = info.InstanceType, info.VCPUs
+		if price, err := pricing.OnDemandHourlyUSD(ctx, pc.Region, info.InstanceType); err != nil {
+			fmt.Printf("  (on-demand price unavailable: %v)\n", err)
+		} else {
+			env.HourlyUSD = price
+		}
+	}
+	job := ReportJobManifest(cfg, ns, inferenceEndpoint, pc, env)
 	jobName, err := client.SubmitJob(ctx, job)
 	if err != nil {
-		return nil, fmt.Errorf("submitting report job: %w", err)
+		return fmt.Errorf("submitting report job: %w", err)
 	}
 	fmt.Printf("  Report job submitted: %s\n", jobName)
-
 	if pc.NoWait {
-		return nil, nil
+		return nil
 	}
-
-	// Wait for completion
 	if err := client.WatchJobUntilDone(ctx, jobName); err != nil {
 		logs, logErr := client.GetJobPodLogs(ctx, jobName)
 		if logErr == nil && logs != "" {
 			fmt.Printf("  Report logs:\n%s\n", logs)
 		}
-		return nil, fmt.Errorf("report job failed: %w", err)
+		return fmt.Errorf("report job failed: %w", err)
 	}
-
-	fmt.Printf("  Report available at: s3://%s/%s/report/report.html\n", cfg.Data.Bucket, cfg.Project.Name)
-	return nil, nil
+	return nil
 }
 
-// ReportJobManifest creates the K8s Job manifest for the classification report.
-// The report.py script is baked into the data-pipeline container image.
-// Configuration is passed via environment variables.
-func ReportJobManifest(cfg *config.ExpertConfig, ns, inferenceEndpoint string, maxSamples int, pc *pipeline.PipelineContext) *batchv1.Job {
+// ReportEnv is what the CLI resolves for the report Job about the node the
+// inference pod runs on. Zero values mean "unknown"; the report says so.
+type ReportEnv struct {
+	InstanceType string
+	VCPUs        int
+	HourlyUSD    float64
+}
+
+// ReportJobManifest creates the K8s Job that runs containers/data-pipeline/report.py
+// against the served model. Configuration is passed as environment variables;
+// the optional items that cost frontier-model calls (the zero-shot baseline for
+// a classifier, the grounded evaluation for a generator) come from
+// cfg.Report and are off unless set.
+func ReportJobManifest(cfg *config.ExpertConfig, ns, inferenceEndpoint string, pc *pipeline.PipelineContext, env ReportEnv) *batchv1.Job {
+	labels := strings.Join(cfg.Project.FlatLabels(), ",")
+	casesKey := ""
+	if cfg.Report.Cases != "" {
+		casesKey = strings.TrimSuffix(cfg.Data.Path, "/") + "/" + strings.TrimPrefix(cfg.Report.Cases, "/")
+	}
+	repeat := cfg.Report.Repeat
+	if repeat == 0 {
+		repeat = 2
+	}
+	bedrockModel := cfg.Report.Model
+	if bedrockModel == "" {
+		bedrockModel = cfg.Data.Synthetic.Model
+	}
+	if bedrockModel == "" && cfg.Data.Evaluation != nil {
+		bedrockModel = cfg.Data.Evaluation.Model
+	}
 	backoffLimit := int32(1)
 	automountSA := pc.ServiceAccount != ""
 
@@ -208,10 +248,17 @@ func ReportJobManifest(cfg *config.ExpertConfig, ns, inferenceEndpoint string, m
 								{Name: "BUCKET", Value: cfg.Data.Bucket},
 								{Name: "PROJECT", Value: cfg.Project.Name},
 								{Name: "INFERENCE_ENDPOINT", Value: inferenceEndpoint},
-								{Name: "BEDROCK_MODEL", Value: cfg.Data.Synthetic.Model},
-								{Name: "MAX_SAMPLES", Value: fmt.Sprintf("%d", maxSamples)},
-								{Name: "TOOL_NAME", Value: cfg.Project.Name},
+								{Name: "TASK", Value: cfg.Project.Task},
+								{Name: "BEDROCK_MODEL", Value: bedrockModel},
+								{Name: "MAX_SAMPLES", Value: "100"},
 								{Name: "TOOL_DESC", Value: cfg.Project.Domain},
+								{Name: "LABELS", Value: labels},
+								{Name: "LLM_BASELINE", Value: fmt.Sprintf("%t", cfg.Report.LLMBaseline)},
+								{Name: "CASES_KEY", Value: casesKey},
+								{Name: "REPEAT", Value: fmt.Sprintf("%d", repeat)},
+								{Name: "INSTANCE_TYPE", Value: env.InstanceType},
+								{Name: "INSTANCE_VCPUS", Value: fmt.Sprintf("%d", env.VCPUs)},
+								{Name: "INSTANCE_HOURLY_USD", Value: fmt.Sprintf("%.4f", env.HourlyUSD)},
 							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
@@ -239,4 +286,3 @@ func ReportJobManifest(cfg *config.ExpertConfig, ns, inferenceEndpoint string, m
 		},
 	}
 }
-

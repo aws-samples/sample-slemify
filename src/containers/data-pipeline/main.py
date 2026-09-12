@@ -495,6 +495,19 @@ def main():
         train_records = records[:split_idx]
         eval_records = records[split_idx:]
 
+    # Every eval record says where it came from, so the report can score the
+    # generated held-out set and any human-labeled set separately. A gap
+    # between the two is the synthetic distribution drifting from real usage.
+    for r in eval_records:
+        r.setdefault("origin", "synthetic")
+    labeled = read_labeled_records(bucket, data_cfg["path"], eval_cfg.get("labeled") or [])
+    if labeled:
+        instruction = next((r.get("instruction") for r in eval_records if r.get("instruction")), "")
+        for r in labeled:
+            r.setdefault("instruction", instruction)
+        logger.info("Appending %d human-labeled eval records (origin=real)", len(labeled))
+        eval_records = eval_records + labeled
+
     logger.info("Writing %d train / %d eval records to s3://%s/",
                 len(train_records), len(eval_records), bucket)
     write_jsonl_to_s3(bucket, f"{project_name}/processed/train.jsonl", train_records)
@@ -650,6 +663,13 @@ def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, 
     if not eval_pairs:
         # Guarantee a non-empty eval set even for tiny corpora.
         eval_pairs = train_pairs[-max(1, len(train_pairs) // 10):]
+    for pr in eval_pairs:
+        pr.setdefault("origin", "synthetic")
+    labeled = read_labeled_records(bucket, data_cfg["path"], eval_cfg.get("labeled") or [])
+    labeled = [r for r in labeled if r.get("query") and r.get("positive")]
+    if labeled:
+        logger.info("Appending %d human-labeled eval pairs (origin=real)", len(labeled))
+        eval_pairs = eval_pairs + labeled
 
     logger.info("Writing %d train / %d eval pairs and %d-chunk corpus to s3://%s/",
                 len(train_pairs), len(eval_pairs), len(chunks), bucket)
@@ -677,6 +697,27 @@ def read_raw_sources(bucket: str, path: str, sources: list[dict]) -> list[dict]:
                         records.append({"source": key, "content": content})
                 except Exception as e:
                     logger.warning("Failed to read %s: %s", key, e)
+    return records
+
+
+def read_labeled_records(bucket: str, path: str, sources: list[dict]) -> list[dict]:
+    """Read human-labeled held-out records (JSONL, one object per line) from the
+    configured data.evaluation.labeled paths and tag them origin=real."""
+    records = []
+    for raw in read_raw_sources(bucket, path, sources):
+        for line in raw["content"].splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning("Skipping non-JSON line in %s", raw["source"])
+                continue
+            if not isinstance(obj, dict):
+                continue
+            obj["origin"] = "real"
+            records.append(obj)
     return records
 
 

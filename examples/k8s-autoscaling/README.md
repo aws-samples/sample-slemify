@@ -11,8 +11,9 @@ k8s-autoscaling/
 ├── risk-scorer/      # Risk scorer config (encoder regression, 0.0-1.0 risk score)
 ├── retriever/        # Retriever config (embedding, domain-tuned RAG vectors)
 ├── data/
-│   ├── queries/      # 76 training queries (real-world K8s configs)
-│   └── eval-queries/ # 14 held-out evaluation queries
+│   ├── queries/      # 91 training seed queries (real-world K8s configs)
+│   ├── eval-queries/ # 14 held-out seed queries for the generated eval set
+│   └── eval-labeled/ # 43 human-labeled held-out queries (JSONL) the report scores as "real"
 ├── demo/             # Multi-agent demo application
 │   ├── agent/        # LangGraph agent package (triage, retrieval, faithfulness gate, generation, tools, remediation)
 │   ├── server.py     # FastAPI entrypoint (serves the agent graph + chat UI)

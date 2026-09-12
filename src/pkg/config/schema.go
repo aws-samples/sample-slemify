@@ -11,6 +11,33 @@ type ExpertConfig struct {
 	Data       DataConfig       `json:"data" yaml:"data" validate:"required"`
 	Training   TrainingConfig   `json:"training" yaml:"training"`
 	Evaluation EvaluationConfig `json:"evaluation,omitempty" yaml:"evaluation,omitempty"`
+	Report     ReportConfig     `json:"report,omitempty" yaml:"report,omitempty"`
+}
+
+// ReportConfig controls the report Job that runs after serving. The report
+// always measures what can be measured without extra calls: quality on the
+// held-out set (with a trivial baseline and, when labeled real data is
+// present, the real-vs-synthetic split), latency against the served endpoint,
+// and the serving profile. The optional items cost frontier-model calls and
+// are off by default.
+type ReportConfig struct {
+	// LLMBaseline runs the frontier model (data.synthetic.model) zero-shot on
+	// the same held-out set as the trained head, so the report can show the
+	// control the workshop calls "the swap test" for a classifier. One Bedrock
+	// call per held-out sample, rate limited to one per second. Classification
+	// only.
+	LLMBaseline bool `json:"llm_baseline,omitempty" yaml:"llm_baseline,omitempty"`
+	// Cases is an S3 key, relative to data.path, of a JSONL file of grounded
+	// evaluation cases for a generation expert: {"question", "context": [..],
+	// "must_include": [..]}. When set, the report drafts each case against
+	// the served model and scores it with a Bedrock judge, repeated Repeat
+	// times. Without it the generation report is the serving profile only.
+	Cases string `json:"cases,omitempty" yaml:"cases,omitempty"`
+	// Model is the Bedrock model (inference profile ID) used for the optional
+	// items above. Defaults to data.synthetic.model, then data.evaluation.model.
+	// Generation experts have neither, so set it here when using Cases.
+	Model  string `json:"model,omitempty" yaml:"model,omitempty"`
+	Repeat int    `json:"repeat,omitempty" yaml:"repeat,omitempty" validate:"omitempty,min=1,max=10"`
 }
 
 // Task values. Each maps onto one of three implementation families:
@@ -74,6 +101,27 @@ type ProjectConfig struct {
 // TaskType returns the configured task value.
 func (p ProjectConfig) TaskType() string {
 	return p.Task
+}
+
+// FlatLabels collapses the label taxonomy into a de-duplicated, order-preserving
+// list. The encoder head is single-label, so all configured values across
+// fields form the allowed class set. Empty when no taxonomy is configured.
+func (p ProjectConfig) FlatLabels() []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, values := range p.Labels {
+		for _, v := range values {
+			if v == "" {
+				continue
+			}
+			if _, ok := seen[v]; ok {
+				continue
+			}
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // IsGeneration returns true for the generative (causal LM) family.
@@ -225,6 +273,13 @@ type EvalDataConfig struct {
 	Model   string         `json:"model" yaml:"model" validate:"required"`
 	Pairs   int            `json:"pairs" yaml:"pairs" validate:"required,min=10"`
 	Sources []SourceConfig `json:"sources,omitempty" yaml:"sources,omitempty"`
+	// Labeled points at JSONL files of human-labeled held-out records under
+	// data.path (classification and scoring: {"input", "output"}; embedding:
+	// {"query", "positive"}). They are appended to the generated eval set with
+	// source "real"; generated records carry source "synthetic". The report
+	// scores both groups separately, so a gap between them shows how far the
+	// synthetic distribution has drifted from what users actually write.
+	Labeled []SourceConfig `json:"labeled,omitempty" yaml:"labeled,omitempty"`
 }
 
 // TrainingConfig holds knobs for the model training Jobs. These now apply ONLY
@@ -251,19 +306,19 @@ type SizedConfig struct {
 	ConvertMemory           string // memory request/limit for the generation GGUF convert Job
 	ConvertEphemeralStorage string // ephemeral-storage request/limit for the convert Job (weights + f16 + quantized output)
 	TrainingInstance        string // display only — Karpenter selects actual instance
-	InferenceInstance      string // display only — Karpenter selects actual instance
-	InferenceCPU           string // CPU request for inference pod (e.g., "4")
-	InferenceMemory        string // Memory request for inference pod (e.g., "8Gi")
-	InferenceThreads       string // llama.cpp --threads flag
-	CheckpointInterval     int    // steps
-	Epochs                 int
-	LearningRate           float64
-	WarmupRatio            float64
-	Scheduler              string
-	EarlyStopPatience      int
-	KEDAMaxReplicas        int
-	MaxOutputTokens        int // from output_stats.json (p95 + 20% headroom), 0 = use defaults
-	ReasoningBudget        int // avg_output_tokens / 2 for free-form, 0 for classification
+	InferenceInstance       string // display only — Karpenter selects actual instance
+	InferenceCPU            string // CPU request for inference pod (e.g., "4")
+	InferenceMemory         string // Memory request for inference pod (e.g., "8Gi")
+	InferenceThreads        string // llama.cpp --threads flag
+	CheckpointInterval      int    // steps
+	Epochs                  int
+	LearningRate            float64
+	WarmupRatio             float64
+	Scheduler               string
+	EarlyStopPatience       int
+	KEDAMaxReplicas         int
+	MaxOutputTokens         int // from output_stats.json (p95 + 20% headroom), 0 = use defaults
+	ReasoningBudget         int // avg_output_tokens / 2 for free-form, 0 for classification
 }
 
 // ValidationError represents a single config validation failure.
