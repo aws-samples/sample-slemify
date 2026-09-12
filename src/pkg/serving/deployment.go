@@ -142,7 +142,10 @@ func inferenceDeployment(cfg *config.ExpertConfig, sized config.SizedConfig, ns 
 						{
 							Name:  "llama-cpp",
 							Image: "ghcr.io/ggml-org/llama.cpp:server",
-							Args:  llamaArgs,
+							// The tag floats with upstream; pull it on every start so a
+							// node's cached image cannot diverge from the flags we pass.
+							ImagePullPolicy: corev1.PullAlways,
+							Args:            llamaArgs,
 							SecurityContext: &corev1.SecurityContext{
 								AllowPrivilegeEscalation: func() *bool { b := false; return &b }(),
 							},

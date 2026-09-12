@@ -59,11 +59,12 @@ func Validate(cfg *ExpertConfig) []ValidationError {
 
 	// Task-aware field rules.
 	// model.base is required for every task except extraction (whose v1 tagger
-	// is feature-based and uses no encoder).
+	// is feature-based and uses no encoder). Load fills a per-task default when
+	// the field is empty, so this only fires for configs built without Parse.
 	if cfg.Project.Task != "" && !cfg.Project.IsExtraction() && cfg.Model.Base == "" {
 		errs = append(errs, ValidationError{
 			Field:   "model.base",
-			Message: "model.base is required for this task",
+			Message: "model.base is empty and no default applied; set it or load the config with config.Load",
 		})
 	}
 	if cfg.Project.IsEncoderHead() {

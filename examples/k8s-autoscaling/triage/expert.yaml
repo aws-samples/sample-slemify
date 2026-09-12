@@ -35,7 +35,7 @@ project:
       - noise
 
 model:
-  base: ""  # encoder model ID for classification (a 768d text encoder)
+  base: ""  # encoder model ID for classification (a 768d text encoder); empty uses the Slemify default
   head: logistic               # logistic | linear | mlp
 
 data:

@@ -236,6 +236,29 @@ func TestValidateGenerationTaskSupported(t *testing.T) {
 	}
 }
 
+func TestApplyDefaultsFillsModelBase(t *testing.T) {
+	enc := validConfig()
+	enc.Project.Task = TaskClassification
+	enc.Model.Base = ""
+	enc.ApplyDefaults()
+	if enc.Model.Base != DefaultEncoderBase {
+		t.Fatalf("encoder default not applied: %q", enc.Model.Base)
+	}
+	gen := validConfig()
+	gen.Project.Task = "generation"
+	gen.Model.Base = ""
+	gen.ApplyDefaults()
+	if gen.Model.Base != DefaultGenerationBase {
+		t.Fatalf("generation default not applied: %q", gen.Model.Base)
+	}
+	keep := validConfig()
+	keep.Model.Base = "org/custom"
+	keep.ApplyDefaults()
+	if keep.Model.Base != "org/custom" {
+		t.Fatal("explicit model.base must be kept")
+	}
+}
+
 func TestValidateMissingModelBase(t *testing.T) {
 	cfg := validConfig()
 	cfg.Model.Base = ""

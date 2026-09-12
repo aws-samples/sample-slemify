@@ -35,12 +35,38 @@ func Parse(data []byte) (*ExpertConfig, []string, error) {
 			if err2 := yaml.Unmarshal(data, &cfg); err2 != nil {
 				return nil, nil, fmt.Errorf("parsing config: %w", err2)
 			}
+			cfg.ApplyDefaults()
 			return &cfg, warnings, nil
 		}
 		return nil, nil, fmt.Errorf("parsing config: %w", err)
 	}
 
+	cfg.ApplyDefaults()
 	return &cfg, nil, nil
+}
+
+// Default base models per task family, used when model.base is empty. The
+// encoder default matches what the trainer container falls back to; the
+// generation default is the small-MoE the reference example was measured with.
+const (
+	DefaultEncoderBase    = "BAAI/bge-base-en-v1.5"
+	DefaultGenerationBase = "Qwen/Qwen3-30B-A3B-Instruct-2507"
+)
+
+// ApplyDefaults fills fields that have a sensible task-dependent default so a
+// config can leave them empty. Only model.base today.
+func (c *ExpertConfig) ApplyDefaults() {
+	if c.Model.Base != "" {
+		return
+	}
+	switch {
+	case c.Project.IsGeneration():
+		c.Model.Base = DefaultGenerationBase
+	case c.Project.IsExtraction():
+		// feature-based tagger, no encoder
+	case c.Project.Task != "":
+		c.Model.Base = DefaultEncoderBase
+	}
 }
 
 // detectUnknownFields attempts to identify unknown fields by comparing

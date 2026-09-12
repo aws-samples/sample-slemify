@@ -16,7 +16,8 @@ project:
     and how to fix it.
 
 model:
-  base: ""  # HuggingFace model ID. A small-MoE (30B-total / ~3B-active class) is
+  base: ""  # HuggingFace model ID; empty uses the Slemify default, a small-MoE
+            # (30B-total / ~3B-active class). That class is
             # recommended: on this task it beat a dense 8B on accuracy AND
             # end-to-end speed on CPU (MoE activates ~3B params/token, so decode
             # runs at dense-3B bandwidth while quality tracks total params).
