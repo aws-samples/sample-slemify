@@ -14,7 +14,7 @@ k8s-autoscaling/
 │   ├── queries/      # 91 training seed queries (real-world K8s configs)
 │   ├── eval-queries/ # 14 held-out seed queries for the generated eval set
 │   └── eval-labeled/ # 43 human-labeled held-out queries (JSONL) the report scores as "real"
-├── demo/             # Multi-agent demo application
+├── demo/             # Agentic demo application (orchestrator + one model per seat)
 │   ├── agent/        # LangGraph agent package (triage, retrieval, faithfulness gate, generation, tools, remediation)
 │   ├── server.py     # FastAPI entrypoint (serves the agent graph + chat UI)
 │   ├── ui.html       # Chat UI (live step log + streamed answers)
@@ -51,7 +51,7 @@ slemify deploy --config retriever/expert.yaml
 cd demo && ./scripts/deploy.sh
 ```
 
-See [demo/README.md](demo/README.md) for the full multi-agent demo with RAG and LLM fallback.
+See [demo/README.md](demo/README.md) for the full demo with RAG, the faithfulness gate, and LLM escalation.
 
 ## Routing on a slice, not the whole input
 

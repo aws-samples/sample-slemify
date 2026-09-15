@@ -8,7 +8,7 @@ Each doc covers the design decisions, best practices, and research behind a pipe
 
 New to Slemify? Start here:
 
-- [Getting Started: Build a Multi-Agent K8s Expert](getting-started.md). End-to-end tutorial that walks you through training two SLMs and wiring them into a multi-agent demo.
+- [Getting Started: Build an Agentic K8s Expert](getting-started.md). End-to-end tutorial that walks you through training two SLMs and wiring them into an agentic demo.
 
 ## Task families
 

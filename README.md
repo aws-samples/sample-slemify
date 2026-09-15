@@ -169,7 +169,7 @@ Generation no longer uses a GPU: it is downloaded, converted to GGUF, and quanti
 
 Technical docs covering the design decisions, best practices, and research behind each pipeline stage. Written for Platform Engineers.
 
-- [Getting Started](docs/getting-started.md). End-to-end tutorial: build a multi-agent K8s expert from scratch
+- [Getting Started](docs/getting-started.md). End-to-end tutorial: build an agentic K8s expert from scratch
 - [Data Stage](docs/deep-dive/data.md). Raw data quality, synthetic generation, label taxonomy, verification
 - [Training Stage](docs/deep-dive/training.md). Encoder-head and embedding training on CPU, the stock generation convert/quantize path, model sizing, quantization
 - [Serving Stage](docs/deep-dive/serving.md). Reference deployment, CPU inference, autoscaling guidance
