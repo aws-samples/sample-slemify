@@ -1,7 +1,7 @@
 """RAG retrieval: embed the query, search the knowledge base (hybrid dense +
 lexical), and re-rank the candidates down to the few docs the model sees.
 
-Two seats live here (see config.py): EMBED decides who turns the query into a
+Two steps live here (see config.py): EMBED decides who turns the query into a
 vector (Bedrock Titan or the Slemify-tuned encoder on CPU) and therefore which
 index is searched; RERANK decides whether the cross-encoder re-orders the
 candidate pool or vector order is kept as-is.
@@ -38,7 +38,7 @@ def _embed_bedrock(text: str) -> list[float]:
 
 
 def embed_query(text: str) -> list[float]:
-    """Embed the query with whoever holds the EMBED seat."""
+    """Embed the query with whichever model runs the EMBED step."""
     return _embed_bedrock(text) if config.EMBED == "bedrock" else _embed_slemify(text)
 
 

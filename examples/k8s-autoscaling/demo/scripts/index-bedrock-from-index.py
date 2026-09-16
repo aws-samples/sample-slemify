@@ -2,7 +2,7 @@
 
 index-knowledge.py clones the documentation repos, chunks them, embeds, and
 indexes. Once that has run for the tuned encoder, the chunks are already in
-OpenSearch; the Titan index for the EMBED=bedrock seat only needs the same
+OpenSearch; the Titan index for the EMBED=bedrock step only needs the same
 chunks embedded again with Titan. This script does that without cloning or
 chunking anything, so the two indexes hold exactly the same corpus.
 

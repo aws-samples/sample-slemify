@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Retrieval quality for the EMBED and RERANK seats: recall@2, recall@5, MRR
+"""Retrieval quality for the EMBED and RERANK steps: recall@2, recall@5, MRR
 against the held-out set (eval/recall-set.jsonl). Deterministic, no judge.
 
 Three configurations, run in one go or one at a time:

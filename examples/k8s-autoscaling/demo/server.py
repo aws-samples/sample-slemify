@@ -68,7 +68,7 @@ async def warmup():
         "max_tokens": 8,
         "temperature": 0.0,
     }
-    # Only warm the seats a CPU pod holds; LLM-held seats have nothing to warm.
+    # Only warm the steps a CPU pod holds; LLM-held steps have nothing to warm.
     cpu_pods = []
     if config.TRIAGE == "classifier":
         cpu_pods.append(("triage", config.TRIAGE_URL))
@@ -90,7 +90,7 @@ async def warmup():
             print(f"  Warmup {name}: ok")
         except Exception as e:
             print(f"  Warmup {name}: failed ({e})")
-    print(f"  Seats: {config.seats()}")
+    print(f"  Steps: {config.steps()}")
     print("  All services warmed up")
     _ready = True
 
@@ -114,12 +114,12 @@ async def query_endpoint(q: Query):
             yield f"data: {json.dumps(event)}\n\n"
         total_ms = round((time.perf_counter() - t0) * 1000)
         cost = meter.summary()
-        metrics.record_query(config.seats(), meter, total_ms, escalated)
+        metrics.record_query(config.steps(), meter, total_ms, escalated)
         # The scoreboard row for this query, so the UI and the eval can show
         # what it cost without scraping logs.
         yield sse("cost", usd=cost["usd"], bedrock_calls=cost["bedrock_calls"],
                   tokens_in=cost["tokens_in"], tokens_out=cost["tokens_out"],
-                  by_purpose=cost["by_purpose"], seats=config.seats())
+                  by_purpose=cost["by_purpose"], steps=config.steps())
         yield sse("total", ms=total_ms)
         yield "data: [DONE]\n\n"
 
@@ -132,9 +132,9 @@ async def stats():
     model of the CPU-first architecture hinges on this number (breakeven vs
     calling the LLM directly is ~87-92%); until now it was only ever estimated
     from the eval scorecard. Counters reset on restart; the JSON-line metric
-    events in the pod logs are the durable record. `seats` says which
+    events in the pod logs are the durable record. `steps` says which
     configuration produced these numbers."""
-    return {"seats": config.seats(), **metrics.snapshot()}
+    return {"steps": config.steps(), **metrics.snapshot()}
 
 
 @app.get("/config")

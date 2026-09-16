@@ -179,7 +179,7 @@ function nodeType(name){
 // Agents backed by a Slemify-trained / fine-tuned model: the triage classifier
 // (classification head) and the retriever (contrastively tuned encoder).
 // NOT the reranker (stock cross-encoder) or analyst SLM (stock), and not a
-// seat currently filled by the LLM (step names say "LLM" / "Bedrock" then).
+// step currently filled by the LLM (step names say "LLM" / "Bedrock" then).
 function isTuned(name){
   const n = name.toLowerCase();
   if(n.includes('llm') || n.includes('bedrock')) return false;

@@ -77,13 +77,13 @@ rules do the job. The faithfulness gate is the opposite choice: catching a
 confidently-wrong domain answer needs judgement, so it's an LLM call, not a
 heuristic. See "Right tool for the right task" below.
 
-## Seats: who fills each role
+## Steps: who fills each role
 
-Every model-backed step is a **seat** that either the frontier LLM on Bedrock
+Every model-backed step is a **step** that either the frontier LLM on Bedrock
 or a small model on CPU can fill. Four environment variables on the orchestrator
 choose (see `agent/config.py`):
 
-| Seat | LLM value | CPU value (default) | What moves |
+| Step | LLM value | CPU value (default) | What moves |
 |------|-----------|---------------------|------------|
 | `TRIAGE` | `off` (or `llm`) | `classifier` | Who classifies the query. `off` removes triage, the intent check, tools, and the manifest lint: every query goes straight to retrieval. With the classifier the intent check is plain code; with `llm` it is a short frontier-model call. |
 | `EMBED` | `bedrock` | `slemify` | Who embeds the query (Titan v2, 1024d, or the tuned encoder, 768d). The OpenSearch index follows: `BEDROCK_INDEX_NAME` or `INDEX_NAME`. |
@@ -93,11 +93,11 @@ choose (see `agent/config.py`):
 
 `TRIAGE=off EMBED=bedrock RERANK=off ANALYST=llm GATE=off` is the
 **monolith**: embed the question, search, one frontier-model call, ship. That
-is the starting point most teams have. Move one seat at a time, re-run the eval, and read `/stats` (which
-reports the active `seats`) to see what each move changed in cost, latency,
+is the starting point most teams have. Move one step at a time, re-run the eval, and read `/stats` (which
+reports the active `steps`) to see what each move changed in cost, latency,
 and quality. `ANALYST=llm` is also the one-variable control described under
 "Self-Correction": same graph, context, gate, and judge, only the drafter
-changed. Step names in the UI and logs say who actually filled each seat.
+changed. Step names in the UI and logs say which model actually ran each step.
 
 Both indexes come from the same corpus; build the Bedrock one with
 `scripts/index-knowledge.py --embedder=bedrock`.
@@ -109,13 +109,13 @@ intent, embed, gate, analyst, calibrate) and token usage, priced from a small
 table in `agent/config.py` (list prices; override with
 `BEDROCK_PRICE_<MODEL>_IN/OUT`), and every step's wall-clock is kept. The
 stream ends with a `cost` event carrying the query's USD and tokens, and
-`GET /stats` aggregates per seat configuration: queries seen, Bedrock $/query
+`GET /stats` aggregates per step configuration: queries seen, Bedrock $/query
 (mean and p50), total latency p50/p95, escalation rate, per-step p50.
 `make eval` prints one scoreboard row (quality, Bedrock $/query, p50 latency)
-for the active seats; `make scoreboard` prints the live aggregate.
+for the active steps; `make scoreboard` prints the live aggregate.
 
-Two per-seat quality numbers are deterministic and need no judge:
-`make triage-acc` scores whoever holds the `TRIAGE` seat by exact match on a
+Two per-step quality numbers are deterministic and need no judge:
+`make triage-acc` scores whichever model runs the `TRIAGE` step by exact match on a
 43-query held-out set (`eval/triage-heldout.yaml`, none of it used as a
 training seed, every label at least four times), and `make recall` scores
 retrieval three ways (Titan, tuned encoder, tuned encoder plus re-ranker) by
@@ -127,7 +127,7 @@ Only Bedrock is metered per query. CPU pods are capacity billed by the hour
 whether or not a query arrives, so their cost is reported separately
 (`CPU_POOL_USD_PER_HOUR`, informational) and never folded into the per-query
 number. Keeping the variable cost and the fixed cost apart is the point: that
-difference is the trade-off you are actually making when you move a seat.
+difference is the trade-off you are actually making when you swap the model in a step.
 
 ## Pods & How They Interact
 

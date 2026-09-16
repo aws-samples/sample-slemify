@@ -10,14 +10,14 @@ Doc-first by default. Tools are opt-in:
                     └─ answer -> lint(if manifest)      -> retrieve -> answer -> gate
   gate: accept | refine(deprecated fix) | verify(runtime claim) | escalate(LLM)
 
-Seats can be off (config.py). TRIAGE=off removes triage, intent, tools, and the
+Steps can be off (config.py). TRIAGE=off removes triage, intent, tools, and the
 lint: the query goes straight to retrieval. GATE=off ships the draft as is.
 Both off with EMBED=bedrock and ANALYST=llm is the monolith: embed, search,
 one frontier-model call.
 
 Each node streams the SSE vocabulary the UI consumes (step_start/step_done/
 model/token/answer_reset/response). Step names say who actually filled each
-seat (config.py: TRIAGE, EMBED, RERANK, ANALYST, GATE), so the UI, the logs, and the
+step (config.py: TRIAGE, EMBED, RERANK, ANALYST, GATE), so the UI, the logs, and the
 eval describe the configuration that ran, not the one the code assumed.
 """
 import asyncio
@@ -31,7 +31,7 @@ from . import classify, config, extract, gate, generation, metrics, patch_schema
 from . import toolclient
 from .validation import validate_config, validate_draft_fix
 
-# --- Seat labels (what the UI and eval see) ---
+# --- Step labels (what the UI and eval see) ---
 LBL_TRIAGE = ("Triage \u00b7 LLM (Bedrock)" if config.TRIAGE == "llm"
               else "Triage classifier \u00b7 ONNX Runtime (CPU)")
 LBL_INTENT = "Intent router (LLM)" if config.TRIAGE == "llm" else "Intent router (CPU)"
@@ -213,12 +213,12 @@ async def n_generate(state: AgentState) -> dict:
     if attempts > 0:
         writer({"type": "answer_reset", "reason": "refining"})
 
-    # With no triage seat there is no category, and that is not a failure to
+    # With no triage step there is no category, and that is not a failure to
     # classify: the SLM drafts every query.
     unclassified = config.TRIAGE != "off" and state.get("category", "unknown") in (None, "unknown")
-    # Who drafts: the ANALYST seat. With the LLM in the seat (the monolith, or
+    # Who drafts: the ANALYST step. With the LLM running it (the monolith, or
     # the one-variable control: same graph, context, gate, and judge, only the
-    # drafter changed) every query goes to Bedrock. With the SLM in the seat,
+    # drafter changed) every query goes to Bedrock. With the SLM running it,
     # only an unclassifiable query falls back to the LLM.
     if config.ANALYST == "llm":
         name, stream_fn, used_llm = LBL_ANALYST, generation.stream_llm, True
@@ -460,7 +460,7 @@ def build_agent():
     g.add_node("remediate", n_remediate)
 
     if config.TRIAGE == "off":
-        # No triage seat: nothing decides category or intent, so there is no
+        # No triage step: nothing decides category or intent, so there is no
         # reject path, no tools, and no manifest lint. Retrieval is the first step.
         g.add_edge(START, "retrieve")
     else:
@@ -472,7 +472,7 @@ def build_agent():
         g.add_edge("lint", "retrieve")
     g.add_edge("retrieve", "generate")
     if config.GATE == "off":
-        # No gate seat: the draft ships as written. Nothing checks it, nothing
+        # No gate step: the draft ships as written. Nothing checks it, nothing
         # escalates, nothing remediates.
         g.add_edge("generate", END)
     else:

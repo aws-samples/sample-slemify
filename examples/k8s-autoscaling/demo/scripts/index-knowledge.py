@@ -8,8 +8,8 @@ indexes into OpenSearch k-NN. Two embedders, one index each, same corpus:
   --embedder=bedrock            Titan Text Embeddings v2 on Bedrock (1024d)
                                 -> BEDROCK_INDEX_NAME
 
-The agent's EMBED seat (agent/config.py) picks which index queries hit, so a
-vector dimension is never mixed. Build both to be able to move the seat.
+The agent's EMBED step (agent/config.py) picks which index queries hit, so a
+vector dimension is never mixed. Build both to be able to swap the model.
 
 Usage:
   kubectl port-forward -n slemify svc/opensearch-cluster-master 9200:9200

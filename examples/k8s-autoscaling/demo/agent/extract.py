@@ -161,8 +161,8 @@ def is_operational(text: str) -> bool:
 # about a config or a concept. Deliberately stricter than is_operational (which
 # matches "scal" and so fires on nearly every autoscaling question): it needs an
 # inspect-style verb AND a reference to their own cluster or resources. This is
-# the plain-code intent router used when the classifier holds the triage seat;
-# the LLM seat asks the model the same question in prose (classify.py).
+# the plain-code intent router used when the classifier runs the triage step;
+# the LLM step asks the model the same question in prose (classify.py).
 _ACTION_VERBS = re.compile(
     r"\b(check|inspect|look at|look into|describe|diagnose|investigate|verify|"
     r"validate|debug|show me|list|what'?s wrong with|why (?:is|are|does|isn'?t|aren'?t))\b")

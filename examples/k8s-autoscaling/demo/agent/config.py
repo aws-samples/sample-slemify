@@ -8,11 +8,11 @@ import os
 import boto3
 from opensearchpy import OpenSearch
 
-# --- Seats: which model fills each role ---
-# Every model-backed step in the agent is a "seat". Each seat can be filled by
+# --- Steps: which model fills each role ---
+# Every model-backed step in the agent is a "step". Each step can be filled by
 # the frontier LLM on Bedrock or by a small model served on CPU in-cluster. The
-# defaults are the CPU-first system. Setting every seat to its LLM value gives
-# the monolith: one frontier model doing every step. Moving seats one at a time
+# defaults are the CPU-first system. Setting every step to its LLM value gives
+# the monolith: one frontier model doing every step. Moving steps one at a time
 # from LLM to CPU, and measuring after each move, is the point of the workshop
 # and the migration path for a real deployment.
 #
@@ -25,26 +25,26 @@ from opensearchpy import OpenSearch
 #
 # The gate is always the LLM: judging a draft needs a capable model, and that is
 # true in every configuration. Invalid values fail fast at import.
-def _seat(name: str, default: str, allowed: tuple[str, ...]) -> str:
+def _step(name: str, default: str, allowed: tuple[str, ...]) -> str:
     val = os.environ.get(name, default).strip().lower()
     if val not in allowed:
         raise ValueError(f"{name}={val!r} is not one of {allowed}")
     return val
 
 
-# Seats. "off" means the seat does not exist in this configuration: the
+# Steps. "off" means the step does not exist in this configuration: the
 # monolith (TRIAGE=off EMBED=bedrock RERANK=off ANALYST=llm GATE=off) is a
 # plain RAG agent, embed the question, search, one frontier-model call, ship.
-# Every other value puts a model in the seat.
-TRIAGE = _seat("TRIAGE", "classifier", ("off", "llm", "classifier"))
-EMBED = _seat("EMBED", "slemify", ("bedrock", "slemify"))
-RERANK = _seat("RERANK", "on", ("off", "on"))
-ANALYST = _seat("ANALYST", "slm", ("llm", "slm"))
-GATE = _seat("GATE", "llm", ("off", "llm"))
+# Every other value names the model that runs the step.
+TRIAGE = _step("TRIAGE", "classifier", ("off", "llm", "classifier"))
+EMBED = _step("EMBED", "slemify", ("bedrock", "slemify"))
+RERANK = _step("RERANK", "on", ("off", "on"))
+ANALYST = _step("ANALYST", "slm", ("llm", "slm"))
+GATE = _step("GATE", "llm", ("off", "llm"))
 
 
-def seats() -> dict:
-    """The current seat assignment, for /stats and the eval scorecard."""
+def steps() -> dict:
+    """Which model runs each step, for /stats and the eval scorecard."""
     return {"triage": TRIAGE, "embed": EMBED, "rerank": RERANK, "analyst": ANALYST, "gate": GATE}
 
 
@@ -64,7 +64,7 @@ RERANKER_URL = os.environ.get("RERANKER_URL", "http://localhost:8084")
 TOOLSVC_URL = os.environ.get("TOOLSVC_URL", "")
 # Two indexes over the same corpus, one per embedding model, because the vector
 # dimension is fixed at index time (768 for the tuned encoder, 1024 for Titan).
-# The EMBED seat picks which one queries hit; index-knowledge.py builds either.
+# The EMBED step picks which one queries hit; index-knowledge.py builds either.
 INDEX_NAME = os.environ.get("INDEX_NAME", "k8s-autoscaling-knowledge")
 BEDROCK_INDEX_NAME = os.environ.get("BEDROCK_INDEX_NAME", "k8s-autoscaling-knowledge-bedrock")
 ACTIVE_INDEX = BEDROCK_INDEX_NAME if EMBED == "bedrock" else INDEX_NAME

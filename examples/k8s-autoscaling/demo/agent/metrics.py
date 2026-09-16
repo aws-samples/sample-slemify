@@ -9,7 +9,7 @@ Two things are measured here.
 
 2. The scoreboard: for every query, the Bedrock tokens spent (by model and by
    purpose), the resulting USD, and the wall-clock of each step. Aggregated per
-   seat configuration (config.seats()), so moving one seat and re-running the
+   step configuration (config.steps()), so moving one step and re-running the
    same queries shows what that move changed in cost and latency. Quality
    comes from the eval, not from here.
 
@@ -134,24 +134,24 @@ def usage_from_converse(resp: dict) -> tuple[int, int]:
     return int(u.get("inputTokens", 0)), int(u.get("outputTokens", 0))
 
 
-def seats_key(seats: dict) -> str:
-    return ",".join(f"{k}={v}" for k, v in sorted(seats.items()))
+def steps_key(steps: dict) -> str:
+    return ",".join(f"{k}={v}" for k, v in sorted(steps.items()))
 
 
-def record_query(seats: dict, meter: Meter, total_ms: int, escalated: bool):
+def record_query(steps: dict, meter: Meter, total_ms: int, escalated: bool):
     """Close the books on one query: emit the line and keep the sample for the
     per-configuration aggregate."""
     s = meter.summary()
     sample = {"usd": s["usd"], "total_ms": total_ms, "steps_ms": s["steps_ms"],
               "escalated": escalated, "tokens_in": s["tokens_in"],
               "tokens_out": s["tokens_out"]}
-    key = seats_key(seats)
+    key = steps_key(steps)
     with _lock:
         q = _queries[key]
         q.append(sample)
         if len(q) > _MAX_SAMPLES:
             del q[: len(q) - _MAX_SAMPLES]
-    _emit("query", seats=seats, total_ms=total_ms, escalated=escalated, **s)
+    _emit("query", steps=steps, total_ms=total_ms, escalated=escalated, **s)
 
 
 def _p(values: list, q: float):
@@ -163,9 +163,9 @@ def _p(values: list, q: float):
 
 
 def scoreboard() -> dict:
-    """Per seat configuration: how many queries, what they cost, how long they
+    """Per step configuration: how many queries, what they cost, how long they
     took, and the per-step p50. This is the row attendees copy onto the
-    worksheet after each seat move."""
+    worksheet after each model swap."""
     with _lock:
         snap = {k: list(v) for k, v in _queries.items()}
     out = {}

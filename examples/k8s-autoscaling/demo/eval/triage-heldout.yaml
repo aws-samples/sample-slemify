@@ -1,4 +1,4 @@
-# Held-out triage set: exact-match accuracy for the TRIAGE seat.
+# Held-out triage set: exact-match accuracy for the TRIAGE step.
 #
 # None of these queries were seeds for the synthetic training data (the 91
 # files under data/queries/ were; the 14 under data/eval-queries/ were written

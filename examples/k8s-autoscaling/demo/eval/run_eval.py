@@ -55,7 +55,7 @@ JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "eu.anthropic.claude-sonnet-4-5-2025
 # (possibly stale) memory. Retrieved broadly on the question AND the answer's own
 # wording, so claim-specific facts (e.g. a policy the answer names) are surfaced
 # even when the question doesn't mention them.
-# The judge's retrieval must not depend on which seats are deployed, or the
+# The judge's retrieval must not depend on which steps are deployed, or the
 # judge would change between scoreboard rows. By default it embeds with Titan
 # on Bedrock (always available to whoever can run the judge) against the Titan
 # index. Set JUDGE_EMBEDDER=slemify to use the tuned encoder and its index
@@ -179,7 +179,7 @@ def _query_once(text: str) -> dict:
                 elif t == "total":
                     total_ms = ev.get("ms")
     return {"triage": triage, "model": model, "answer": "".join(buf).strip(),
-            "usd": cost.get("usd"), "seats": cost.get("seats"), "total_ms": total_ms}
+            "usd": cost.get("usd"), "steps": cost.get("steps"), "total_ms": total_ms}
 
 
 # --- Judge ---
@@ -284,13 +284,13 @@ def judge(case: dict, answer: str) -> dict:
 def score_case(case: dict, result: dict) -> dict:
     answer = result["answer"]
     triage = result["triage"].lower()
-    triage_off = (result.get("seats") or {}).get("triage") == "off"
+    triage_off = (result.get("steps") or {}).get("triage") == "off"
     checks = {}
 
     # 1. triage
     if case.get("should_reject"):
         if triage_off:
-            # No triage seat: the only thing that can decline an off-topic
+            # No triage step: the only thing that can decline an off-topic
             # question is the answer itself. Ask the judge whether it did.
             j = judge({**case, "should_abstain": True, "must_include": []}, answer)
             checks["triage"] = bool(j.get("abstained"))
@@ -370,7 +370,7 @@ def run_case(case: dict, repeat: int) -> dict:
     real regression and an eval mislabel were caught in the same session
     (tmp/lessons-learned.md section 19). Never discard them."""
     runs, judges, secs, answers, models = [], [], [], [], []
-    usds, totals, seats = [], [], None
+    usds, totals, steps = [], [], None
     last = {}
     for _ in range(repeat):
         t0 = time.perf_counter()
@@ -382,7 +382,7 @@ def run_case(case: dict, repeat: int) -> dict:
                 usds.append(result["usd"])
             if result.get("total_ms") is not None:
                 totals.append(result["total_ms"])
-            seats = result.get("seats") or seats
+            steps = result.get("steps") or steps
             sc = score_case(case, result)
         except Exception as e:
             answers.append("")
@@ -406,7 +406,7 @@ def run_case(case: dict, repeat: int) -> dict:
             "judge": judges[-1], "judges": judges, "seconds": round(sum(secs), 1),
             "usd_per_query": round(sum(usds) / len(usds), 6) if usds else None,
             "total_ms_p50": sorted(totals)[len(totals) // 2] if totals else None,
-            "seats": seats,
+            "steps": steps,
             "model": last_model, "answer": last_answer, "answers": answers}
 
 
@@ -452,22 +452,22 @@ def main():
           f"{counts['partial']} partial, {counts['fail']} fail, "
           f"{counts['error']} error ===")
     # The scoreboard row: the three numbers the workshop worksheet asks for,
-    # for the seat configuration that produced them. Cost is Bedrock tokens
+    # for the step configuration that produced them. Cost is Bedrock tokens
     # only (CPU pods are hourly capacity, see /stats cpu_pool_usd_per_hour).
     usds = [r["usd_per_query"] for r in rows if r.get("usd_per_query") is not None]
     p50s = [r["total_ms_p50"] for r in rows if r.get("total_ms_p50") is not None]
-    seats = next((r["seats"] for r in rows if r.get("seats")), None)
+    steps = next((r["steps"] for r in rows if r.get("steps")), None)
     scoreboard = {
-        "seats": seats,
+        "steps": steps,
         "quality": f"{counts['pass']}/{n}",
         "bedrock_usd_per_query": round(sum(usds) / len(usds), 5) if usds else None,
         "latency_p50_ms": sorted(p50s)[len(p50s) // 2] if p50s else None,
     }
-    if seats:
-        seat_str = " ".join(f"{k}={v}" for k, v in seats.items())
+    if steps:
+        step_str = " ".join(f"{k}={v}" for k, v in steps.items())
         usd_str = f"${scoreboard['bedrock_usd_per_query']:.4f}" if usds else "n/a"
         lat_str = f"{scoreboard['latency_p50_ms'] / 1000:.1f}s" if p50s else "n/a"
-        print(f"=== Scoreboard [{seat_str}]: quality {scoreboard['quality']}  "
+        print(f"=== Scoreboard [{step_str}]: quality {scoreboard['quality']}  "
               f"bedrock {usd_str}/query  latency p50 {lat_str} ===")
 
     scorecard = {"timestamp": datetime.now(timezone.utc).isoformat(),

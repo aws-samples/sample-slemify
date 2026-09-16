@@ -1,6 +1,6 @@
 """Classification: the triage category and the question intent.
 
-The TRIAGE seat (config.TRIAGE) decides who classifies:
+The TRIAGE step (config.TRIAGE) decides who classifies:
   - "classifier": the Slemify-trained encoder + head, served as ONNX on CPU.
   - "llm": the frontier model on Bedrock, given the same prompt.
 Both return the same `label|confidence` line and go through the same parser, so
@@ -10,8 +10,8 @@ INTENT is a question-routing signal: does the user explicitly want the agent to
 act on their live cluster (inspect/validate/diagnose resources), or is this a
 question to answer from the knowledge base? The default is "answer": tools are
 opt-in (explicit request, or proposed-and-confirmed / autopilot). With the
-classifier in the triage seat, intent is a plain-code heuristic (no model call);
-with the LLM in the seat, the LLM decides. Either way the graph treats intent as
+classifier in the triage step, intent is a plain-code heuristic (no model call);
+with the LLM running the step, the LLM decides. Either way the graph treats intent as
 a pluggable input.
 """
 import re
@@ -74,7 +74,7 @@ def _classify_llm(text: str) -> str:
 
 
 def classify(text: str) -> dict:
-    """Triage via whoever holds the seat: {category, confidence}."""
+    """Triage via whichever model runs the step: {category, confidence}."""
     raw = _classify_llm(text) if config.TRIAGE == "llm" else _classify_classifier(text)
     return _parse(raw)
 
@@ -94,9 +94,9 @@ One word:"""
 def classify_intent(text: str) -> str:
     """Return "action" (explicit cluster request) or "answer" (docs-first).
 
-    Classifier seat: extract.wants_cluster_action, plain code on CPU (an
+    Classifier step: extract.wants_cluster_action, plain code on CPU (an
     inspect-style verb plus a reference to their own cluster or resources). LLM
-    seat: one short Bedrock classification. Both default to "answer" on any
+    step: one short Bedrock classification. Both default to "answer" on any
     doubt or error, so the agent never reaches for tools unless the user asked.
     """
     if config.TRIAGE != "llm":
