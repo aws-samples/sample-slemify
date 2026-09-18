@@ -460,15 +460,15 @@ def main():
     scoreboard = {
         "steps": steps,
         "quality": f"{counts['pass']}/{n}",
-        "bedrock_usd_per_query": round(sum(usds) / len(usds), 5) if usds else None,
+        "frontier_usd_per_query": round(sum(usds) / len(usds), 5) if usds else None,
         "latency_p50_ms": sorted(p50s)[len(p50s) // 2] if p50s else None,
     }
     if steps:
         step_str = " ".join(f"{k}={v}" for k, v in steps.items())
-        usd_str = f"${scoreboard['bedrock_usd_per_query']:.4f}" if usds else "n/a"
+        usd_str = f"${scoreboard['frontier_usd_per_query']:.4f}" if usds else "n/a"
         lat_str = f"{scoreboard['latency_p50_ms'] / 1000:.1f}s" if p50s else "n/a"
         print(f"=== Scoreboard [{step_str}]: quality {scoreboard['quality']}  "
-              f"bedrock {usd_str}/query  latency p50 {lat_str} ===")
+              f"frontier {usd_str}/query  latency p50 {lat_str} ===")
 
     scorecard = {"timestamp": datetime.now(timezone.utc).isoformat(),
                  "orchestrator": ORCHESTRATOR_URL, "repeat": args.repeat,

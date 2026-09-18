@@ -177,8 +177,8 @@ def scoreboard() -> dict:
                  for n in step_names}
         out[key] = {
             "queries": len(samples),
-            "bedrock_usd_per_query_mean": round(statistics.fmean(usd), 6) if usd else None,
-            "bedrock_usd_per_query_p50": _p(usd, 0.5),
+            "frontier_usd_per_query_mean": round(statistics.fmean(usd), 6) if usd else None,
+            "frontier_usd_per_query_p50": _p(usd, 0.5),
             "total_ms_p50": _p(ms, 0.5),
             "total_ms_p95": _p(ms, 0.95),
             "escalation_rate": round(sum(1 for s in samples if s["escalated"]) / len(samples), 4),
@@ -211,6 +211,6 @@ def snapshot() -> dict:
         "scoreboard": scoreboard(),
         "cpu_pool_usd_per_hour": config.CPU_POOL_USD_PER_HOUR or None,
         "note": ("counters reset on pod restart; the JSON-line events in pod "
-                 "logs are the durable record. bedrock_usd counts Bedrock tokens "
+                 "logs are the durable record. frontier_usd counts Bedrock tokens "
                  "only; CPU pods are hourly capacity, see cpu_pool_usd_per_hour"),
     }

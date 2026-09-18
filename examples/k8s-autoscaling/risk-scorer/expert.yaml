@@ -31,10 +31,8 @@ data:
     - path: queries/
       type: raw
   synthetic:
-    model: eu.anthropic.claude-sonnet-4-6
     pairs: 1200
   evaluation:
-    model: eu.anthropic.claude-sonnet-4-6
     pairs: 150
     sources:
       - path: eval-queries/

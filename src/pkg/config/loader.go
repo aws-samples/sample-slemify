@@ -51,11 +51,33 @@ func Parse(data []byte) (*ExpertConfig, []string, error) {
 const (
 	DefaultEncoderBase    = "BAAI/bge-base-en-v1.5"
 	DefaultGenerationBase = "Qwen/Qwen3-30B-A3B-Instruct-2507"
+
+	// DefaultBedrockModel is used for data.synthetic.model and
+	// data.evaluation.model when a config leaves them empty, so example
+	// configs do not have to hardcode a vendor model id. Override per
+	// project in expert.yaml, or globally with SLEMIFY_BEDROCK_MODEL.
+	DefaultBedrockModel = "eu.anthropic.claude-sonnet-4-6"
 )
 
+// defaultBedrockModel resolves the Bedrock model id default, honouring the
+// SLEMIFY_BEDROCK_MODEL environment override.
+func defaultBedrockModel() string {
+	if v := os.Getenv("SLEMIFY_BEDROCK_MODEL"); v != "" {
+		return v
+	}
+	return DefaultBedrockModel
+}
+
 // ApplyDefaults fills fields that have a sensible task-dependent default so a
-// config can leave them empty. Only model.base today.
+// config can leave them empty: model.base, data.synthetic.model, and
+// data.evaluation.model.
 func (c *ExpertConfig) ApplyDefaults() {
+	if c.Data.Synthetic != (SyntheticConfig{}) && c.Data.Synthetic.Model == "" {
+		c.Data.Synthetic.Model = defaultBedrockModel()
+	}
+	if c.Data.Evaluation != nil && c.Data.Evaluation.Model == "" {
+		c.Data.Evaluation.Model = defaultBedrockModel()
+	}
 	if c.Model.Base != "" {
 		return
 	}

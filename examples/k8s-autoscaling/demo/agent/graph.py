@@ -35,9 +35,9 @@ from .validation import validate_config, validate_draft_fix
 LBL_TRIAGE = ("Triage \u00b7 LLM (Bedrock)" if config.TRIAGE == "llm"
               else "Triage classifier \u00b7 ONNX Runtime (CPU)")
 LBL_INTENT = "Intent router (LLM)" if config.TRIAGE == "llm" else "Intent router (CPU)"
-LBL_EMBED = ("Retriever (Bedrock embeddings)" if config.EMBED == "bedrock"
-             else "Retriever (tuned encoder, CPU)")
-LBL_EMBED_DETAIL = (f"Titan, {config.BEDROCK_EMBED_DIM}d" if config.EMBED == "bedrock"
+LBL_EMBED = ("Embedder (hosted, Bedrock)" if config.EMBED == "bedrock"
+             else "Embedder (tuned encoder, CPU)")
+LBL_EMBED_DETAIL = (f"hosted embedding model, {config.BEDROCK_EMBED_DIM}d" if config.EMBED == "bedrock"
                     else "domain-tuned encoder, 768d")
 LBL_RERANK = "Reranker (off)" if config.RERANK == "off" else "Reranker (cross-encoder, CPU)"
 LBL_ANALYST = "Analyst \u00b7 LLM (Bedrock)" if config.ANALYST == "llm" else "Analyst SLM (CPU)"
