@@ -1,6 +1,6 @@
 # Getting Started: Build an Agentic K8s Expert
 
-This guide walks you through building a complete agentic system using Slemify: one orchestrator that decides, and a specialised model in each seat. By the end, you'll have two specialist models running on CPUs that audit Kubernetes autoscaling configurations, backed by a RAG knowledge base and an LLM fallback for edge cases. One is a CPU-trained encoder classifier (triage), the other a stock generative SLM served on CPU and grounded by RAG (analyst).
+This guide walks you through building a complete agentic system using Slemify: one orchestrator that decides, and a specialised model in each step. By the end, you'll have two specialist models running on CPUs that audit Kubernetes autoscaling configurations, backed by a RAG knowledge base and an LLM fallback for edge cases. One is a CPU-trained encoder classifier (triage), the other a stock generative SLM served on CPU and grounded by RAG (analyst).
 
 Total time: ~1 hour (mostly waiting for the convert and indexing steps). Cost: ~$15-30 (mostly Bedrock synthetic data for the triage classifier; the analyst is convert-only on CPU).
 
@@ -127,8 +127,7 @@ data:
     - path: queries/
       type: raw
   synthetic:
-    model: eu.anthropic.claude-sonnet-4-6
-    pairs: 1200
+    pairs: 1200   # model: defaults to Slemify's Bedrock model (override: SLEMIFY_BEDROCK_MODEL)
 
 training:
   spot: true
@@ -255,7 +254,7 @@ Open `http://localhost:8000` and paste a Kubernetes config. You'll see:
 2. RAG retrieval from the knowledge base
 3. Analyst analysis streaming token by token
 
-The tmux dashboard shows all three pods processing in sequence, showing the whole pipeline running on CPUs with one model per seat.
+The tmux dashboard shows all three pods processing in sequence, showing the whole pipeline running on CPUs with one model per step.
 
 ## What you can customize
 

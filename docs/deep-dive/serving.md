@@ -229,7 +229,7 @@ Total time = (input_tokens / prompt_throughput) + (output_tokens x ms_per_token 
 | CPU family | Memory bandwidth | Key advantage for inference |
 |-----------|-----------------|---------------------------|
 | [AWS Graviton4](https://aws.amazon.com/ec2/graviton/) (Arm Neoverse V2) | 12x DDR5-5600 channels | Lowest cost per core-hour on AWS. 75% more bandwidth than Graviton3. |
-| [AMD EPYC Turin](https://www.amd.com/en/products/processors/server/epyc/9005-series.html) (Zen 5) | 12x DDR5-6000 channels, up to 614 GB/s | Highest channel count and bandwidth per socket. Strong Spot availability on AWS (m7a, c7a families). |
+| [AMD EPYC Turin](https://www.amd.com/en/products/processors/server/epyc/9005-series.html) (Zen 5) | 12x DDR5-6000 channels, about 576 GB/s per socket | Highest channel count per socket. On AWS, Turin is the c8a/m8a/r8a families; the widely available c7a/m7a are the previous generation (Genoa, Zen 4, DDR5-4800). |
 | [Intel Xeon 6 Granite Rapids](https://www.intel.com/content/www/us/en/products/platforms/details/granite-rapids.html) | 8x DDR5-6400 channels, MRDIMM option at 8800 MT/s | MRDIMM support can push bandwidth beyond standard DDR5 limits. AMX tile registers accelerate matrix operations. |
 
 Slemify's NodePool allows both arm64 and amd64 architectures and uses on-demand capacity. The provisioner (EKS Auto Mode or Karpenter) evaluates all eligible instance types across families and picks the cheapest option that meets the CPU and memory requirements.

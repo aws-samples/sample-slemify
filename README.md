@@ -100,11 +100,9 @@ data:
     - path: queries/
       type: raw
   synthetic:
-    model: eu.anthropic.claude-sonnet-4-6
-    pairs: 1200
+    pairs: 1200   # model: defaults to Slemify's Bedrock model (override: SLEMIFY_BEDROCK_MODEL)
   evaluation:
-    model: eu.anthropic.claude-sonnet-4-6
-    pairs: 150
+    pairs: 150    # model: optional, same default
     sources:
       - path: eval-queries/
         type: raw

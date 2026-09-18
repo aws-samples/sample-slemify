@@ -1,6 +1,6 @@
 # Report Stage
 
-The report stage measures the model you just deployed and shows you the numbers you need to decide whether it is ready for the seat you want it in. It does not tell you whether the model is "good". It tells you how the model does on held-out data, how that compares to the simplest possible baseline, and what the served endpoint actually delivers in latency.
+The report stage measures the model you just deployed and shows you the numbers you need to decide whether it is ready for the step you want it in. It does not tell you whether the model is "good". It tells you how the model does on held-out data, how that compares to the simplest possible baseline, and what the served endpoint actually delivers in latency.
 
 The report runs as a Kubernetes Job at the end of every `slemify deploy`, for every task family. It reads the held-out set and the training metrics from S3, calls the live inference endpoint, and writes two files to `s3://<bucket>/<project>/report/`:
 
@@ -46,7 +46,7 @@ MAE, RMSE, R squared, and correlation between predicted and true scores, against
 
 ### Generation
 
-Slemify does not fine-tune generation models, so there is no held-out accuracy to report. What matters for a served generation model on CPU is whether it fits the latency budget of its seat, and that is what the report measures.
+Slemify does not fine-tune generation models, so there is no held-out accuracy to report. What matters for a served generation model on CPU is whether it fits the latency budget of its step, and that is what the report measures.
 
 - **Model.** File, size on disk, parameter count, and training context, read from the server's `/v1/models` and `/props`.
 - **Prefill and decode.** Time to first token cold (prompt not in the KV cache) and warm (same prefix, second call), prompt tokens per second, and decode tokens per second, from the server's own `timings` on two timed completions.
@@ -62,8 +62,7 @@ Point `data.evaluation.labeled` at one or more JSONL files under `data.path`:
 ```yaml
 data:
   evaluation:
-    model: eu.anthropic.claude-sonnet-4-5-20250929-v1:0
-    pairs: 150
+    pairs: 150   # model: optional; defaults like data.synthetic.model
     labeled:
       - path: eval-labeled/held-out.jsonl
 ```
@@ -88,7 +87,7 @@ report:
   llm_baseline: true          # classification: frontier zero-shot on the held-out set
   cases: eval-cases/analyst.jsonl   # generation: grounded cases under data.path
   repeat: 3                   # generation: drafts per case (default 2)
-  model: eu.anthropic.claude-sonnet-4-6   # Bedrock model for the two above; defaults to data.synthetic.model
+  model: ""                   # Bedrock model for the two above; defaults to data.synthetic.model
 ```
 
 All three are optional. Without them the report costs nothing beyond the Job's own CPU time and the requests it sends to your endpoint.

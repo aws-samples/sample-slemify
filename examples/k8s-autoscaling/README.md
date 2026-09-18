@@ -14,7 +14,7 @@ k8s-autoscaling/
 │   ├── queries/      # 91 training seed queries (real-world K8s configs)
 │   ├── eval-queries/ # 14 held-out seed queries for the generated eval set
 │   └── eval-labeled/ # 43 human-labeled held-out queries (JSONL) the report scores as "real"
-├── demo/             # Agentic demo application (orchestrator + one model per seat)
+├── demo/             # Agentic demo application (orchestrator + one model per step)
 │   ├── agent/        # LangGraph agent package (triage, retrieval, faithfulness gate, generation, tools, remediation)
 │   ├── server.py     # FastAPI entrypoint (serves the agent graph + chat UI)
 │   ├── ui.html       # Chat UI (live step log + streamed answers)

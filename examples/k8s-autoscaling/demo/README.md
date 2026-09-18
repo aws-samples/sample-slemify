@@ -109,10 +109,13 @@ intent, embed, gate, analyst, calibrate) and token usage, priced from a small
 table in `agent/config.py` (list prices; override with
 `BEDROCK_PRICE_<MODEL>_IN/OUT`), and every step's wall-clock is kept. The
 stream ends with a `cost` event carrying the query's USD and tokens, and
-`GET /stats` aggregates per step configuration: queries seen, Bedrock $/query
-(mean and p50), total latency p50/p95, escalation rate, per-step p50.
-`make eval` prints one scoreboard row (quality, Bedrock $/query, p50 latency)
-for the active steps; `make scoreboard` prints the live aggregate.
+`GET /stats` aggregates per step configuration: queries seen, frontier $/query
+(`frontier_usd_per_query_*`, Bedrock spend as the proxy for frontier-model
+load; mean and p50), total latency p50/p95, escalation rate, per-step p50.
+`make eval` prints one scoreboard row (quality, frontier $/query, p50 latency)
+for the active steps; `make scoreboard` prints the live aggregate. `make swap
+TRIAGE=classifier` (or `EMBED=`, `RERANK=`, `ANALYST=`, `GATE=`) swaps a step,
+waits for the rollout, and restarts the local port-forward in one command.
 
 Two per-step quality numbers are deterministic and need no judge:
 `make triage-acc` scores whichever model runs the `TRIAGE` step by exact match on a

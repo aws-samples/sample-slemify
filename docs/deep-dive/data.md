@@ -191,8 +191,7 @@ data:
     - path: queries/   # the corpus to mine pairs from
       type: raw
   synthetic:
-    model: eu.anthropic.claude-sonnet-4-6
-    pairs: 1000
+    pairs: 1000   # model: defaults to Slemify's Bedrock model; override here or with SLEMIFY_BEDROCK_MODEL
 ```
 
 The retrieval metric only works if each eval query's gold document exists in the index, so the trainer adds the eval positives to the corpus (with the training chunks as distractors). The data lever here is corpus coverage: the documents you want retrievable in production must be in your sources.
@@ -211,11 +210,9 @@ data:
     - path: training-data/    # Raw files for training generation
       type: raw
   synthetic:
-    model: eu.anthropic.claude-sonnet-4-6
-    pairs: 500
+    pairs: 500    # model: optional, same default as above
   evaluation:
-    model: eu.anthropic.claude-sonnet-4-6
-    pairs: 100
+    pairs: 100    # model: optional; use a different model here to keep eval independent
     sources:
       - path: eval-data/      # Different raw files for eval generation
         type: raw
