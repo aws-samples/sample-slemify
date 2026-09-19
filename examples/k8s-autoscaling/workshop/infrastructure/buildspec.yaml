@@ -1,0 +1,90 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# CodeBuild job that provisions one CMP321 account: terraform apply for the
+# cluster, then seed.sh for everything on it. Started by the CloudFormation
+# stack in cfn/team-core.yaml, which clones this repository at a tag as the
+# build source.
+#
+# Environment variables set by CloudFormation:
+#   CFN_RESPONSE_URL       WaitCondition handle to signal when done (optional)
+#   TF_STATE_BUCKET        S3 bucket for terraform state
+#   STACK_NAME             CloudFormation stack name (state key prefix)
+#   AWS_REGION             set by CodeBuild
+#   EKS_CLUSTER_NAME, EKS_CLUSTER_VERSION, BEDROCK_REGION
+#   PARTICIPANT_ROLE_ARN   WSParticipantRole ARN, or NONE outside Workshop Studio
+#   IDE_ROLE_ARN           IDE instance role ARN, or NONE
+#   DEMO_IMAGE, RERANKER_IMAGE  pre-built images for the seed step (optional)
+
+version: 0.2
+
+env:
+  variables:
+    TERRAFORM_VERSION: "1.16.3"
+    KUBECTL_VERSION: "v1.36.4"
+    INFRA_DIR: "examples/k8s-autoscaling/workshop/infrastructure"
+
+phases:
+  install:
+    commands:
+      - echo "Installing terraform ${TERRAFORM_VERSION}"
+      - curl -fsSL -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+      - unzip -q -o /tmp/terraform.zip -d /usr/local/bin && rm /tmp/terraform.zip
+      - terraform version
+      - echo "Installing kubectl and helm for the seed step"
+      - curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl
+      - curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      - pip3 install --quiet opensearch-py httpx gitpython requests beautifulsoup4 boto3
+  pre_build:
+    commands:
+      - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/terraform"
+      - |
+        cat > backend.tf <<EOF
+        terraform {
+          backend "s3" {
+            bucket = "${TF_STATE_BUCKET}"
+            key    = "${STACK_NAME}/terraform.tfstate"
+            region = "${AWS_REGION}"
+          }
+        }
+        EOF
+      - cat backend.tf
+      # Terraform variables. NONE means "not set" so the same template works
+      # outside Workshop Studio.
+      - export TF_VAR_region="${AWS_REGION}"
+      - export TF_VAR_cluster_name="${EKS_CLUSTER_NAME}"
+      - export TF_VAR_cluster_version="${EKS_CLUSTER_VERSION}"
+      - export TF_VAR_bedrock_region="${BEDROCK_REGION:-${AWS_REGION}}"
+      - '[ "${PARTICIPANT_ROLE_ARN:-NONE}" != "NONE" ] && export TF_VAR_participant_role_arn="${PARTICIPANT_ROLE_ARN}" || true'
+      - '[ "${IDE_ROLE_ARN:-NONE}" != "NONE" ] && export TF_VAR_ide_role_arn="${IDE_ROLE_ARN}" || true'
+      - terraform init -input=false
+  build:
+    commands:
+      - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/terraform"
+      - echo "Applying VPC, then cluster, then the rest"
+      - terraform apply -input=false -auto-approve -target=module.vpc
+      - terraform apply -input=false -auto-approve -target=module.eks
+      - |
+        max_retry=3
+        counter=1
+        until terraform apply -input=false -auto-approve
+        do
+          [ "$counter" -eq "$max_retry" ] && exit 1
+          echo "terraform apply failed, retrying in 30s (attempt $counter of $max_retry)"
+          sleep 30
+          counter=$((counter + 1))
+        done
+      - echo "Seeding the cluster"
+      - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}"
+      - bash seed/seed.sh
+  post_build:
+    commands:
+      - echo "build status ${CODEBUILD_BUILD_SUCCEEDING}"
+      - |
+        if [ -n "${CFN_RESPONSE_URL:-}" ]; then
+          if [ "${CODEBUILD_BUILD_SUCCEEDING}" -eq 1 ]; then
+            curl -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"SUCCESS\",\"Reason\":\"Provisioning complete\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"Cluster and demo ready\"}" "${CFN_RESPONSE_URL}"
+          else
+            curl -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"FAILURE\",\"Reason\":\"Provisioning failed\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"See CodeBuild logs: ${CODEBUILD_LOG_PATH}\"}" "${CFN_RESPONSE_URL}"
+          fi
+        fi

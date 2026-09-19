@@ -8,6 +8,8 @@ set -e
 
 NAMESPACE="slemify"
 RELEASE="opensearch-demo"
+# EKS Auto Mode clusters have no gp2 class; the workshop seed passes gp3.
+STORAGE_CLASS="${OPENSEARCH_STORAGE_CLASS:-gp2}"
 
 echo "=== Setting up OpenSearch for RAG ==="
 
@@ -23,7 +25,7 @@ helm upgrade --install $RELEASE opensearch/opensearch \
   --set replicas=1 \
   --set minimumMasterNodes=1 \
   --set persistence.size=10Gi \
-  --set persistence.storageClass=gp2 \
+  --set persistence.storageClass="${STORAGE_CLASS}" \
   --set resources.requests.memory=2Gi \
   --set resources.limits.memory=2Gi \
   --set resources.requests.cpu=1 \

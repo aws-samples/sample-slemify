@@ -1,0 +1,151 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# The Slemify SLM NodePools for EKS Auto Mode, applied before any slemify
+# deploy so the cluster starts in the state the lab pages assume: the pools
+# exist and one SLM node is pre-warmed. This is a static copy of what
+# pkg/serving/nodepool.go generates for ProvisionerAutoMode (NodeClass
+# "default"). slemify deploy is idempotent against these, so the attendee's
+# first deploy finds them already present.
+#
+# Three weighted pools, newest instance generation first, so the provisioner
+# prefers the fastest memory bandwidth and still launches when a generation
+# has no capacity or is not offered in the Region.
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: slemify-slm
+  labels:
+    app.kubernetes.io/managed-by: slemify
+spec:
+  weight: 100
+  template:
+    metadata:
+      labels:
+        slemify.io/workload: slm
+    spec:
+      nodeClassRef:
+        group: eks.amazonaws.com
+        kind: NodeClass
+        name: default
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["arm64", "amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: eks.amazonaws.com/instance-category
+          operator: In
+          values: ["c", "m", "r"]
+        - key: eks.amazonaws.com/instance-generation
+          operator: In
+          values: ["9"]
+        - key: eks.amazonaws.com/instance-size
+          operator: NotIn
+          values: ["metal", "nano", "micro", "small"]
+        - key: slemify.io/workload
+          operator: In
+          values: ["slm"]
+      taints:
+        - key: slemify.io/slm
+          effect: NoSchedule
+  limits:
+    cpu: "256"
+    memory: "512Gi"
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 5m
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: slemify-slm-previous
+  labels:
+    app.kubernetes.io/managed-by: slemify
+spec:
+  weight: 75
+  template:
+    metadata:
+      labels:
+        slemify.io/workload: slm
+    spec:
+      nodeClassRef:
+        group: eks.amazonaws.com
+        kind: NodeClass
+        name: default
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["arm64", "amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: eks.amazonaws.com/instance-category
+          operator: In
+          values: ["c", "m", "r"]
+        - key: eks.amazonaws.com/instance-generation
+          operator: In
+          values: ["8"]
+        - key: eks.amazonaws.com/instance-size
+          operator: NotIn
+          values: ["metal", "nano", "micro", "small"]
+        - key: slemify.io/workload
+          operator: In
+          values: ["slm"]
+      taints:
+        - key: slemify.io/slm
+          effect: NoSchedule
+  limits:
+    cpu: "256"
+    memory: "512Gi"
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 5m
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: slemify-slm-fallback
+  labels:
+    app.kubernetes.io/managed-by: slemify
+spec:
+  weight: 50
+  template:
+    metadata:
+      labels:
+        slemify.io/workload: slm
+    spec:
+      nodeClassRef:
+        group: eks.amazonaws.com
+        kind: NodeClass
+        name: default
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["arm64", "amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: eks.amazonaws.com/instance-category
+          operator: In
+          values: ["c", "m", "r"]
+        - key: eks.amazonaws.com/instance-generation
+          operator: In
+          values: ["6", "7"]
+        - key: eks.amazonaws.com/instance-size
+          operator: NotIn
+          values: ["metal", "nano", "micro", "small"]
+        - key: slemify.io/workload
+          operator: In
+          values: ["slm"]
+      taints:
+        - key: slemify.io/slm
+          effect: NoSchedule
+  limits:
+    cpu: "256"
+    memory: "512Gi"
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 5m

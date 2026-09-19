@@ -1,0 +1,53 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# A pause pod that tolerates the SLM taint and requests enough CPU to force one
+# SLM node online before the lab starts, so module 1 does not pay a node
+# provision. Sized to land on a medium-or-larger node; it holds the node warm
+# and is deleted once the first real SLM workload schedules.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slm-prewarm
+  namespace: slemify
+  labels:
+    app: slm-prewarm
+    slemify.io/component: prewarm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: slm-prewarm
+  template:
+    metadata:
+      labels:
+        app: slm-prewarm
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        slemify.io/workload: slm
+      tolerations:
+        - key: slemify.io/slm
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10
+          resources:
+            requests:
+              cpu: "1"
+              memory: 512Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
