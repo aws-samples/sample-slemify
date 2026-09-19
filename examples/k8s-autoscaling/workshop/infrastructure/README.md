@@ -59,7 +59,7 @@ and `jq`:
 
 ```bash
 cd examples/k8s-autoscaling/workshop/infrastructure
-export AWS_REGION=us-west-2 EKS_CLUSTER_NAME=cmp321 BEDROCK_REGION=us-west-2
+export AWS_REGION=us-west-2 EKS_CLUSTER_NAME=slemify-workshop BEDROCK_REGION=us-west-2
 export TF_VAR_region=$AWS_REGION TF_VAR_cluster_name=$EKS_CLUSTER_NAME TF_VAR_bedrock_region=$BEDROCK_REGION
 
 terraform -chdir=terraform init

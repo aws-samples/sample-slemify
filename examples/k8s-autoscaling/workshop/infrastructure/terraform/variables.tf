@@ -10,7 +10,7 @@ variable "region" {
 variable "cluster_name" {
   description = "Name of the EKS Auto Mode cluster."
   type        = string
-  default     = "cmp321"
+  default     = "slemify-workshop"
 }
 
 variable "cluster_version" {
