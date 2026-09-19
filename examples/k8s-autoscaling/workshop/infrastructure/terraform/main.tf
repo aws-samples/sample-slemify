@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-# CMP321 cluster. Terraform stops at an empty EKS Auto Mode cluster with the
+# The workshop cluster. Terraform stops at an empty EKS Auto Mode cluster with the
 # addons Slemify needs, a model bucket, and the orchestrator's Bedrock role.
 # Everything on the cluster (NodePools, OpenSearch, the demo) is applied by
 # ../seed/seed.sh, which runs in the same CodeBuild job right after apply.
@@ -17,7 +17,7 @@ data "aws_availability_zones" "available" {
 
 locals {
   azs               = slice(data.aws_availability_zones.available.names, 0, 3)
-  model_bucket_name = var.model_bucket_name != "" ? var.model_bucket_name : "cmp321-models-${data.aws_caller_identity.current.account_id}-${var.region}"
+  model_bucket_name = var.model_bucket_name != "" ? var.model_bucket_name : "slemify-models-${data.aws_caller_identity.current.account_id}-${var.region}"
 
   cluster_admin_policy = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
 

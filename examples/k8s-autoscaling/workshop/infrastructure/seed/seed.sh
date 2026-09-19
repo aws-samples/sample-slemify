@@ -2,7 +2,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 #
-# Seed the CMP321 cluster to the state the lab starts in: SLM NodePools present,
+# Seed the workshop cluster to the state the lab starts in: SLM NodePools present,
 # one SLM node pre-warmed, OpenSearch up with the Bedrock (Titan) index the
 # monolith reads, and the demo running in monolith seats
 # (TRIAGE=off EMBED=bedrock RERANK=off ANALYST=llm GATE=off) with a smoke query

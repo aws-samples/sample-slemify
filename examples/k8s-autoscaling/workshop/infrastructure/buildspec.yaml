@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 #
-# CodeBuild job that provisions one CMP321 account: terraform apply for the
+# CodeBuild job that provisions one workshop account: terraform apply for the
 # cluster, then seed.sh for everything on it. Started by the CloudFormation
 # stack in cfn/team-core.yaml, which clones this repository at a tag as the
 # build source.
