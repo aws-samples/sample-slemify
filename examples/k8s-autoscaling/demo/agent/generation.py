@@ -3,8 +3,10 @@ the Bedrock LLM (escalation / fallback). Both take the assembled RAG context.
 """
 import asyncio
 import json
+import time
 
 import httpx
+from botocore.exceptions import ClientError
 
 from . import config
 from . import metrics
@@ -74,12 +76,36 @@ async def stream_calibrated(text: str, context: str = "", reason: str = ""):
         yield tok
 
 
+# Bedrock returns AccessDeniedException with this text while an account's
+# Marketplace entitlement for an Anthropic model is still settling (seen for
+# 10 to 15 minutes in freshly vended accounts). It clears on its own, so it is
+# retried like a throttle rather than surfaced as a dead stream.
+_MARKETPLACE_TEXT = "aws-marketplace"
+_TRANSIENT_CODES = {"ThrottlingException", "ServiceUnavailableException",
+                    "InternalServerException", "ModelNotReadyException"}
+
+
+def _converse_stream_open(user_content: str):
+    """Open the stream, retrying transient errors with backoff (blocking; run in a thread)."""
+    for attempt in range(6):
+        try:
+            return config.bedrock.converse_stream(
+                modelId=config.LLM_MODEL,
+                messages=[{"role": "user", "content": [{"text": user_content}]}],
+                inferenceConfig={"maxTokens": 2048, "temperature": 0.2},
+            )
+        except ClientError as e:
+            err = e.response.get("Error", {})
+            code = err.get("Code", "")
+            transient = code in _TRANSIENT_CODES or (
+                code == "AccessDeniedException" and _MARKETPLACE_TEXT in err.get("Message", ""))
+            if not transient or attempt == 5:
+                raise
+            time.sleep(min(2 ** attempt, 20))
+
+
 async def _converse_stream(user_content: str, purpose: str):
-    resp = config.bedrock.converse_stream(
-        modelId=config.LLM_MODEL,
-        messages=[{"role": "user", "content": [{"text": user_content}]}],
-        inferenceConfig={"maxTokens": 2048, "temperature": 0.2},
-    )
+    resp = await asyncio.to_thread(_converse_stream_open, user_content)
     stream_iter = iter(resp["stream"])
     while True:
         event = await asyncio.to_thread(next, stream_iter, None)
