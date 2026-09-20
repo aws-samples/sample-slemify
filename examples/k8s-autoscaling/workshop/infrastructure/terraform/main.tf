@@ -27,6 +27,7 @@ locals {
     for k, v in {
       participant = var.participant_role_arn
       ide         = var.ide_role_arn
+      ops         = var.ops_role_arn
     } : k => v if v != ""
   }
 

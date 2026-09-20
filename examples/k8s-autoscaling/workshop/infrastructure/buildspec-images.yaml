@@ -1,0 +1,45 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Build the demo images for one architecture and push them to the account's
+# ECR tagged latest-<arch>. The CloudFormation stack defines two CodeBuild
+# projects on this buildspec, one x86_64 and one arm64; the provisioning job
+# starts both, runs Terraform while they build, then joins the two tags into a
+# multi-arch manifest before the seed. Native builds on each architecture; no
+# emulation.
+#
+# Environment variables set by CloudFormation:
+#   ARCH   amd64 or arm64 (the tag suffix)
+
+version: 0.2
+
+env:
+  variables:
+    DEMO_DIR: "examples/k8s-autoscaling/demo"
+    ORCH_REPO: "slemify/k8s-autoscaling-orchestrator"
+    RERANK_REPO: "slemify/k8s-autoscaling-reranker"
+
+phases:
+  pre_build:
+    commands:
+      - ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+      - REGISTRY="${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+      - echo "Building ${ARCH} images for ${REGISTRY}"
+      # Both architecture builds race to create the repositories; either may win.
+      - |
+        for repo in "${ORCH_REPO}" "${RERANK_REPO}"; do
+          aws ecr describe-repositories --repository-names "${repo}" >/dev/null 2>&1 || \
+            aws ecr create-repository --repository-name "${repo}" \
+              --image-scanning-configuration scanOnPush=true >/dev/null 2>&1 || true
+        done
+      - aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY}"
+  build:
+    commands:
+      - cd "${CODEBUILD_SRC_DIR}/${DEMO_DIR}"
+      - docker build -t "${REGISTRY}/${ORCH_REPO}:latest-${ARCH}" .
+      - docker push "${REGISTRY}/${ORCH_REPO}:latest-${ARCH}"
+      - docker build -t "${REGISTRY}/${RERANK_REPO}:latest-${ARCH}" reranker
+      - docker push "${REGISTRY}/${RERANK_REPO}:latest-${ARCH}"
+  post_build:
+    commands:
+      - echo "pushed ${ORCH_REPO}:latest-${ARCH} and ${RERANK_REPO}:latest-${ARCH}"

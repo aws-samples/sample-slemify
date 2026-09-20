@@ -1,10 +1,11 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 #
-# CodeBuild job that provisions one workshop account: terraform apply for the
-# cluster, then seed.sh for everything on it. Started by the CloudFormation
-# stack in cfn/team-core.yaml, which clones this repository at a tag as the
-# build source.
+# CodeBuild job that provisions one workshop account: start the image builds,
+# terraform apply for the cluster, join the images into multi-arch manifests,
+# then seed.sh for everything on the cluster. Started by the CloudFormation
+# stack in the workshop content repository, which clones this repository at a
+# tag as the build source.
 #
 # Environment variables set by CloudFormation:
 #   CFN_RESPONSE_URL       WaitCondition handle to signal when done (optional)
@@ -14,7 +15,10 @@
 #   EKS_CLUSTER_NAME, EKS_CLUSTER_VERSION, BEDROCK_REGION
 #   PARTICIPANT_ROLE_ARN   WSParticipantRole ARN, or NONE outside Workshop Studio
 #   IDE_ROLE_ARN           IDE instance role ARN, or NONE
-#   DEMO_IMAGE, RERANKER_IMAGE  pre-built images for the seed step (optional)
+#   OPS_ROLE_ARN           WSOpsRole ARN (operator access to the cluster), or NONE
+#   IMAGE_BUILD_AMD64, IMAGE_BUILD_ARM64   CodeBuild projects that build the demo
+#                          images (buildspec-images.yaml); empty to skip and use
+#                          DEMO_IMAGE / RERANKER_IMAGE as given
 
 version: 0.2
 
@@ -22,7 +26,10 @@ env:
   variables:
     TERRAFORM_VERSION: "1.16.3"
     KUBECTL_VERSION: "v1.36.4"
+    CRANE_VERSION: "v0.22.1"
     INFRA_DIR: "examples/k8s-autoscaling/workshop/infrastructure"
+    ORCH_REPO: "slemify/k8s-autoscaling-orchestrator"
+    RERANK_REPO: "slemify/k8s-autoscaling-reranker"
 
 phases:
   install:
@@ -31,12 +38,23 @@ phases:
       - curl -fsSL -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
       - unzip -q -o /tmp/terraform.zip -d /usr/local/bin && rm /tmp/terraform.zip
       - terraform version
-      - echo "Installing kubectl and helm for the seed step"
+      - echo "Installing kubectl, helm, and crane for the seed step"
       - curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl
       - curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      - curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin crane
       - pip3 install --quiet opensearch-py httpx gitpython requests beautifulsoup4 boto3
   pre_build:
     commands:
+      # Kick off the image builds first; they run while Terraform builds the cluster.
+      - |
+        if [ -z "${DEMO_IMAGE:-}" ] && [ -n "${IMAGE_BUILD_AMD64:-}" ] && [ -n "${IMAGE_BUILD_ARM64:-}" ]; then
+          AMD_ID=$(aws codebuild start-build --project-name "${IMAGE_BUILD_AMD64}" --query 'build.id' --output text)
+          ARM_ID=$(aws codebuild start-build --project-name "${IMAGE_BUILD_ARM64}" --query 'build.id' --output text)
+          echo "image builds started: ${AMD_ID} ${ARM_ID}"
+          echo "${AMD_ID} ${ARM_ID}" > /tmp/image-builds
+        else
+          echo "IMAGE_BUILD_* not set; using DEMO_IMAGE=${DEMO_IMAGE:-<unset>} RERANKER_IMAGE=${RERANKER_IMAGE:-<unset>}"
+        fi
       - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/terraform"
       - |
         cat > backend.tf <<EOF
@@ -57,6 +75,7 @@ phases:
       - export TF_VAR_bedrock_region="${BEDROCK_REGION:-${AWS_REGION}}"
       - '[ "${PARTICIPANT_ROLE_ARN:-NONE}" != "NONE" ] && export TF_VAR_participant_role_arn="${PARTICIPANT_ROLE_ARN}" || true'
       - '[ "${IDE_ROLE_ARN:-NONE}" != "NONE" ] && export TF_VAR_ide_role_arn="${IDE_ROLE_ARN}" || true'
+      - '[ "${OPS_ROLE_ARN:-NONE}" != "NONE" ] && export TF_VAR_ops_role_arn="${OPS_ROLE_ARN}" || true'
       - terraform init -input=false
   build:
     commands:
@@ -74,8 +93,35 @@ phases:
           sleep 30
           counter=$((counter + 1))
         done
+      # Join the two architecture tags into one multi-arch manifest per image.
+      - |
+        if [ -f /tmp/image-builds ]; then
+          read -r AMD_ID ARM_ID < /tmp/image-builds
+          echo "Waiting for the image builds"
+          while true; do
+            STATUSES=$(aws codebuild batch-get-builds --ids "${AMD_ID}" "${ARM_ID}" --query 'builds[].buildStatus' --output text)
+            echo "  $(date +%H:%M:%S) ${STATUSES}"
+            case "${STATUSES}" in
+              *IN_PROGRESS*) sleep 20 ;;
+              "SUCCEEDED	SUCCEEDED") break ;;
+              *) echo "image build failed: ${STATUSES}"; exit 1 ;;
+            esac
+          done
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY="${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          aws ecr get-login-password | crane auth login --username AWS --password-stdin "${REGISTRY}"
+          for repo in "${ORCH_REPO}" "${RERANK_REPO}"; do
+            crane index append -t "${REGISTRY}/${repo}:latest" \
+              -m "${REGISTRY}/${repo}:latest-amd64" -m "${REGISTRY}/${repo}:latest-arm64"
+          done
+          export DEMO_IMAGE="${REGISTRY}/${ORCH_REPO}:latest"
+          export RERANKER_IMAGE="${REGISTRY}/${RERANK_REPO}:latest"
+          echo "images: ${DEMO_IMAGE} ${RERANKER_IMAGE}"
+          echo "export DEMO_IMAGE=${DEMO_IMAGE} RERANKER_IMAGE=${RERANKER_IMAGE}" > /tmp/images.env
+        fi
       - echo "Seeding the cluster"
       - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}"
+      - '[ -f /tmp/images.env ] && . /tmp/images.env || true'
       - bash seed/seed.sh
   post_build:
     commands:

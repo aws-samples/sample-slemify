@@ -53,3 +53,9 @@ variable "ide_role_arn" {
   type        = string
   default     = ""
 }
+
+variable "ops_role_arn" {
+  description = "ARN of the Workshop Studio operator role (WSOpsRole), so the event operator can inspect the cluster. Empty outside Workshop Studio."
+  type        = string
+  default     = ""
+}
