@@ -12,7 +12,7 @@
 #   TF_STATE_BUCKET        S3 bucket for terraform state
 #   STACK_NAME             CloudFormation stack name (state key prefix)
 #   AWS_REGION             set by CodeBuild
-#   EKS_CLUSTER_NAME, EKS_CLUSTER_VERSION, BEDROCK_REGION
+#   EKS_CLUSTER_NAME, EKS_CLUSTER_VERSION, BEDROCK_REGION, LLM_MODEL
 #   PARTICIPANT_ROLE_ARN   WSParticipantRole ARN, or NONE outside Workshop Studio
 #   IDE_ROLE_ARN           IDE instance role ARN, or NONE
 #   OPS_ROLE_ARN           WSOpsRole ARN (operator access to the cluster), or NONE

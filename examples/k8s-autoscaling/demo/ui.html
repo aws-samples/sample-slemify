@@ -262,7 +262,7 @@ async function send(){
 
   let usedLLM=false;
   const auto = document.getElementById('autopilot');
-  const resp=await fetch('/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text, autopilot: !!(auto && auto.checked)})});
+  const resp=await fetch('query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text, autopilot: !!(auto && auto.checked)})});
   const reader=resp.body.getReader(); const dec=new TextDecoder();
   let responseDiv=null, rawText='', buffer='';
 
@@ -322,7 +322,7 @@ function addProposal(msg){
 
 async function applyFix(kind, target, field, value, btn){
   btn.disabled=true; btn.textContent='Applying\u2026';
-  const resp=await fetch('/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,target,field,value})});
+  const resp=await fetch('apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,target,field,value})});
   const reader=resp.body.getReader(); const dec=new TextDecoder(); let buffer='';
   while(true){
     const {done,value}=await reader.read(); if(done) break;
@@ -343,7 +343,7 @@ async function applyFix(kind, target, field, value, btn){
   btn.textContent='Applied';
 }
 
-fetch('/config').then(r=>r.json()).then(c=>{
+fetch('config').then(r=>r.json()).then(c=>{
   if(c && c.apply_enabled){ const w=document.getElementById('autopilotWrap'); if(w) w.style.display=''; }
 }).catch(()=>{});
 
