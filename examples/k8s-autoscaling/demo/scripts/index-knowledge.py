@@ -27,8 +27,11 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 
 import boto3
+from botocore.config import Config
+from botocore.exceptions import ClientError
 import httpx
 from git import Repo
 from opensearchpy import OpenSearch
@@ -215,18 +218,50 @@ def fetch_blogs() -> list[dict]:
 
 # --- Embedding and indexing ---
 
+# Bedrock error codes worth retrying on a long sequential run. Throttling and
+# 5xx-class codes are retried by botocore's adaptive mode already;
+# ModelErrorException ("unexpected error during processing") is not, and one of
+# it in ~4,400 calls is common enough to have failed a provisioning run.
+_RETRYABLE = {"ModelErrorException", "ThrottlingException", "ServiceUnavailableException",
+              "InternalServerException", "ModelTimeoutException", "ModelNotReadyException"}
+_br_client = None
+
+
+def _bedrock_client():
+    """One client for the whole run, with adaptive retries for the codes
+    botocore knows how to retry."""
+    global _br_client
+    if _br_client is None:
+        _br_client = boto3.client(
+            "bedrock-runtime",
+            config=Config(retries={"max_attempts": 8, "mode": "adaptive"}, read_timeout=60))
+    return _br_client
+
+
 def embed_texts(texts: list[str]) -> list[list[float]]:
     """Generate embeddings with the selected embedder."""
     truncated = [t[:8000] for t in texts]
     if EMBEDDER == "bedrock":
-        # Titan embeds one text per call.
-        br = boto3.client("bedrock-runtime")
+        # Titan embeds one text per call. A full index is ~4,400 sequential
+        # calls, so a transient server-side error (ModelErrorException, which
+        # botocore does not retry) must not abort the run: retry with backoff.
+        br = _bedrock_client()
         out = []
         for t in truncated:
-            resp = br.invoke_model(
-                modelId=BEDROCK_EMBED_MODEL,
-                body=json.dumps({"inputText": t, "dimensions": BEDROCK_EMBED_DIM, "normalize": True}),
-                contentType="application/json", accept="application/json")
+            body = json.dumps({"inputText": t, "dimensions": BEDROCK_EMBED_DIM, "normalize": True})
+            for attempt in range(6):
+                try:
+                    resp = br.invoke_model(
+                        modelId=BEDROCK_EMBED_MODEL, body=body,
+                        contentType="application/json", accept="application/json")
+                    break
+                except ClientError as e:
+                    code = e.response.get("Error", {}).get("Code", "")
+                    if code not in _RETRYABLE or attempt == 5:
+                        raise
+                    wait = min(2 ** attempt, 20)
+                    print(f"    Bedrock {code}; retrying in {wait}s (attempt {attempt + 1}/6)")
+                    time.sleep(wait)
             out.append(json.loads(resp["body"].read())["embedding"])
         return out
     # TEI accepts a batch of inputs and returns one embedding per input.
