@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -148,6 +149,20 @@ func ensureIAMRole(ctx context.Context, client *iam.Client, roleName, bucket str
 				"Resource": []string{"*"},
 			},
 			{
+				// Marketplace-listed models (Anthropic among them) are only
+				// invocable once the account is subscribed to the model, and
+				// Bedrock completes that subscription on the calling principal's
+				// behalf. Without these two actions the first call succeeds and
+				// every later one is denied with "not authorized to perform the
+				// required AWS Marketplace actions".
+				"Effect": "Allow",
+				"Action": []string{
+					"aws-marketplace:ViewSubscriptions",
+					"aws-marketplace:Subscribe",
+				},
+				"Resource": []string{"*"},
+			},
+			{
 				"Effect": "Allow",
 				"Action": []string{
 					"servicequotas:ListServiceQuotas",
@@ -203,7 +218,7 @@ func ensurePodIdentityAssociation(ctx context.Context, client *eks.Client, clust
 		return nil
 	}
 
-	_, err = client.CreatePodIdentityAssociation(ctx, &eks.CreatePodIdentityAssociationInput{
+	created, err := client.CreatePodIdentityAssociation(ctx, &eks.CreatePodIdentityAssociationInput{
 		ClusterName:    aws.String(clusterName),
 		Namespace:      aws.String(namespace),
 		ServiceAccount: aws.String(saName),
@@ -219,7 +234,44 @@ func ensurePodIdentityAssociation(ctx context.Context, client *eks.Client, clust
 		return fmt.Errorf("creating pod identity association: %w", err)
 	}
 
+	// A brand-new association is not immediately usable: the Pod Identity
+	// agent on the node learns about it asynchronously, and a Job submitted
+	// in the same second starts with no credentials (NoCredentialsError in the
+	// data pipeline; the project's first deploy failed, the retry passed).
+	// Wait until the control plane reports the association, then give the
+	// agent a moment before the first pod asks for credentials.
+	if created.Association != nil && created.Association.AssociationId != nil {
+		waitForPodIdentityAssociation(ctx, client, clusterName, aws.ToString(created.Association.AssociationId))
+	}
 	return nil
+}
+
+// podIdentitySettle is how long to wait after the association is visible.
+// Overridable for tests.
+var podIdentitySettle = 15 * time.Second
+
+func waitForPodIdentityAssociation(ctx context.Context, client *eks.Client, clusterName, associationID string) {
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		out, err := client.DescribePodIdentityAssociation(ctx, &eks.DescribePodIdentityAssociationInput{
+			ClusterName:   aws.String(clusterName),
+			AssociationId: aws.String(associationID),
+		})
+		if err == nil && out.Association != nil && out.Association.AssociationArn != nil {
+			fmt.Printf("  Pod Identity: association ready, waiting %s for the node agent\n", podIdentitySettle)
+			select {
+			case <-ctx.Done():
+			case <-time.After(podIdentitySettle):
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
+		}
+	}
+	fmt.Println("  Pod Identity: association not visible after 2m; continuing")
 }
 
 // DetectClusterName extracts the EKS cluster name from the current kubeconfig context.
