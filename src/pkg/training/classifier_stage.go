@@ -82,8 +82,17 @@ func ClassifierJobManifest(cfg *config.ExpertConfig, ns string, pc *pipeline.Pip
 	// through the encoder via the HF Trainer (model + optimizer state +
 	// gradients), which needs materially more memory.
 	trainMem := "6Gi"
+	// Head-only tasks finish in seconds; a small request schedules anywhere.
+	// The contrastive fine-tune is compute-bound and torch parallelizes across
+	// every core the node gives it (no CPU limit is set), so the request asks
+	// for a large node up front: measured on the same pairs, ~10 minutes on a
+	// node with 16 vCPU against ~3.5 on one with 32. The request is what makes
+	// the scheduler reserve those cores — or preempt a lower-priority
+	// pre-warming pod holding a warm node, when one exists.
+	trainCPU := "2"
 	if cfg.Project.IsEmbedding() {
 		trainMem = "12Gi"
+		trainCPU = "24"
 	}
 
 	return &batchv1.Job{
@@ -142,7 +151,7 @@ func ClassifierJobManifest(cfg *config.ExpertConfig, ns string, pc *pipeline.Pip
 									// Embedding + ONNX export load torch and the
 									// encoder into memory; size accordingly.
 									corev1.ResourceMemory: resource.MustParse(trainMem),
-									corev1.ResourceCPU:    resource.MustParse("2"),
+									corev1.ResourceCPU:    resource.MustParse(trainCPU),
 								},
 								Limits: corev1.ResourceList{
 									corev1.ResourceMemory: resource.MustParse(trainMem),

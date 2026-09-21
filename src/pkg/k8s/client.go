@@ -161,8 +161,16 @@ func (c *Client) SubmitJob(ctx context.Context, job *batchv1.Job) (string, error
 		job.Namespace = c.namespace
 	}
 
-	// Clean up existing Job if present (from a previous failed run)
+	// A job of the same name may already exist. If it is still running, attach
+	// to it instead of replacing it: a deploy that returns while a --no-wait
+	// training is mid-flight must wait for that run, not kill and restart it.
+	// A finished or failed job is replaced (re-running a stage explicitly, or
+	// retrying a failure, means a fresh run).
 	existing, err := c.clientset.BatchV1().Jobs(job.Namespace).Get(ctx, job.Name, metav1.GetOptions{})
+	if err == nil && existing != nil && existing.Status.Active > 0 && existing.Status.Failed == 0 {
+		fmt.Printf("  Job %s is already running; attaching to it\n", job.Name)
+		return existing.Name, nil
+	}
 	if err == nil && existing != nil {
 		propagation := metav1.DeletePropagationBackground
 		_ = c.clientset.BatchV1().Jobs(job.Namespace).Delete(ctx, job.Name, metav1.DeleteOptions{
