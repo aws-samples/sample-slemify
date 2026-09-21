@@ -2,9 +2,14 @@
 # SPDX-License-Identifier: MIT-0
 #
 # A pause pod that tolerates the SLM taint and requests enough CPU to force one
-# SLM node online before the lab starts, so module 1 does not pay a node
-# provision. Sized to land on a medium-or-larger node; it holds the node warm
-# and is deleted once the first real SLM workload schedules.
+# large SLM node online before the seed's model work runs, so module 1 does not
+# pay a node provision. The request is deliberately high (30 CPU): it lands the
+# node on a 9th-gen c/m/r instance of 8xlarge class (32 vCPU), which is where
+# the seed then runs the retriever training and the tuned-index build. On the
+# 4-vCPU node a smaller request produced, those two steps took ~22 minutes
+# combined; on a 32-vCPU node they finish in about a third of that. The pod
+# holds the node warm and is deleted once the first real SLM workload schedules.
+# CPU is only requested, not limited, so the pause container itself sits idle.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -41,7 +46,7 @@ spec:
           image: registry.k8s.io/pause:3.10
           resources:
             requests:
-              cpu: "1"
+              cpu: "30"
               memory: 512Mi
             limits:
               memory: 512Mi

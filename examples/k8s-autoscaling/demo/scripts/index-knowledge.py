@@ -28,6 +28,7 @@ import shutil
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import boto3
 from botocore.config import Config
@@ -49,6 +50,10 @@ EMBEDDING_DIM = 768
 # cosine, like the tuned encoder. Dimension must match agent/config.py.
 BEDROCK_EMBED_MODEL = os.environ.get("BEDROCK_EMBED_MODEL", "amazon.titan-embed-text-v2:0")
 BEDROCK_EMBED_DIM = int(os.environ.get("BEDROCK_EMBED_DIM", "1024"))
+# Concurrent Titan embedding calls. The account's Bedrock embedding TPS is well
+# above this; 16 keeps the full index under two minutes without tripping the
+# throttling the per-call retry then absorbs.
+BEDROCK_EMBED_CONCURRENCY = int(os.environ.get("BEDROCK_EMBED_CONCURRENCY", "16"))
 # Set from --embedder in main(); index name and dimension follow it.
 EMBEDDER = "slemify"
 CHUNK_SIZE = 2000  # chars (~500 tokens)
@@ -242,33 +247,36 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     """Generate embeddings with the selected embedder."""
     truncated = [t[:8000] for t in texts]
     if EMBEDDER == "bedrock":
-        # Titan embeds one text per call. A full index is ~4,400 sequential
-        # calls, so a transient server-side error (ModelErrorException, which
-        # botocore does not retry) must not abort the run: retry with backoff.
+        # Titan embeds one text per call. A full index is ~4,400 calls; running
+        # them one at a time is the slowest part of the seed, so embed the batch
+        # concurrently. Each call still retries transient server-side errors
+        # (ModelErrorException, which botocore does not retry) with backoff.
         br = _bedrock_client()
-        out = []
-        for t in truncated:
-            body = json.dumps({"inputText": t, "dimensions": BEDROCK_EMBED_DIM, "normalize": True})
-            for attempt in range(6):
-                try:
-                    resp = br.invoke_model(
-                        modelId=BEDROCK_EMBED_MODEL, body=body,
-                        contentType="application/json", accept="application/json")
-                    break
-                except ClientError as e:
-                    code = e.response.get("Error", {}).get("Code", "")
-                    if code not in _RETRYABLE or attempt == 5:
-                        raise
-                    wait = min(2 ** attempt, 20)
-                    print(f"    Bedrock {code}; retrying in {wait}s (attempt {attempt + 1}/6)")
-                    time.sleep(wait)
-            out.append(json.loads(resp["body"].read())["embedding"])
-        return out
+        with ThreadPoolExecutor(max_workers=BEDROCK_EMBED_CONCURRENCY) as pool:
+            return list(pool.map(lambda t: _bedrock_embed_one(br, t), truncated))
     # TEI accepts a batch of inputs and returns one embedding per input.
     with httpx.Client(timeout=60) as client:
         resp = client.post(f"{EMBEDDING_URL}/embed", json={"inputs": truncated})
         resp.raise_for_status()
         return resp.json()
+
+
+def _bedrock_embed_one(br, text: str) -> list[float]:
+    """One Titan embedding call, retrying transient server-side errors."""
+    body = json.dumps({"inputText": text, "dimensions": BEDROCK_EMBED_DIM, "normalize": True})
+    for attempt in range(6):
+        try:
+            resp = br.invoke_model(
+                modelId=BEDROCK_EMBED_MODEL, body=body,
+                contentType="application/json", accept="application/json")
+            return json.loads(resp["body"].read())["embedding"]
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code not in _RETRYABLE or attempt == 5:
+                raise
+            wait = min(2 ** attempt, 20)
+            print(f"    Bedrock {code}; retrying in {wait}s (attempt {attempt + 1}/6)")
+            time.sleep(wait)
 
 
 def export_corpus_to_s3(chunks: list[dict], bucket: str, key: str) -> int:
@@ -297,8 +305,9 @@ def index_chunks(client: OpenSearch, chunks: list[dict]) -> int:
     print(f"  Embedding and indexing {len(chunks)} chunks...")
     indexed = 0
 
-    for i in range(0, len(chunks), 10):
-        batch = chunks[i:i + 10]
+    batch_size = BEDROCK_EMBED_CONCURRENCY if EMBEDDER == "bedrock" else 10
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i:i + batch_size]
         embeddings = embed_texts([c["text"] for c in batch])
 
         for chunk, embedding in zip(batch, embeddings):

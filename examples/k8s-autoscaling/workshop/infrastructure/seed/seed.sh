@@ -93,6 +93,31 @@ else
 fi
 kubectl rollout status statefulset/opensearch-cluster-master -n "${NAMESPACE}" --timeout=300s
 
+# --- Slemify config, and the example data both the index and the projects need ---
+# Module 1 says the triage data stage already ran (attendees start at training).
+# Module 2 says the retriever's data and training ran and that make recall scores
+# the tuned index, which can only be built with the trained encoder serving, so
+# the retriever is deployed end to end here. Slemify reads the bucket and model
+# from these two variables instead of the values in the shipped expert.yaml files.
+EXAMPLE_DIR="$(cd "${INFRA_DIR}/../.." && pwd)"
+export SLEMIFY_BUCKET="${MODEL_BUCKET}"
+export SLEMIFY_BEDROCK_MODEL="${LLM_MODEL}"
+export AWS_REGION="${REGION}"
+
+log "Uploading the example data to s3://${MODEL_BUCKET}/k8s-autoscaling/data/"
+AWS_DEFAULT_REGION="${REGION}" bash "${EXAMPLE_DIR}/upload-to-s3.sh" "${MODEL_BUCKET}"
+
+# The triage data stage is a Bedrock-only Job with no dependency on the Titan
+# index below, so start it now and let it run while the index builds. Its
+# output is waited on before the retriever (which shares the SLM node).
+TRIAGE_DATA_PID=""
+if command -v slemify >/dev/null 2>&1; then
+  log "Triage: starting the data stage in the background (Bedrock writes the training examples)"
+  ( cd "${EXAMPLE_DIR}" && slemify deploy --config triage/expert.yaml --until data ) \
+    > /tmp/triage-data.log 2>&1 &
+  TRIAGE_DATA_PID=$!
+fi
+
 # --- Knowledge base: the Bedrock (Titan) index the monolith reads ---
 log "Building the Bedrock knowledge index (Titan v2, 1024d)"
 BEDROCK_INDEX_NAME="${BEDROCK_INDEX_NAME:-k8s-autoscaling-knowledge-bedrock}"
@@ -125,23 +150,18 @@ else
 fi
 
 # --- Slemify projects: the state the module pages start from ---
-# Module 1 says the triage data stage already ran (attendees start at
-# training). Module 2 says the retriever's data and training ran and that
-# `make recall` scores the tuned index, which can only be built with the
-# trained encoder serving, so the retriever is deployed end to end here.
-# Slemify reads the bucket and model from these two variables instead of the
-# values in the shipped expert.yaml files.
-EXAMPLE_DIR="$(cd "${INFRA_DIR}/../.." && pwd)"
-export SLEMIFY_BUCKET="${MODEL_BUCKET}"
-export SLEMIFY_BEDROCK_MODEL="${LLM_MODEL}"
-export AWS_REGION="${REGION}"
-
-log "Uploading the example data to s3://${MODEL_BUCKET}/k8s-autoscaling/data/"
-AWS_DEFAULT_REGION="${REGION}" bash "${EXAMPLE_DIR}/upload-to-s3.sh" "${MODEL_BUCKET}"
-
 if command -v slemify >/dev/null 2>&1; then
-  log "Triage: running the data stage (Bedrock writes the training examples)"
-  (cd "${EXAMPLE_DIR}" && slemify deploy --config triage/expert.yaml --until data)
+  # Join the triage data stage that started before the index build.
+  if [[ -n "${TRIAGE_DATA_PID}" ]]; then
+    log "Triage: waiting for the background data stage"
+    if wait "${TRIAGE_DATA_PID}"; then
+      tail -n 4 /tmp/triage-data.log || true
+    else
+      echo "ERROR: triage data stage failed" >&2
+      cat /tmp/triage-data.log >&2
+      exit 1
+    fi
+  fi
 
   log "Retriever: data, training, and serving"
   (cd "${EXAMPLE_DIR}" && slemify deploy --config retriever/expert.yaml)
