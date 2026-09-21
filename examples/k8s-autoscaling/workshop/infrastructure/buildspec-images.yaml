@@ -1,12 +1,18 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 #
-# Build the demo images for one architecture and push them to the account's
-# ECR tagged latest-<arch>. The CloudFormation stack defines two CodeBuild
-# projects on this buildspec, one x86_64 and one arm64; the provisioning job
-# starts both, runs Terraform while they build, then joins the two tags into a
-# multi-arch manifest before the seed. Native builds on each architecture; no
-# emulation.
+# Build every image the workshop needs for one architecture and push them to
+# the account's ECR tagged latest-<arch>: the two demo images (orchestrator,
+# re-ranker) and the four Slemify pipeline images (data-pipeline,
+# classifier-trainer, classifier-serving, gguf-convert). slemify deploy
+# auto-detects the account's ECR as its registry, so the pipeline images have
+# to be there before an attendee's first deploy. The llama.cpp server image
+# comes from ghcr.io and is not built.
+#
+# The CloudFormation stack defines two CodeBuild projects on this buildspec,
+# one x86_64 and one arm64; the provisioning job starts both, runs Terraform
+# while they build, then joins the two tags into a multi-arch manifest before
+# the seed. Native builds on each architecture; no emulation.
 #
 # Environment variables set by CloudFormation:
 #   ARCH   amd64 or arm64 (the tag suffix)
@@ -16,8 +22,10 @@ version: 0.2
 env:
   variables:
     DEMO_DIR: "examples/k8s-autoscaling/demo"
-    ORCH_REPO: "slemify/k8s-autoscaling-orchestrator"
-    RERANK_REPO: "slemify/k8s-autoscaling-reranker"
+    SLEMIFY_SRC: "src"
+    # name=context, relative to the directory named in the comment above each group
+    DEMO_IMAGES: "k8s-autoscaling-orchestrator=. k8s-autoscaling-reranker=reranker"
+    SLEMIFY_IMAGES: "data-pipeline=containers/data-pipeline classifier-trainer=containers/classifier-trainer classifier-serving=containers/classifier-serving gguf-convert=containers/gguf-convert"
 
 phases:
   pre_build:
@@ -27,7 +35,8 @@ phases:
       - echo "Building ${ARCH} images for ${REGISTRY}"
       # Both architecture builds race to create the repositories; either may win.
       - |
-        for repo in "${ORCH_REPO}" "${RERANK_REPO}"; do
+        for spec in ${DEMO_IMAGES} ${SLEMIFY_IMAGES}; do
+          repo="slemify/${spec%%=*}"
           aws ecr describe-repositories --repository-names "${repo}" >/dev/null 2>&1 || \
             aws ecr create-repository --repository-name "${repo}" \
               --image-scanning-configuration scanOnPush=true >/dev/null 2>&1 || true
@@ -35,11 +44,19 @@ phases:
       - aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY}"
   build:
     commands:
-      - cd "${CODEBUILD_SRC_DIR}/${DEMO_DIR}"
-      - docker build -t "${REGISTRY}/${ORCH_REPO}:latest-${ARCH}" .
-      - docker push "${REGISTRY}/${ORCH_REPO}:latest-${ARCH}"
-      - docker build -t "${REGISTRY}/${RERANK_REPO}:latest-${ARCH}" reranker
-      - docker push "${REGISTRY}/${RERANK_REPO}:latest-${ARCH}"
+      - |
+        build_group() {  # base_dir "name=ctx name=ctx ..."
+          cd "${CODEBUILD_SRC_DIR}/$1"
+          for spec in $2; do
+            name="${spec%%=*}"; ctx="${spec#*=}"
+            img="${REGISTRY}/slemify/${name}:latest-${ARCH}"
+            echo "=== ${name} (${ARCH}) ==="
+            docker build -t "${img}" "${ctx}"
+            docker push "${img}"
+          done
+        }
+        build_group "${DEMO_DIR}" "${DEMO_IMAGES}"
+        build_group "${SLEMIFY_SRC}" "${SLEMIFY_IMAGES}"
   post_build:
     commands:
-      - echo "pushed ${ORCH_REPO}:latest-${ARCH} and ${RERANK_REPO}:latest-${ARCH}"
+      - echo "pushed latest-${ARCH} for ${DEMO_IMAGES} ${SLEMIFY_IMAGES}"

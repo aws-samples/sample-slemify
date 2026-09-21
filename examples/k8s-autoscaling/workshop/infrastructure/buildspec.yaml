@@ -19,6 +19,10 @@
 #   IMAGE_BUILD_AMD64, IMAGE_BUILD_ARM64   CodeBuild projects that build the demo
 #                          images (buildspec-images.yaml); empty to skip and use
 #                          DEMO_IMAGE / RERANKER_IMAGE as given
+#   GGUF_BUILD             CodeBuild project that converts the analyst model to
+#                          GGUF (buildspec-gguf.yaml); empty to skip
+#   SLEMIFY_VERSION        Slemify release the seed runs (without the v); empty
+#                          skips the Slemify projects in the seed
 
 version: 0.2
 
@@ -30,6 +34,8 @@ env:
     INFRA_DIR: "examples/k8s-autoscaling/workshop/infrastructure"
     ORCH_REPO: "slemify/k8s-autoscaling-orchestrator"
     RERANK_REPO: "slemify/k8s-autoscaling-reranker"
+    # Every repository buildspec-images.yaml pushes; each gets a multi-arch manifest.
+    IMAGE_REPOS: "slemify/k8s-autoscaling-orchestrator slemify/k8s-autoscaling-reranker slemify/data-pipeline slemify/classifier-trainer slemify/classifier-serving slemify/gguf-convert"
 
 phases:
   install:
@@ -43,6 +49,14 @@ phases:
       - curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
       - curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin crane
       - pip3 install --quiet opensearch-py httpx gitpython requests beautifulsoup4 boto3
+      # The seed runs slemify itself (triage data stage, retriever) so the lab
+      # starts where the pages say it does. Same release the IDE installs.
+      - |
+        if [ -n "${SLEMIFY_VERSION:-}" ]; then
+          curl -fsSL -o /tmp/slemify.tgz "https://github.com/aws-samples/sample-slemify/releases/download/v${SLEMIFY_VERSION}/slemify_${SLEMIFY_VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/slemify.tgz -C /tmp slemify && install -m 0755 /tmp/slemify /usr/local/bin/slemify && rm -f /tmp/slemify /tmp/slemify.tgz
+          slemify --help >/dev/null
+        fi
   pre_build:
     commands:
       # Kick off the image builds first; they run while Terraform builds the cluster.
@@ -110,7 +124,7 @@ phases:
           ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
           REGISTRY="${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
           aws ecr get-login-password | crane auth login --username AWS --password-stdin "${REGISTRY}"
-          for repo in "${ORCH_REPO}" "${RERANK_REPO}"; do
+          for repo in ${IMAGE_REPOS}; do
             crane index append -t "${REGISTRY}/${repo}:latest" \
               -m "${REGISTRY}/${repo}:latest-amd64" -m "${REGISTRY}/${repo}:latest-arm64"
           done
@@ -119,10 +133,36 @@ phases:
           echo "images: ${DEMO_IMAGE} ${RERANKER_IMAGE}"
           echo "export DEMO_IMAGE=${DEMO_IMAGE} RERANKER_IMAGE=${RERANKER_IMAGE}" > /tmp/images.env
         fi
+      # Convert the analyst's base model to GGUF in CodeBuild (buildspec-gguf.yaml)
+      # while the seed runs. It needs the gguf-convert image, so it starts after
+      # the manifests are joined. About 14 minutes; the seed takes about 10.
+      - |
+        if [ -n "${GGUF_BUILD:-}" ] && [ -f /tmp/image-builds ]; then
+          MODEL_BUCKET=$(cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/terraform" && terraform output -raw model_bucket)
+          GGUF_ID=$(aws codebuild start-build --project-name "${GGUF_BUILD}" \
+            --environment-variables-override name=MODEL_BUCKET,value="${MODEL_BUCKET}",type=PLAINTEXT \
+            --query 'build.id' --output text)
+          echo "gguf build started: ${GGUF_ID}"
+          echo "${GGUF_ID}" > /tmp/gguf-build
+        fi
       - echo "Seeding the cluster"
       - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}"
       - '[ -f /tmp/images.env ] && . /tmp/images.env || true'
       - bash seed/seed.sh
+      - |
+        if [ -f /tmp/gguf-build ]; then
+          GGUF_ID=$(cat /tmp/gguf-build)
+          echo "Waiting for the gguf build ${GGUF_ID}"
+          while true; do
+            STATUS=$(aws codebuild batch-get-builds --ids "${GGUF_ID}" --query 'builds[0].buildStatus' --output text)
+            echo "  $(date +%H:%M:%S) ${STATUS}"
+            case "${STATUS}" in
+              IN_PROGRESS) sleep 30 ;;
+              SUCCEEDED) break ;;
+              *) echo "gguf build failed: ${STATUS}"; exit 1 ;;
+            esac
+          done
+        fi
   post_build:
     commands:
       - echo "build status ${CODEBUILD_BUILD_SUCCEEDING}"

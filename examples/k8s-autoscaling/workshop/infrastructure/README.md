@@ -10,10 +10,14 @@ live in the content repository, not here.
 
 ```
 infrastructure/
-  buildspec.yaml         terraform apply (VPC, cluster, rest), then seed, then signal CloudFormation
+  buildspec.yaml         start image builds, terraform apply, join multi-arch manifests, start the GGUF
+                         conversion, seed, wait for the conversion, signal CloudFormation
+  buildspec-images.yaml  build the six images for one architecture and push to the account's ECR
+  buildspec-gguf.yaml    convert the analyst base model to GGUF on the 2XLARGE fleet, upload to the bucket
   terraform/             VPC, EKS Auto Mode cluster, addons, model bucket, IAM
   seed/
-    seed.sh              NodePools, pre-warm, OpenSearch, Titan index, demo in monolith mode, smoke query
+    seed.sh              NodePools, pre-warm, OpenSearch, Titan index, example data, triage data stage,
+                         retriever (all stages), tuned index, demo in monolith mode, smoke query
     smoke.sh             One query; asserts the cost and total events
     slm-nodepools.yaml   The three weighted Slemify SLM NodePools (Auto Mode)
     prewarm.yaml         Pause pod that brings one SLM node online early
@@ -47,9 +51,29 @@ demo in monolith mode (`TRIAGE=off EMBED=bedrock RERANK=off ANALYST=llm
 GATE=off`) with the Bedrock region and model set, and runs one smoke query so
 the first attendee query is not the first query.
 
+Between the Titan index and the demo it puts the Slemify projects where the
+module pages start: uploads `data/` to the model bucket, runs the triage
+project's data stage only (`slemify deploy --until data`, so attendees run
+training in module 1), deploys the retriever end to end, and builds the tuned
+knowledge index against the served encoder (`make recall` in module 2 scores
+both indexes). This part needs the `slemify` binary; `buildspec.yaml`
+installs the release named by `SLEMIFY_VERSION`, and the seed skips it when
+the binary is missing. Slemify reads `SLEMIFY_BUCKET` and
+`SLEMIFY_BEDROCK_MODEL` from the environment in place of the bucket and model
+in the shipped `expert.yaml` files; the IDE sets the same two variables.
+
 Images: the seed expects `slemify/k8s-autoscaling-orchestrator` and
 `slemify/k8s-autoscaling-reranker` in the account's ECR unless `DEMO_IMAGE`
-and `RERANKER_IMAGE` point elsewhere.
+and `RERANKER_IMAGE` point elsewhere. The images are built in the account
+because vended accounts have no registry of their own and a shared one would
+need a cross-account grant per account.
+
+GGUF: the analyst's base model (a 30B mixture-of-experts) needs about 140 GB
+of scratch disk to convert, and Auto Mode's default NodeClass gives nodes an
+80 GiB volume, so the in-cluster convert Job is evicted every time. The
+conversion runs in CodeBuild instead (`buildspec-gguf.yaml`, 14 minutes on
+`BUILD_GENERAL1_2XLARGE`) and `slemify deploy` skips the convert when the
+file is already in the bucket.
 
 ## Running it by hand
 

@@ -39,6 +39,21 @@ data "aws_iam_policy_document" "orchestrator_bedrock" {
       "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/*",
     ]
   }
+
+  # Anthropic models on Bedrock are Marketplace-backed. The first InvokeModel
+  # from a principal that cannot view or subscribe to the Marketplace offering
+  # is denied, even when the account already has the model enabled. Verified on
+  # a vended account: the ops role (with these actions) succeeded while the pod
+  # role (without them) got AccessDenied on the same model.
+  statement {
+    sid    = "BedrockMarketplaceSubscription"
+    effect = "Allow"
+    actions = [
+      "aws-marketplace:ViewSubscriptions",
+      "aws-marketplace:Subscribe",
+    ]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "orchestrator_bedrock" {

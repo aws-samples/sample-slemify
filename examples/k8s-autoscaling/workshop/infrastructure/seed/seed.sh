@@ -124,6 +124,52 @@ else
   trap - EXIT
 fi
 
+# --- Slemify projects: the state the module pages start from ---
+# Module 1 says the triage data stage already ran (attendees start at
+# training). Module 2 says the retriever's data and training ran and that
+# `make recall` scores the tuned index, which can only be built with the
+# trained encoder serving, so the retriever is deployed end to end here.
+# Slemify reads the bucket and model from these two variables instead of the
+# values in the shipped expert.yaml files.
+EXAMPLE_DIR="$(cd "${INFRA_DIR}/../.." && pwd)"
+export SLEMIFY_BUCKET="${MODEL_BUCKET}"
+export SLEMIFY_BEDROCK_MODEL="${LLM_MODEL}"
+export AWS_REGION="${REGION}"
+
+log "Uploading the example data to s3://${MODEL_BUCKET}/k8s-autoscaling/data/"
+AWS_DEFAULT_REGION="${REGION}" bash "${EXAMPLE_DIR}/upload-to-s3.sh" "${MODEL_BUCKET}"
+
+if command -v slemify >/dev/null 2>&1; then
+  log "Triage: running the data stage (Bedrock writes the training examples)"
+  (cd "${EXAMPLE_DIR}" && slemify deploy --config triage/expert.yaml --until data)
+
+  log "Retriever: data, training, and serving"
+  (cd "${EXAMPLE_DIR}" && slemify deploy --config retriever/expert.yaml)
+  kubectl rollout status deployment/k8s-autoscaling-retriever-inference -n "${NAMESPACE}" --timeout=300s
+
+  log "Building the tuned knowledge index (domain encoder, 768d)"
+  TUNED_INDEX_NAME="${TUNED_INDEX_NAME:-k8s-autoscaling-knowledge}"
+  TUNED_COUNT="$(kubectl exec -n "${NAMESPACE}" "${OS_POD}" -- \
+    curl -s "http://localhost:9200/${TUNED_INDEX_NAME}/_count" 2>/dev/null | \
+    python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null || echo 0)"
+  if [[ "${TUNED_COUNT}" -gt 100 ]]; then
+    echo "  Tuned index already populated (${TUNED_COUNT} docs), skipping"
+  else
+    kubectl port-forward -n "${NAMESPACE}" svc/opensearch-cluster-master 9200:9200 &
+    PF_OS_PID=$!
+    kubectl port-forward -n "${NAMESPACE}" svc/k8s-autoscaling-retriever-inference 8083:8080 &
+    PF_RET_PID=$!
+    sleep 4
+    trap 'kill "${PF_OS_PID}" "${PF_RET_PID}" 2>/dev/null || true' EXIT
+    INDEX_NAME="${TUNED_INDEX_NAME}" EMBEDDING_URL="http://localhost:8083" \
+      python3 "${DEMO_DIR}/scripts/index-knowledge.py" --embedder=slemify
+    kill "${PF_OS_PID}" "${PF_RET_PID}" 2>/dev/null || true
+    trap - EXIT
+  fi
+else
+  echo "  slemify not installed; skipping the triage data stage, the retriever, and the tuned index" >&2
+fi
+
 # --- Demo in monolith seats ---
 log "Deploying the demo (monolith seats)"
 # The manifest ships CPU-first defaults and eu-west-1; patch to the monolith

@@ -1,0 +1,64 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Convert and quantize the analyst's base model to GGUF once per account, in
+# CodeBuild, and upload it to the model bucket at the key the serving stage
+# reads (models/<project>/<gguf>). Converting a 30B model needs about 140 GB
+# of scratch disk and the download is ~61 GB; EKS Auto Mode's default
+# NodeClass gives nodes an 80 GiB volume, so the in-cluster convert Job is
+# evicted at 40 GB every time. CodeBuild's 2XLARGE fleet has 824 GB.
+#
+# Runs the account's own gguf-convert image (built by buildspec-images.yaml),
+# so the conversion is the same code Slemify runs in the cluster. With the
+# output in place, `slemify deploy --config analyst/expert.yaml` skips the
+# convert and goes straight to serving.
+#
+# Environment variables set by CloudFormation:
+#   MODEL_BUCKET     the account's model bucket
+#   BASE_MODEL       HuggingFace id (default: Slemify's generation default)
+#   QUANTIZE         quantization (default q4_k_m)
+#   PROJECT          Slemify project name (default k8s-autoscaling-analyst)
+#   HF_TOKEN         optional, for Hugging Face rate limits
+
+version: 0.2
+
+env:
+  variables:
+    BASE_MODEL: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    QUANTIZE: "q4_k_m"
+    PROJECT: "k8s-autoscaling-analyst"
+
+phases:
+  pre_build:
+    commands:
+      - ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+      - REGISTRY="${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+      - GGUF_FILENAME="model-${QUANTIZE}.gguf"
+      - |
+        if aws s3api head-object --bucket "${MODEL_BUCKET}" --key "models/${PROJECT}/${GGUF_FILENAME}" >/dev/null 2>&1; then
+          echo "models/${PROJECT}/${GGUF_FILENAME} already in ${MODEL_BUCKET}; nothing to do"
+          echo "SKIP=1" > /tmp/skip.env
+        fi
+      - aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY}"
+      # The image runs as an unprivileged user; the bind-mounted scratch dir must be writable by it.
+      - mkdir -p /tmp/convert && chmod 0777 /tmp/convert
+      - df -h /tmp | tail -1
+  build:
+    commands:
+      - |
+        if [ -f /tmp/skip.env ]; then
+          echo "skipping conversion"
+        else
+          # The image is built for both architectures; pull the one matching this host.
+          docker run --rm \
+            -e BASE_MODEL="${BASE_MODEL}" -e QUANTIZE="${QUANTIZE}" \
+            -e S3_BUCKET="${MODEL_BUCKET}" -e PROJECT="${PROJECT}" -e GGUF_FILENAME="${GGUF_FILENAME}" \
+            -e HF_TOKEN="${HF_TOKEN:-}" \
+            -e AWS_REGION="${AWS_REGION}" -e AWS_DEFAULT_REGION="${AWS_REGION}" \
+            -e AWS_CONTAINER_CREDENTIALS_RELATIVE_URI="${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}" \
+            -v /tmp/convert:/tmp/convert \
+            "${REGISTRY}/slemify/gguf-convert:latest"
+        fi
+  post_build:
+    commands:
+      - aws s3 ls "s3://${MODEL_BUCKET}/models/${PROJECT}/" --human-readable || true
