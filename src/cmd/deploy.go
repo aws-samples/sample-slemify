@@ -177,9 +177,28 @@ func deploySingleExpert(ctx context.Context, cmd *cobra.Command, cfg *config.Exp
 		pc.NoWait = true
 		runner.SetNoWait(true)
 	}
+	until, _ := cmd.Flags().GetString("until")
+	var stopAfter pipeline.Stage
+	if until != "" {
+		var err error
+		stopAfter, err = pipeline.ParseStage(until)
+		if err != nil {
+			return err
+		}
+		if startStage != "" && pipeline.StageIndex(stopAfter) < pipeline.StageIndex(startStage) {
+			return fmt.Errorf("--until %s comes before --stage %s", until, stage)
+		}
+		runner.SetStopAfter(stopAfter)
+	}
 
 	if err := runner.Run(ctx, startStage); err != nil {
 		return err
+	}
+	if stopAfter != "" && stopAfter != pipeline.StageServing {
+		next := pipeline.StageOrder[pipeline.StageIndex(stopAfter)+1]
+		fmt.Printf("\n✅ %s prepared through the %s stage. Continue with:\n", cfg.Project.Name, stopAfter)
+		fmt.Printf("   slemify deploy --config <expert.yaml> --stage %s\n", strings.ToLower(string(next)))
+		return nil
 	}
 
 	if noWait {
@@ -364,6 +383,7 @@ func registerDryRunStages(runner *pipeline.Runner, cfg *config.ExpertConfig, siz
 
 func init() {
 	deployCmd.Flags().String("stage", "", "Start from a specific stage (data, training, quantize, serving)")
+	deployCmd.Flags().String("until", "", "Stop after this stage completes (data, training, quantize); later stages are left for a later run")
 	deployCmd.Flags().Bool("dry-run", false, "Show what would be deployed without connecting to a cluster")
 	deployCmd.Flags().StringVar(&autoModeNodeClass, "auto-mode-nodeclass", "default",
 		"On EKS Auto Mode, the existing eks.amazonaws.com NodeClass the slemify-slm NodePool references")

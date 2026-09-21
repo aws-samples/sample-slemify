@@ -55,6 +55,7 @@ type Runner struct {
 	state      *State
 	store      *StateStore
 	noWait     bool
+	stopAfter  Stage
 	onProgress func(stage Stage, status Status, msg string)
 }
 
@@ -93,6 +94,14 @@ func (r *Runner) SetNoWait(noWait bool) {
 	r.noWait = noWait
 }
 
+// SetStopAfter makes the runner return once the given stage has completed,
+// leaving the later stages untouched. Used with --until to prepare a project
+// part-way (for example, run the data stage ahead of a workshop so attendees
+// start at training). An empty stage means run to the end.
+func (r *Runner) SetStopAfter(stage Stage) {
+	r.stopAfter = stage
+}
+
 // persistState saves current state to the store if one is configured.
 func (r *Runner) persistState(ctx context.Context) {
 	if r.store == nil {
@@ -129,6 +138,9 @@ func (r *Runner) Run(ctx context.Context, startStage Stage) error {
 			if result, ok := r.state.Stages[stage]; ok {
 				if result.Status == StatusCompleted && len(result.Artifacts) > 0 {
 					r.onProgress(stage, StatusCompleted, "skipped (artifacts exist)")
+					if stage == r.stopAfter {
+						return nil
+					}
 					continue
 				}
 			}
@@ -164,6 +176,22 @@ func (r *Runner) Run(ctx context.Context, startStage Stage) error {
 			return fmt.Errorf("stage %s failed: %w", stage, err)
 		}
 
+		// In no-wait mode the stage function returns as soon as the job is
+		// submitted; nothing has been produced yet. Leave the stage in_progress
+		// (with the submission noted) so the next run re-executes it instead of
+		// skipping a stage whose "artifacts" are a job name.
+		if r.noWait {
+			r.state.Stages[stage] = StageResult{
+				Stage:     stage,
+				Status:    StatusInProgress,
+				StartedAt: r.state.Stages[stage].StartedAt,
+				Artifacts: artifacts,
+			}
+			r.persistState(ctx)
+			r.onProgress(stage, StatusInProgress, "submitted; not waiting")
+			return nil
+		}
+
 		// Mark completed
 		r.state.Stages[stage] = StageResult{
 			Stage:       stage,
@@ -177,13 +205,23 @@ func (r *Runner) Run(ctx context.Context, startStage Stage) error {
 		duration := r.state.Stages[stage].CompletedAt.Sub(r.state.Stages[stage].StartedAt)
 		r.onProgress(stage, StatusCompleted, fmt.Sprintf("done (%s)", duration.Round(time.Second)))
 
-		// In no-wait mode, only run the first stage then stop
-		if r.noWait {
+		if stage == r.stopAfter {
+			r.onProgress(stage, StatusCompleted, fmt.Sprintf("stopping after %s as requested", stage))
 			return nil
 		}
 	}
 
 	return nil
+}
+
+// StageIndex returns the position of a stage in StageOrder, or -1 if unknown.
+func StageIndex(stage Stage) int {
+	for i, s := range StageOrder {
+		if s == stage {
+			return i
+		}
+	}
+	return -1
 }
 
 // ParseStage converts a string to a Stage, returning an error if invalid.

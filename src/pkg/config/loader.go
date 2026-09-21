@@ -70,8 +70,13 @@ func defaultBedrockModel() string {
 
 // ApplyDefaults fills fields that have a sensible task-dependent default so a
 // config can leave them empty: model.base, data.synthetic.model, and
-// data.evaluation.model.
+// data.evaluation.model. SLEMIFY_BUCKET, when set, replaces data.bucket so
+// one committed config runs against whatever bucket an environment provides
+// (a workshop account, a CI account) without editing the YAML.
 func (c *ExpertConfig) ApplyDefaults() {
+	if v := os.Getenv("SLEMIFY_BUCKET"); v != "" {
+		c.Data.Bucket = v
+	}
 	if c.Data.Synthetic != (SyntheticConfig{}) && c.Data.Synthetic.Model == "" {
 		c.Data.Synthetic.Model = defaultBedrockModel()
 	}
