@@ -3,7 +3,7 @@
 
 SCRIPTS := ./scripts
 
-.PHONY: demo reset clean infra eval eval-incluster scoreboard triage-acc recall swap
+.PHONY: demo reset clean infra eval eval-incluster scoreboard triage-acc recall index-tuned swap
 
 # One command to start a demo session: reset the scenarios to their broken
 # state, then port-forward the orchestrator, open the browser, and launch the
@@ -48,6 +48,12 @@ triage-acc:
 
 recall:
 	python3 eval/recall.py $(if $(MODE),--mode $(MODE),)
+
+# Build the tuned knowledge index against the retriever you just fine-tuned.
+# The index stores vectors from the tuned encoder, so it can only be built once
+# that encoder is serving (module 2). `make recall` and EMBED=slemify read it.
+index-tuned:
+	bash scripts/index-tuned.sh
 
 # Print the live scoreboard from /stats: per step configuration, queries seen,
 # Bedrock $/query, p50/p95 latency, escalation rate, per-step p50.

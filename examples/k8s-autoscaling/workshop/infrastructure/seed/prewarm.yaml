@@ -2,14 +2,29 @@
 # SPDX-License-Identifier: MIT-0
 #
 # A pause pod that tolerates the SLM taint and requests enough CPU to force one
-# large SLM node online before the seed's model work runs, so module 1 does not
-# pay a node provision. The request is deliberately high (30 CPU): it lands the
-# node on a 9th-gen c/m/r instance of 8xlarge class (32 vCPU), which is where
-# the seed then runs the retriever training and the tuned-index build. On the
-# 4-vCPU node a smaller request produced, those two steps took ~22 minutes
-# combined; on a 32-vCPU node they finish in about a third of that. The pod
-# holds the node warm and is deleted once the first real SLM workload schedules.
-# CPU is only requested, not limited, so the pause container itself sits idle.
+# large SLM node online before the seed's model work runs, so neither the seed
+# nor module 1 pays a node provision. The request is deliberately high (30 CPU):
+# it lands the node on a 9th-gen c/m/r instance of 8xlarge class (32 vCPU). On
+# the 4-vCPU node a smaller request produced, the seed's model steps took ~22
+# minutes combined; on a 32-vCPU node about a third of that.
+#
+# The pod runs at negative priority so any real SLM workload (default priority
+# 0) preempts it and takes the warm node: the pause pod is evicted instantly
+# (grace 0) and its replacement re-warms a fresh node in the background for the
+# next workload (module 3's analyst). CPU is only requested, not limited, so
+# the pause container itself sits idle.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: slemify-prewarm
+value: -10
+# The prewarm must never evict a real workload to make room for itself.
+preemptionPolicy: Never
+globalDefault: false
+description: >-
+  Node pre-warming pause pods. Below the default (0) so any real workload
+  preempts them and takes the warm node.
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,6 +44,8 @@ spec:
         app: slm-prewarm
     spec:
       automountServiceAccountToken: false
+      priorityClassName: slemify-prewarm
+      terminationGracePeriodSeconds: 0
       nodeSelector:
         slemify.io/workload: slm
       tolerations:

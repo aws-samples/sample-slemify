@@ -94,11 +94,11 @@ fi
 kubectl rollout status statefulset/opensearch-cluster-master -n "${NAMESPACE}" --timeout=300s
 
 # --- Slemify config, and the example data both the index and the projects need ---
-# Module 1 says the triage data stage already ran (attendees start at training).
-# Module 2 says the retriever's data and training ran and that make recall scores
-# the tuned index, which can only be built with the trained encoder serving, so
-# the retriever is deployed end to end here. Slemify reads the bucket and model
-# from these two variables instead of the values in the shipped expert.yaml files.
+# Both projects run only their data stage here (the frontier model writing the
+# training examples): module 1 has attendees train the triage classifier, and
+# module 2 has them fine-tune the retriever, so the seed leaves both at data
+# done with training/serving for the attendee. Slemify reads the bucket and
+# model from these two variables instead of the shipped expert.yaml values.
 EXAMPLE_DIR="$(cd "${INFRA_DIR}/../.." && pwd)"
 export SLEMIFY_BUCKET="${MODEL_BUCKET}"
 export SLEMIFY_BEDROCK_MODEL="${LLM_MODEL}"
@@ -107,15 +107,20 @@ export AWS_REGION="${REGION}"
 log "Uploading the example data to s3://${MODEL_BUCKET}/k8s-autoscaling/data/"
 AWS_DEFAULT_REGION="${REGION}" bash "${EXAMPLE_DIR}/upload-to-s3.sh" "${MODEL_BUCKET}"
 
-# The triage data stage is a Bedrock-only Job with no dependency on the Titan
-# index below, so start it now and let it run while the index builds. Its
-# output is waited on before the retriever (which shares the SLM node).
+# Both data stages are Bedrock-only Jobs (the frontier model writing training
+# examples) with no dependency on the Titan index below, so start them now and
+# let them run while the index builds. They are waited on before the seed ends.
 TRIAGE_DATA_PID=""
+RETRIEVER_DATA_PID=""
 if command -v slemify >/dev/null 2>&1; then
   log "Triage: starting the data stage in the background (Bedrock writes the training examples)"
   ( cd "${EXAMPLE_DIR}" && slemify deploy --config triage/expert.yaml --until data ) \
     > /tmp/triage-data.log 2>&1 &
   TRIAGE_DATA_PID=$!
+  log "Retriever: starting the data stage in the background (Bedrock writes the (query, chunk) pairs)"
+  ( cd "${EXAMPLE_DIR}" && slemify deploy --config retriever/expert.yaml --until data ) \
+    > /tmp/retriever-data.log 2>&1 &
+  RETRIEVER_DATA_PID=$!
 fi
 
 # --- Knowledge base: the Bedrock (Titan) index the monolith reads ---
@@ -149,45 +154,27 @@ else
   trap - EXIT
 fi
 
-# --- Slemify projects: the state the module pages start from ---
+# --- Slemify data stages: join the two background jobs ---
+# Both leave their project at "data done", which is where the module pages
+# start: module 1 has attendees train the triage classifier, module 2 has them
+# fine-tune the retriever. The tuned knowledge index is not built here; it has
+# to be built against the encoder the attendee trains (see `make index-tuned`).
 if command -v slemify >/dev/null 2>&1; then
-  # Join the triage data stage that started before the index build.
-  if [[ -n "${TRIAGE_DATA_PID}" ]]; then
-    log "Triage: waiting for the background data stage"
-    if wait "${TRIAGE_DATA_PID}"; then
-      tail -n 4 /tmp/triage-data.log || true
+  wait_data() {  # name pid logfile
+    [[ -z "$2" ]] && return 0
+    log "$1: waiting for the background data stage"
+    if wait "$2"; then
+      tail -n 4 "$3" || true
     else
-      echo "ERROR: triage data stage failed" >&2
-      cat /tmp/triage-data.log >&2
+      echo "ERROR: $1 data stage failed" >&2
+      cat "$3" >&2
       exit 1
     fi
-  fi
-
-  log "Retriever: data, training, and serving"
-  (cd "${EXAMPLE_DIR}" && slemify deploy --config retriever/expert.yaml)
-  kubectl rollout status deployment/k8s-autoscaling-retriever-inference -n "${NAMESPACE}" --timeout=300s
-
-  log "Building the tuned knowledge index (domain encoder, 768d)"
-  TUNED_INDEX_NAME="${TUNED_INDEX_NAME:-k8s-autoscaling-knowledge}"
-  TUNED_COUNT="$(kubectl exec -n "${NAMESPACE}" "${OS_POD}" -- \
-    curl -s "http://localhost:9200/${TUNED_INDEX_NAME}/_count" 2>/dev/null | \
-    python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null || echo 0)"
-  if [[ "${TUNED_COUNT}" -gt 100 ]]; then
-    echo "  Tuned index already populated (${TUNED_COUNT} docs), skipping"
-  else
-    kubectl port-forward -n "${NAMESPACE}" svc/opensearch-cluster-master 9200:9200 &
-    PF_OS_PID=$!
-    kubectl port-forward -n "${NAMESPACE}" svc/k8s-autoscaling-retriever-inference 8083:8080 &
-    PF_RET_PID=$!
-    sleep 4
-    trap 'kill "${PF_OS_PID}" "${PF_RET_PID}" 2>/dev/null || true' EXIT
-    INDEX_NAME="${TUNED_INDEX_NAME}" EMBEDDING_URL="http://localhost:8083" \
-      python3 "${DEMO_DIR}/scripts/index-knowledge.py" --embedder=slemify
-    kill "${PF_OS_PID}" "${PF_RET_PID}" 2>/dev/null || true
-    trap - EXIT
-  fi
+  }
+  wait_data "Triage" "${TRIAGE_DATA_PID}" /tmp/triage-data.log
+  wait_data "Retriever" "${RETRIEVER_DATA_PID}" /tmp/retriever-data.log
 else
-  echo "  slemify not installed; skipping the triage data stage, the retriever, and the tuned index" >&2
+  echo "  slemify not installed; skipping the triage and retriever data stages" >&2
 fi
 
 # --- Demo in monolith seats ---
