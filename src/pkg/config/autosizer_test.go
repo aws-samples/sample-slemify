@@ -99,8 +99,10 @@ func TestAutoSize70BModel(t *testing.T) {
 	if sized.InferenceCPU != "16" {
 		t.Errorf("InferenceCPU = %q, want '16' for >8B", sized.InferenceCPU)
 	}
-	if sized.InferenceMemory != "24Gi" {
-		t.Errorf("InferenceMemory = %q, want '24Gi' for >8B", sized.InferenceMemory)
+	// 70B falls in the top (30B-class) tier: a q4 file of that size needs the
+	// larger memory allowance.
+	if sized.InferenceMemory != "40Gi" {
+		t.Errorf("InferenceMemory = %q, want '40Gi' for the top tier", sized.InferenceMemory)
 	}
 	if sized.CheckpointInterval != 50 {
 		t.Errorf("CheckpointInterval = %d, want 50 for >8B model", sized.CheckpointInterval)

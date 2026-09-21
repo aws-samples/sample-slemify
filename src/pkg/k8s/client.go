@@ -537,6 +537,23 @@ func inferContentType(key string) string {
 	return "application/octet-stream"
 }
 
+// S3ObjectSize returns the size of an object, or 0 and false if it does not
+// exist (or cannot be read). Used to notice artifacts produced out of band.
+func (c *Client) S3ObjectSize(ctx context.Context, bucket, key string) (int64, bool) {
+	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return 0, false
+	}
+	out, err := s3.NewFromConfig(cfg).HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil || out.ContentLength == nil {
+		return 0, false
+	}
+	return *out.ContentLength, true
+}
+
 // DownloadFromS3 downloads a text file from S3. Returns empty string on error.
 func (c *Client) DownloadFromS3(ctx context.Context, bucket, key string) (string, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)

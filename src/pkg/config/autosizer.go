@@ -4,6 +4,8 @@
 package config
 
 import (
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -111,7 +113,7 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 		sized.CheckpointInterval = 100
 		sized.ConvertMemory = "40Gi"
 		sized.ConvertEphemeralStorage = "64Gi"
-	default: // 8B-13B (tool targets ≤10B models)
+	case modelSize <= 14: // 8B-14B
 		sized.InferenceInstance = "CPU, on-demand (provisioner selects)"
 		sized.InferenceCPU = "16"
 		sized.InferenceMemory = "24Gi"
@@ -119,6 +121,19 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 		sized.CheckpointInterval = 50
 		sized.ConvertMemory = "56Gi"
 		sized.ConvertEphemeralStorage = "72Gi"
+	default: // 30B-class, in practice the small-MoE family (30B total, ~3B active).
+		// Conversion holds the bf16 download (~61 GB for 30B), the f16 GGUF of
+		// the same size, and the quantized output on the node disk at once.
+		// Serving loads only the q4_k_m file (~17 GB) and runs the active
+		// experts, so it needs the memory of a 30B file and the threads of a
+		// ~3B model; 16 threads is what the reference measurements used.
+		sized.InferenceInstance = "CPU, on-demand (provisioner selects)"
+		sized.InferenceCPU = "16"
+		sized.InferenceMemory = "40Gi"
+		sized.InferenceThreads = "16"
+		sized.CheckpointInterval = 50
+		sized.ConvertMemory = "64Gi"
+		sized.ConvertEphemeralStorage = "160Gi"
 	}
 
 	// No quantization (F16) needs ~3x more memory than Q4_K_M
@@ -175,10 +190,23 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 	return sized
 }
 
-// estimateModelSize returns approximate parameter count in billions
-// based on common naming patterns in HuggingFace model IDs.
+// moeName matches mixture-of-experts ids of the form <total>B-A<active>B, such
+// as Qwen3-30B-A3B: 30B parameters on disk and in memory during conversion,
+// 3B active per token at inference.
+var moeName = regexp.MustCompile(`(\d+)b-a(\d+(?:\.\d+)?)b`)
+
+// estimateModelSize returns the approximate total parameter count in
+// billions from the HuggingFace model id. For MoE ids it is the total, which
+// is what the download, the f16 GGUF, and the quantization have to hold.
 func estimateModelSize(modelID string) int {
 	lower := strings.ToLower(modelID)
+
+	// MoE first: without this, "30B-A3B" matches the "3b" hint below and the
+	// convert Job gets 40Gi of disk for a 61 GB download.
+	if m := moeName.FindStringSubmatch(lower); m != nil {
+		total, _ := strconv.Atoi(m[1])
+		return total
+	}
 
 	// Check from largest to smallest to avoid "1b" matching inside "13b"
 	sizeHints := []struct {
@@ -186,6 +214,8 @@ func estimateModelSize(modelID string) int {
 		size    int
 	}{
 		{"70b", 70},
+		{"32b", 32},
+		{"30b", 30},
 		{"14b", 14},
 		{"13b", 13},
 		{"8b", 8},

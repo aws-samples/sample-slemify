@@ -25,6 +25,18 @@ import (
 // in this path.
 func ConvertStage(client *k8s.Client, cfg *config.ExpertConfig, sized config.SizedConfig, ns string, pc *pipeline.PipelineContext) pipeline.StageFunc {
 	return func(ctx context.Context) ([]string, error) {
+		// The GGUF may already be in the bucket: converted by an earlier run
+		// whose state was lost, or produced outside the cluster (a 30B model
+		// needs ~140 GB of scratch disk, more than an EKS Auto Mode node has,
+		// so a workshop converts it once in CodeBuild). A present, non-empty
+		// object is the stage's artifact; there is nothing to run.
+		ggufKey := fmt.Sprintf("models/%s/%s", cfg.Project.Name, cfg.Model.GGUFFilename())
+		if size, ok := client.S3ObjectSize(ctx, cfg.Data.Bucket, ggufKey); ok && size > 0 {
+			fmt.Printf("  GGUF already present: s3://%s/%s (%.1f GB); skipping the convert job\n",
+				cfg.Data.Bucket, ggufKey, float64(size)/(1<<30))
+			return []string{fmt.Sprintf("s3://%s/%s", cfg.Data.Bucket, ggufKey)}, nil
+		}
+
 		job := ConvertJobManifest(cfg, sized, ns, pc)
 
 		jobName, err := client.SubmitJob(ctx, job)
