@@ -36,8 +36,13 @@
   should_abstain: false
   config_is_valid: false
   leading_premise: false
+  # The corpus indexes Karpenter's main branch, whose disruption page lists a
+  # third policy, Balanced, next to the two v1.0 values. A grounded answer
+  # that reads those docs correctly names all three; the earlier form of this
+  # case (two values only) failed every configuration, frontier model included.
   must_include:
-    - "valid values are WhenEmpty and WhenEmptyOrUnderutilized"
+    - "valid values are WhenEmpty, WhenEmptyOrUnderutilized and Balanced"
+    - "WhenEmpty removes only empty nodes; WhenEmptyOrUnderutilized also replaces or removes underutilized nodes; Balanced consolidates only when the cost saved outweighs the pod disruption"
   must_not_say: []
 
 - id: karpenter-spot-interruption
