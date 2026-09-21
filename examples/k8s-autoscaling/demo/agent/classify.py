@@ -52,9 +52,12 @@ def _parse(raw: str) -> dict:
 
 
 def _classify_classifier(text: str) -> str:
+    # The encoder was trained on the messages themselves, so it gets the
+    # message alone. An instruction prefix in front of it is not neutral: it
+    # dominates the embedding and every message classifies as multi_resource.
     body = {
         "model": "model",
-        "messages": [{"role": "user", "content": prompts.triage_prompt(text)}],
+        "messages": [{"role": "user", "content": text}],
         "max_tokens": 32,
         "temperature": 0.1,
     }
@@ -66,7 +69,7 @@ def _classify_classifier(text: str) -> str:
 def _classify_llm(text: str) -> str:
     resp = config.bedrock.converse(
         modelId=config.LLM_MODEL,
-        messages=[{"role": "user", "content": [{"text": prompts.triage_prompt(text)}]}],
+        messages=[{"role": "user", "content": [{"text": prompts.triage_llm_prompt(text)}]}],
         inferenceConfig={"maxTokens": 32, "temperature": 0},
     )
     metrics.charge(config.LLM_MODEL, "triage", *metrics.usage_from_converse(resp))

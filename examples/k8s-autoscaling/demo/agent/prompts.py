@@ -7,7 +7,7 @@ edited together rather than scattered across modules. Behavior is identical to t
 previous inline strings; this module only collects them.
 
 Which model sees which prompt:
-  - triage_prompt   -> triage classifier SLM (ONNX) : classify intent
+  - triage_llm_prompt -> frontier model (TRIAGE=llm) : classify intent; the classifier gets the raw message
   - analyst_prompt  -> analyst SLM (llama.cpp, CPU)  : the grounded draft answer
   - llm_prompt      -> escalation LLM (Bedrock)      : when the gate escalates
   - calibration_prompt -> calibration LLM (Bedrock)  : the abstain backstop
@@ -19,27 +19,32 @@ from . import patch_schema
 
 # --- Instruction strings ---
 
-TRIAGE_INSTRUCTION = (
-    "Classify this Kubernetes autoscaling support query into a routing "
-    "category and confidence level."
-)
-
-# Zero-shot form of the same task for the frontier model. The label
-# definitions match project.domain in triage/expert.yaml, which is what the
-# synthetic training data (and so the classifier) was generated from.
-TRIAGE_LLM_INSTRUCTION = (
-    "Classify the Kubernetes autoscaling support message below into exactly one "
-    "routing category:\n"
+# The triage label set, one line each. This is the only domain-specific part
+# of the triage prompt; it mirrors project.domain in triage/expert.yaml, which
+# is what the classifier's training data was generated from. To run this
+# agent on another domain, replace this list.
+TRIAGE_LABELS = (
     "  karpenter_config   Karpenter NodePool or EC2NodeClass questions\n"
     "  keda_config        KEDA ScaledObject or TriggerAuthentication questions\n"
     "  hpa_config         HorizontalPodAutoscaler questions\n"
     "  pdb_disruption     PodDisruptionBudget questions\n"
     "  spot_interruption  Spot instance interruption handling\n"
-    "  multi_resource     spans several resource types, including pods stuck Pending "
-    "with no single autoscaler named as the cause\n"
-    "  noise              off-topic: meetings, social chat, unrelated Kubernetes topics\n"
-    "A message that names a specific resource and a concrete symptom belongs to that "
-    "resource's category. Messages are noisy Slack-style text and may contain YAML.\n"
+    "  multi_resource     spans several resource types with no single autoscaler "
+    "named as the cause\n"
+    "  noise              off-topic: meetings, social chat, unrelated topics\n"
+)
+
+# The frontier model's zero-shot triage prompt (TRIAGE=llm). The classifier
+# learned the label set from its training examples; the frontier model has to
+# be told it, and told the one-line output the parser reads. Nothing else is
+# needed: on the 43 held-out labels, label set + format scored 40/43, adding
+# domain heuristics 41/43 (within noise), and the bare task sentence 4/43
+# (the model answered with a Markdown report that named no label).
+# The classifier does not see this prompt; it is sent the message alone,
+# which is what it was trained on.
+TRIAGE_LLM_INSTRUCTION = (
+    "Classify the support message below into exactly one routing category:\n"
+    + TRIAGE_LABELS +
     "Reply with one line and nothing else, in the form  label|confidence  where "
     "confidence is high, medium, or low. Example:  karpenter_config|high"
 )
@@ -99,12 +104,9 @@ Return ONLY a JSON object: {{"verdict": "pass|escalate", "reason": "<short>"}}""
 
 # --- Prompt builders (instruction + framing + context + query) ---
 
-def triage_prompt(text: str) -> str:
-    """The frontier model's zero-shot triage prompt (TRIAGE=llm). The
-    classifier learned the label set from 1,200 examples; the frontier model
-    has to be told it, and told the one-line output the parser reads. Without
-    both, Sonnet answers with a Markdown report that names no label (4/43 on
-    the held-out set)."""
+def triage_llm_prompt(text: str) -> str:
+    """The frontier model's zero-shot triage prompt (TRIAGE=llm only; the
+    classifier is sent the raw message, see classify.py)."""
     return f"{TRIAGE_LLM_INSTRUCTION}\n\n--- MESSAGE ---\n{text}\n--- END MESSAGE ---\n\nAnswer:"
 
 
