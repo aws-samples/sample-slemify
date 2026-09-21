@@ -36,13 +36,29 @@ func Parse(data []byte) (*ExpertConfig, []string, error) {
 				return nil, nil, fmt.Errorf("parsing config: %w", err2)
 			}
 			cfg.ApplyDefaults()
-			return &cfg, warnings, nil
+			return &cfg, append(warnings, modelSizeWarnings(&cfg)...), nil
 		}
 		return nil, nil, fmt.Errorf("parsing config: %w", err)
 	}
 
 	cfg.ApplyDefaults()
-	return &cfg, nil, nil
+	return &cfg, modelSizeWarnings(&cfg), nil
+}
+
+// modelSizeWarnings flags a dense generation model above the size Slemify
+// targets on CPU. It is a warning, not an error: the auto-sizer still fits
+// the pod, but decode speed will be poor and a small-MoE is the better fit.
+func modelSizeWarnings(cfg *ExpertConfig) []string {
+	if !cfg.Project.IsGeneration() || cfg.Model.Base == "" || isMoE(cfg.Model.Base) {
+		return nil
+	}
+	if size := estimateModelSize(cfg.Model.Base); size > maxDenseTarget {
+		return []string{fmt.Sprintf(
+			"model.base %q is a dense ~%dB model; Slemify targets dense models up to %dB on CPU, "+
+				"or a small-MoE (30B total, ~3B active) for higher quality at similar speed",
+			cfg.Model.Base, size, maxDenseTarget)}
+	}
+	return nil
 }
 
 // Default base models per task family, used when model.base is empty. The

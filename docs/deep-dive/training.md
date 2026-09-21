@@ -189,7 +189,7 @@ Measured on the k8s-autoscaling analyst (same eval, same hardware, same llama.cp
 | Dense 1-3B | Simple structured answers, tight latency budgets | Fast decode and prefill | Small (2-6GB quantized) |
 | Dense 7-8B | Multi-step reasoning, config analysis | Moderate | ~5-9GB quantized |
 | Small-MoE (e.g. 30B total / ~3B active) | The dense-8B use cases, at higher quality AND faster decode | Decode near dense-3B speed; prefill slightly slower than dense 8B | Large (~18GB+ quantized) — all experts stay resident |
-| Dense 13B+ | Complex long-form generation | Slow decode on CPU | Consider whether a small-MoE fits instead before reaching for GPUs |
+| Dense 9B+ | Not a Slemify target on CPU: `slemify deploy` warns | Slow decode on CPU (proportional to size) | A small-MoE covers the same quality; 70B-class dense has no sizing tier at all |
 
 **The practical guidance:** start with the smallest *dense* model that answers your eval cases well when grounded by RAG — it is the cheapest to serve and iterate on. If accuracy falls short, evaluate a small-MoE before a bigger dense model: it is the only step up that can raise quality and decode speed at the same time, provided your nodes have the RAM and your workload is decode-heavy (long answers). A bigger dense model only ever trades speed for quality. Whatever you pick, the decision must be made against your own scorecard (see [report](report.md)), not the model card.
 

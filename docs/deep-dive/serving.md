@@ -282,11 +282,19 @@ If your use case involves longer inputs (full documents, long log entries), you 
 
 The auto-sizer maps your model size and quantization level to CPU, memory, and thread count for the inference pod. Karpenter then picks the cheapest instance that satisfies those resource requests.
 
-| Model size | CPU request = limit | Memory request = limit | Threads |
-|-----------|---------------------|------------------------|---------|
-| ≤3B | 4 cores | 6Gi (Q4_K_M) / 12Gi (F16) | 4 |
-| ≤8B | 8 cores | 16Gi (Q4_K_M) / 24Gi (F16) | 8 |
-| >8B | 16 cores | 24Gi (Q4_K_M) / 40Gi (F16) | 16 |
+| Model size (total parameters) | CPU request = limit | Memory request = limit (Q4_K_M) | Threads | Convert Job (memory / scratch disk) |
+|-----------|---------------------|------------------------|---------|---------|
+| ≤3B dense | 4 cores | 6Gi | 4 | 16Gi / 40Gi |
+| ≤5B dense | 4 cores | 8Gi | 4 | 24Gi / 48Gi |
+| ≤8B dense | 8 cores | 16Gi | 8 | 40Gi / 64Gi |
+| 9B to 14B dense (not a target, see below) | 16 cores | 24Gi | 16 | 56Gi / 72Gi |
+| 30B-class small-MoE (30B total, ~3B active) | 16 cores | 40Gi | 16 | 64Gi / 160Gi |
+
+F16 (no quantization) needs about three times the Q4_K_M memory. Model size is read from the HuggingFace id: `30B-A3B` counts as 30B (the total is what the download, the f16 GGUF and the quantization have to hold), `8B` as 8, and so on.
+
+Slemify targets dense models up to 8B and the small-MoE class. A dense model above 8B still gets a pod, but `slemify deploy` and `slemify validate` print a warning: on CPU its decode speed is proportional to its size, and a small-MoE gives more quality at dense-3B speed. Dense models of 70B and up have no tier at all; they are outside what CPU inference can serve at usable latency.
+
+The convert Job's scratch disk is what limits where a 30B-class model can be converted: about 140 GB in flight (the ~61 GB bf16 download, the f16 GGUF of the same size, and the quantized output). A node whose volume is smaller than that, such as an EKS Auto Mode node with the default 80 GiB, evicts the Job. Either give the pool a larger volume or convert once outside the cluster; if `models/<project>/<gguf>` already exists in the bucket, the convert stage is skipped.
 
 The memory request accounts for the model file plus the KV cache and runtime overhead. The CPU request determines how many threads llama.cpp uses for matrix operations. More threads help up to the point where memory bandwidth saturates, after which adding threads provides no benefit.
 
@@ -294,7 +302,7 @@ The memory request accounts for the model file plus the KV cache and runtime ove
 
 This is a deliberate exception to Slemify's usual policy of not setting CPU limits elsewhere (CPU is compressible, so a limit is normally just throttling risk with no crash-safety upside — unlike memory, where a limit is required because OOM is fatal). For the inference pod specifically, the limit isn't there to protect other pods from this one; it's there so `--threads` reflects reality. Without a matching limit, an idle node lets the pod burst onto every free core, so `--threads` pins a thread pool that never gets held to it — no downside there, but it means the pin does nothing until the node is *already* busy, which is exactly when you need it to. Measured directly: under real CPU contention on a shared node, a throttled (Guaranteed) pod with `--threads` matching its request served ~40% higher aggregate throughput than an unthrottled (Burstable) pod with the same `--threads` value, because the thread pool wasn't fighting the scheduler for cores it didn't actually have.
 
-**Models larger than 8B.** The auto-sizer supports models up to 30B+ parameters on CPU. For *dense* models, larger means proportionally higher latency (more weights to read per token), so for classification and routing tasks 3-8B remains the sweet spot: fast enough for real-time use, large enough for multi-class accuracy. *Mixture-of-Experts* models are the exception: a 30B-total/3B-active MoE decodes at roughly dense-3B speed because only its active parameters stream through memory per token — but every parameter must stay resident, so size its pod by the full model file plus KV cache (~26Gi for a 30B-A3B at q4), and expect prefill to be somewhat slower than a dense 8B. See [choosing a base model](training.md#choosing-a-base-model) for when the trade is worth it.
+**Models larger than 8B.** For *dense* models, larger means proportionally higher latency (more weights to read per token), so for classification and routing tasks 3-8B remains the sweet spot: fast enough for real-time use, large enough for multi-class accuracy. *Mixture-of-Experts* models are the exception: a 30B-total/3B-active MoE decodes at roughly dense-3B speed because only its active parameters stream through memory per token — but every parameter must stay resident, so size its pod by the full model file plus KV cache (the auto-sizer gives it 40Gi at q4), and expect prefill to be somewhat slower than a dense 8B. See [choosing a base model](training.md#choosing-a-base-model) for when the trade is worth it.
 
 ## Node provisioning and instance selection
 

@@ -121,7 +121,9 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 		sized.CheckpointInterval = 50
 		sized.ConvertMemory = "56Gi"
 		sized.ConvertEphemeralStorage = "72Gi"
-	default: // 30B-class, in practice the small-MoE family (30B total, ~3B active).
+	default: // 30B-class: the small-MoE family (30B total, ~3B active), the largest
+		// size Slemify targets on CPU. Dense models of this size are not a
+		// target (Parse warns); the tier holds their file but decode is slow.
 		// Conversion holds the bf16 download (~61 GB for 30B), the f16 GGUF of
 		// the same size, and the quantized output on the node disk at once.
 		// Serving loads only the q4_k_m file (~17 GB) and runs the active
@@ -195,6 +197,16 @@ func autoSizeGeneration(model ModelConfig, data DataConfig, training TrainingCon
 // 3B active per token at inference.
 var moeName = regexp.MustCompile(`(\d+)b-a(\d+(?:\.\d+)?)b`)
 
+// isMoE reports whether the model id names a mixture-of-experts model.
+func isMoE(modelID string) bool {
+	return moeName.MatchString(strings.ToLower(modelID))
+}
+
+// maxDenseTarget is the largest dense generation model Slemify targets on
+// CPU. Above it, only the small-MoE class (30B total, ~3B active) is a
+// target: it decodes at roughly dense-3B speed. See docs/deep-dive/training.md.
+const maxDenseTarget = 8
+
 // estimateModelSize returns the approximate total parameter count in
 // billions from the HuggingFace model id. For MoE ids it is the total, which
 // is what the download, the f16 GGUF, and the quantization have to hold.
@@ -207,13 +219,15 @@ func estimateModelSize(modelID string) int {
 		total, _ := strconv.Atoi(m[1])
 		return total
 	}
+	// Dense sizes Slemify has measured on CPU. Nothing above 32B: a dense
+	// model that large decodes too slowly on CPU to be a target, and the
+	// small-MoE class covers the quality it would bring.
 
 	// Check from largest to smallest to avoid "1b" matching inside "13b"
 	sizeHints := []struct {
 		pattern string
 		size    int
 	}{
-		{"70b", 70},
 		{"32b", 32},
 		{"30b", 30},
 		{"14b", 14},
@@ -235,10 +249,20 @@ func estimateModelSize(modelID string) int {
 			return hint.size
 		}
 	}
+	// Any other "<n>b" in the id (a 70B, a 120B): estimate it so the size
+	// warning fires instead of silently sizing it as a 7B.
+	if m := denseName.FindStringSubmatch(lower); m != nil {
+		if n, err := strconv.ParseFloat(m[1], 64); err == nil && n >= 1 {
+			return int(n + 0.5)
+		}
+	}
 
 	// Default assumption: 7B (most common SLM size)
 	return 7
 }
+
+// denseName matches a parameter count such as "70b" or "1.5b" in a model id.
+var denseName = regexp.MustCompile(`(\d+(?:\.\d+)?)b(?:[^a-z0-9]|$)`)
 
 // estimateSampleCount provides a rough sample count estimate.
 // In practice this would be determined by reading the actual data from S3.

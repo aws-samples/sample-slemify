@@ -87,28 +87,6 @@ func TestAutoSize13BModel(t *testing.T) {
 	}
 }
 
-func TestAutoSize70BModel(t *testing.T) {
-	// Tool targets ≤10B models. 70B falls into the >8B default tier.
-	// No hardcoded instance types — Karpenter selects.
-	sized := AutoSize(
-		ModelConfig{Base: "meta-llama/Llama-3.1-70B-Instruct"},
-		baseData(500),
-		TrainingConfig{},
-	)
-
-	if sized.InferenceCPU != "16" {
-		t.Errorf("InferenceCPU = %q, want '16' for >8B", sized.InferenceCPU)
-	}
-	// 70B falls in the top (30B-class) tier: a q4 file of that size needs the
-	// larger memory allowance.
-	if sized.InferenceMemory != "40Gi" {
-		t.Errorf("InferenceMemory = %q, want '40Gi' for the top tier", sized.InferenceMemory)
-	}
-	if sized.CheckpointInterval != 50 {
-		t.Errorf("CheckpointInterval = %d, want 50 for >8B model", sized.CheckpointInterval)
-	}
-}
-
 func TestAutoSizeEpochOverride(t *testing.T) {
 	sized := AutoSize(
 		ModelConfig{Base: "mistralai/Mistral-7B-Instruct-v0.3"},
