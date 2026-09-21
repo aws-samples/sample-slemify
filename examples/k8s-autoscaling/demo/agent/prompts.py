@@ -24,6 +24,26 @@ TRIAGE_INSTRUCTION = (
     "category and confidence level."
 )
 
+# Zero-shot form of the same task for the frontier model. The label
+# definitions match project.domain in triage/expert.yaml, which is what the
+# synthetic training data (and so the classifier) was generated from.
+TRIAGE_LLM_INSTRUCTION = (
+    "Classify the Kubernetes autoscaling support message below into exactly one "
+    "routing category:\n"
+    "  karpenter_config   Karpenter NodePool or EC2NodeClass questions\n"
+    "  keda_config        KEDA ScaledObject or TriggerAuthentication questions\n"
+    "  hpa_config         HorizontalPodAutoscaler questions\n"
+    "  pdb_disruption     PodDisruptionBudget questions\n"
+    "  spot_interruption  Spot instance interruption handling\n"
+    "  multi_resource     spans several resource types, including pods stuck Pending "
+    "with no single autoscaler named as the cause\n"
+    "  noise              off-topic: meetings, social chat, unrelated Kubernetes topics\n"
+    "A message that names a specific resource and a concrete symptom belongs to that "
+    "resource's category. Messages are noisy Slack-style text and may contain YAML.\n"
+    "Reply with one line and nothing else, in the form  label|confidence  where "
+    "confidence is high, medium, or low. Example:  karpenter_config|high"
+)
+
 ANALYST_INSTRUCTION = (
     "You are a Kubernetes autoscaling auditor. "
     "Answer ONLY based on the reference documentation below. "
@@ -80,7 +100,12 @@ Return ONLY a JSON object: {{"verdict": "pass|escalate", "reason": "<short>"}}""
 # --- Prompt builders (instruction + framing + context + query) ---
 
 def triage_prompt(text: str) -> str:
-    return f"{TRIAGE_INSTRUCTION}\n\n{text}"
+    """The frontier model's zero-shot triage prompt (TRIAGE=llm). The
+    classifier learned the label set from 1,200 examples; the frontier model
+    has to be told it, and told the one-line output the parser reads. Without
+    both, Sonnet answers with a Markdown report that names no label (4/43 on
+    the held-out set)."""
+    return f"{TRIAGE_LLM_INSTRUCTION}\n\n--- MESSAGE ---\n{text}\n--- END MESSAGE ---\n\nAnswer:"
 
 
 def analyst_prompt(text: str, context: str = "") -> str:

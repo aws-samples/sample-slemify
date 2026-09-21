@@ -115,9 +115,9 @@ spec:
               protocol: TCP
           env:
             - name: AWS_REGION
-              value: "eu-west-1"
+              value: "us-west-2"
             - name: AWS_DEFAULT_REGION
-              value: "eu-west-1"
+              value: "us-west-2"
             - name: TRIAGE_URL
               value: "http://k8s-autoscaling-triage-inference.slemify:8080"
             - name: ANALYST_URL
@@ -135,7 +135,7 @@ spec:
             - name: BEDROCK_INDEX_NAME
               value: "k8s-autoscaling-knowledge-bedrock"
             - name: LLM_MODEL
-              value: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+              value: "us.anthropic.claude-sonnet-4-6"
             # Steps: who fills each model-backed role. These defaults are the
             # CPU-first system. The monolith is TRIAGE=off EMBED=bedrock
             # RERANK=off ANALYST=llm GATE=off: embed the question, search, one
@@ -352,9 +352,9 @@ spec:
               protocol: TCP
           env:
             - name: AWS_REGION
-              value: "eu-west-1"
+              value: "us-west-2"
             - name: AWS_DEFAULT_REGION
-              value: "eu-west-1"
+              value: "us-west-2"
             # Apply is enabled here, but still gated by the opt-in write RBAC
             # (k8s-rbac-apply.yaml). Without that RBAC the tools pod can read but
             # cannot patch. Set to "false" to disable apply entirely.

@@ -24,6 +24,11 @@
 set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-slemify}"
+# The judge calls Bedrock from inside the Job; region and model follow the
+# caller's environment so the same script works wherever Bedrock is enabled
+# (Workshop Studio accounts: us-west-2 or us-east-1, us. inference profiles).
+BEDROCK_REGION="${BEDROCK_REGION:-${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}}"
+JUDGE_MODEL="${JUDGE_MODEL:-${LLM_MODEL:-us.anthropic.claude-sonnet-4-6}}"
 # Which orchestrator service to evaluate (override to point the eval at an
 # experimental deployment, e.g. a model-candidate A/B).
 ORCHESTRATOR_SVC="${ORCHESTRATOR_SVC:-k8s-autoscaling-orchestrator}"
@@ -95,9 +100,11 @@ spec:
           args: $ARGS_JSON
           env:
             - name: AWS_REGION
-              value: "eu-west-1"
+              value: "$BEDROCK_REGION"
             - name: AWS_DEFAULT_REGION
-              value: "eu-west-1"
+              value: "$BEDROCK_REGION"
+            - name: JUDGE_MODEL
+              value: "$JUDGE_MODEL"
             - name: ORCHESTRATOR_URL
               value: "http://$ORCHESTRATOR_SVC.$NAMESPACE"
             # The judge retrieves its reference with Titan against the Titan
@@ -169,6 +176,6 @@ rm -f "$LOG_FILE"
 
 FAILED="$(kubectl get "job/$JOB_NAME" -n "$NAMESPACE" -o jsonpath='{.status.failed}' 2>/dev/null || echo '')"
 if [ -n "$FAILED" ] && [ "$FAILED" != "0" ]; then
-  echo "=== Job reported failure (exit code reflects eval failures or an error) ===" >&2
+  echo "=== Job reported failure (the eval crashed or was run with --strict) ===" >&2
 fi
 echo "=== Done. Job $JOB_NAME will self-clean in 1h (ttlSecondsAfterFinished) ==="

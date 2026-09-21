@@ -32,7 +32,7 @@ Usage:
 
 Env:
   ORCHESTRATOR_URL  (default http://localhost:8000)
-  JUDGE_MODEL       (default eu.anthropic.claude-sonnet-4-5-20250929-v1:0)
+  JUDGE_MODEL       (default: LLM_MODEL, else us.anthropic.claude-sonnet-4-6)
   AWS_REGION        (judge runs on Bedrock; uses the default AWS credentials)
 """
 import argparse
@@ -49,7 +49,7 @@ import httpx
 import yaml
 
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:8000")
-JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0")
+JUDGE_MODEL = os.environ.get("JUDGE_MODEL", os.environ.get("LLM_MODEL", "us.anthropic.claude-sonnet-4-6"))
 # The judge grounds its grading in the same knowledge base the agent uses, so it
 # verifies the answer's claims against the authoritative docs instead of its own
 # (possibly stale) memory. Retrieved broadly on the question AND the answer's own
@@ -421,6 +421,11 @@ def main():
                          "detect 1-2 case effects on this nondeterministic "
                          "pipeline. Use 1 only for quick smoke checks.")
     ap.add_argument("--save-baseline", action="store_true")
+    ap.add_argument("--strict", action="store_true",
+                    help="exit 1 when any case fails or errors (for CI/hooks). "
+                         "Off by default: a failed case is a measurement, and "
+                         "under make a non-zero exit prints an Error line under "
+                         "the scoreboard.")
     args = ap.parse_args()
 
     with open(args.cases, encoding="utf-8") as f:
@@ -510,8 +515,8 @@ def main():
             json.dump(scorecard, f, indent=2)
         print(f"Saved baseline -> {baseline_path}")
 
-    # Non-zero exit if anything failed (useful for CI/hooks).
-    sys.exit(1 if (counts["fail"] or counts["error"]) else 0)
+    # Non-zero exit only with --strict (useful for CI/hooks).
+    sys.exit(1 if args.strict and (counts["fail"] or counts["error"]) else 0)
 
 
 if __name__ == "__main__":

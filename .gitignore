@@ -74,6 +74,9 @@ data/processed/
 *.jsonl
 # Human-labeled held-out sets are source, not artifacts
 !examples/**/data/eval-labeled/*.jsonl
+# The retrieval held-out set is generated once (make_recall_set.py, seed 7) and
+# committed so every attendee scores the same 100 questions
+!examples/**/demo/eval/recall-set.jsonl
 
 # Model artifacts
 models/
