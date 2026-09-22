@@ -37,7 +37,21 @@ resource "aws_iam_role_policy" "s3_csi" {
   policy = data.aws_iam_policy_document.s3_csi.json
 }
 
+# The addon reports ACTIVE only 8 to 9 minutes after a node exists (its pods
+# cannot schedule before then), and nothing in the seed uses it; only module
+# 3's analyst does. So the provisioning job creates it AFTER signalling the
+# event ready: the foreground apply runs with enable_s3_csi_addon=false (the
+# IAM role and policy still apply, they are cheap), and the tail re-applies
+# with =true. The addon stays declared and in state either way, so a repair
+# `terraform apply` converges it.
+variable "enable_s3_csi_addon" {
+  description = "Create the Mountpoint S3 CSI addon. Off in the foreground apply, on in the tail, so the event is ready without waiting the ~9 minutes the addon takes to go ACTIVE."
+  type        = bool
+  default     = true
+}
+
 resource "aws_eks_addon" "s3_csi" {
+  count        = var.enable_s3_csi_addon ? 1 : 0
   cluster_name = module.eks.cluster_name
   addon_name   = "aws-mountpoint-s3-csi-driver"
 

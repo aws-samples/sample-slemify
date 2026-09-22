@@ -99,12 +99,18 @@ phases:
       # The model bucket is created with the VPC target's siblings; make sure it
       # exists now so the GGUF conversion can start before the cluster is up.
       - terraform apply -input=false -auto-approve -target=aws_s3_bucket.models -target=aws_s3_bucket_server_side_encryption_configuration.models -target=aws_s3_bucket_public_access_block.models -target=aws_s3_bucket_versioning.models
-      # Start the GGUF conversion as early as possible: it only needs the model
-      # bucket and the amd64 gguf-convert image (it runs on the x86 fleet), not
-      # the cluster and not the arm64 image. Waiting for the amd64 build here
-      # costs a few minutes at most; starting the conversion at this point
-      # instead of after Terraform moves it off the critical path entirely
-      # (14 min conversion finishes before the seed does).
+      # Start the cluster apply in the background (it holds the state lock for
+      # 12+ minutes) and, while it runs, wait for the amd64 image and start the
+      # GGUF conversion. The conversion needs only the bucket (applied above)
+      # and the amd64 gguf-convert image (it runs on the x86 fleet), not the
+      # cluster and not the arm64 image. `terraform output` reads state without
+      # taking the lock, so it is safe while the apply runs. Ordering the wait
+      # after the apply starts is deliberate: a first attempt put the amd64
+      # wait before the EKS apply and delayed the cluster by nine minutes.
+      - |
+        terraform apply -input=false -auto-approve -target=module.eks > /tmp/eks-apply.log 2>&1 &
+        echo $! > /tmp/eks-apply.pid
+        echo "EKS apply started in the background (pid $(cat /tmp/eks-apply.pid))"
       - |
         if [ -n "${GGUF_BUILD:-}" ] && [ -f /tmp/image-builds ]; then
           read -r AMD_ID ARM_ID < /tmp/image-builds
@@ -125,7 +131,13 @@ phases:
           echo "gguf build started: ${GGUF_ID}"
           echo "${GGUF_ID}" > /tmp/gguf-build
         fi
-      - terraform apply -input=false -auto-approve -target=module.eks
+      - |
+        echo "Waiting for the EKS apply"
+        if wait "$(cat /tmp/eks-apply.pid)"; then
+          tail -n 3 /tmp/eks-apply.log
+        else
+          echo "EKS apply failed:"; tail -n 60 /tmp/eks-apply.log; exit 1
+        fi
       # Everything except the Mountpoint S3 CSI addon. The addon takes 8 to 9
       # minutes to report ACTIVE (its pods cannot schedule until the first node
       # exists) and nothing in the seed uses it; only module 3's analyst does,
@@ -134,7 +146,7 @@ phases:
       - |
         max_retry=3
         counter=1
-        until terraform apply -input=false -auto-approve -exclude=aws_eks_addon.s3_csi
+        until terraform apply -input=false -auto-approve -var enable_s3_csi_addon=false
         do
           [ "$counter" -eq "$max_retry" ] && exit 1
           echo "terraform apply failed, retrying in 30s (attempt $counter of $max_retry)"
@@ -196,7 +208,7 @@ phases:
       - |
         max_retry=3
         counter=1
-        until terraform apply -input=false -auto-approve -target=aws_eks_addon.s3_csi
+        until terraform apply -input=false -auto-approve -var enable_s3_csi_addon=true
         do
           [ "$counter" -eq "$max_retry" ] && { echo "S3 CSI addon apply failed after ${max_retry} attempts; repair with: make check-infra"; exit 1; }
           echo "addon apply failed, retrying in 30s (attempt $counter of $max_retry)"
