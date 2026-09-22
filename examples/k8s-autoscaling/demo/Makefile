@@ -3,7 +3,7 @@
 
 SCRIPTS := ./scripts
 
-.PHONY: demo reset clean infra eval eval-incluster scoreboard triage-acc recall index-tuned swap
+.PHONY: demo reset clean infra eval eval-incluster scoreboard triage-acc recall index-tuned check-infra swap
 
 # One command to start a demo session: reset the scenarios to their broken
 # state, then port-forward the orchestrator, open the browser, and launch the
@@ -54,6 +54,12 @@ recall:
 # that encoder is serving (module 2). `make recall` and EMBED=slemify read it.
 index-tuned:
 	bash scripts/index-tuned.sh
+
+# Check the two module-3 assets that provisioning finishes after the event is
+# marked ready (S3 CSI addon, analyst GGUF) and name the repair if one is
+# missing. REPAIR=1 starts the idempotent provisioning build to fix it.
+check-infra:
+	REPAIR_FLAG=$(REPAIR) bash scripts/check-infra.sh
 
 # Print the live scoreboard from /stats: per step configuration, queries seen,
 # Bedrock $/query, p50/p95 latency, escalation rate, per-step p50.
