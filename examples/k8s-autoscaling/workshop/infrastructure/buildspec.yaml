@@ -96,11 +96,45 @@ phases:
       - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/terraform"
       - echo "Applying VPC, then cluster, then the rest"
       - terraform apply -input=false -auto-approve -target=module.vpc
+      # The model bucket is created with the VPC target's siblings; make sure it
+      # exists now so the GGUF conversion can start before the cluster is up.
+      - terraform apply -input=false -auto-approve -target=aws_s3_bucket.models -target=aws_s3_bucket_server_side_encryption_configuration.models -target=aws_s3_bucket_public_access_block.models -target=aws_s3_bucket_versioning.models
+      # Start the GGUF conversion as early as possible: it only needs the model
+      # bucket and the amd64 gguf-convert image (it runs on the x86 fleet), not
+      # the cluster and not the arm64 image. Waiting for the amd64 build here
+      # costs a few minutes at most; starting the conversion at this point
+      # instead of after Terraform moves it off the critical path entirely
+      # (14 min conversion finishes before the seed does).
+      - |
+        if [ -n "${GGUF_BUILD:-}" ] && [ -f /tmp/image-builds ]; then
+          read -r AMD_ID ARM_ID < /tmp/image-builds
+          echo "Waiting for the amd64 image build before starting the GGUF conversion"
+          while true; do
+            STATUS=$(aws codebuild batch-get-builds --ids "${AMD_ID}" --query 'builds[0].buildStatus' --output text)
+            echo "  $(date +%H:%M:%S) amd64 ${STATUS}"
+            case "${STATUS}" in
+              IN_PROGRESS) sleep 20 ;;
+              SUCCEEDED) break ;;
+              *) echo "amd64 image build failed: ${STATUS}"; exit 1 ;;
+            esac
+          done
+          MODEL_BUCKET=$(terraform output -raw model_bucket)
+          GGUF_ID=$(aws codebuild start-build --project-name "${GGUF_BUILD}" \
+            --environment-variables-override name=MODEL_BUCKET,value="${MODEL_BUCKET}",type=PLAINTEXT \
+            --query 'build.id' --output text)
+          echo "gguf build started: ${GGUF_ID}"
+          echo "${GGUF_ID}" > /tmp/gguf-build
+        fi
       - terraform apply -input=false -auto-approve -target=module.eks
+      # Everything except the Mountpoint S3 CSI addon. The addon takes 8 to 9
+      # minutes to report ACTIVE (its pods cannot schedule until the first node
+      # exists) and nothing in the seed uses it; only module 3's analyst does,
+      # 30+ minutes into the lab. It is applied in the tail below, after the
+      # event has been signalled ready, still inside Terraform state and retried.
       - |
         max_retry=3
         counter=1
-        until terraform apply -input=false -auto-approve
+        until terraform apply -input=false -auto-approve -exclude=aws_eks_addon.s3_csi
         do
           [ "$counter" -eq "$max_retry" ] && exit 1
           echo "terraform apply failed, retrying in 30s (attempt $counter of $max_retry)"
@@ -133,22 +167,42 @@ phases:
           echo "images: ${DEMO_IMAGE} ${RERANKER_IMAGE}"
           echo "export DEMO_IMAGE=${DEMO_IMAGE} RERANKER_IMAGE=${RERANKER_IMAGE}" > /tmp/images.env
         fi
-      # Convert the analyst's base model to GGUF in CodeBuild (buildspec-gguf.yaml)
-      # while the seed runs. It needs the gguf-convert image, so it starts after
-      # the manifests are joined. About 14 minutes; the seed takes about 10.
-      - |
-        if [ -n "${GGUF_BUILD:-}" ] && [ -f /tmp/image-builds ]; then
-          MODEL_BUCKET=$(cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/terraform" && terraform output -raw model_bucket)
-          GGUF_ID=$(aws codebuild start-build --project-name "${GGUF_BUILD}" \
-            --environment-variables-override name=MODEL_BUCKET,value="${MODEL_BUCKET}",type=PLAINTEXT \
-            --query 'build.id' --output text)
-          echo "gguf build started: ${GGUF_ID}"
-          echo "${GGUF_ID}" > /tmp/gguf-build
-        fi
       - echo "Seeding the cluster"
       - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}"
       - '[ -f /tmp/images.env ] && . /tmp/images.env || true'
       - bash seed/seed.sh
+      # The lab can start: modules 0 to 2 need nothing beyond this point. Tell
+      # CloudFormation (and so Workshop Studio) now, rather than after the two
+      # module-3 assets below, which take another 10 to 15 minutes to converge.
+      # If either of those fails, this build shows FAILED in CodeBuild while the
+      # event stays usable; module 3's page has `make check-infra`, which names
+      # the exact repair for whichever asset is missing.
+      # On a repair re-run (make check-infra REPAIR=1) the stack is already
+      # CREATE_COMPLETE and the WaitCondition handle is spent; skip the signal.
+      - |
+        if [ -n "${CFN_RESPONSE_URL:-}" ]; then
+          STACK_STATUS=$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo UNKNOWN)
+          if [ "${STACK_STATUS}" = "CREATE_IN_PROGRESS" ]; then
+            curl -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"SUCCESS\",\"Reason\":\"Cluster and demo ready; module 3 assets converging\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"Cluster and demo ready\"}" "${CFN_RESPONSE_URL}"
+            echo "signalled CloudFormation: event ready"
+          else
+            echo "stack is ${STACK_STATUS}; not signalling (repair re-run)"
+          fi
+          touch /tmp/cfn-signalled
+        fi
+      # --- Tail: module 3 assets. Failures here fail the build, not the event. ---
+      - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/terraform"
+      - echo "Applying the Mountpoint S3 CSI addon (module 3)"
+      - |
+        max_retry=3
+        counter=1
+        until terraform apply -input=false -auto-approve -target=aws_eks_addon.s3_csi
+        do
+          [ "$counter" -eq "$max_retry" ] && { echo "S3 CSI addon apply failed after ${max_retry} attempts; repair with: make check-infra"; exit 1; }
+          echo "addon apply failed, retrying in 30s (attempt $counter of $max_retry)"
+          sleep 30
+          counter=$((counter + 1))
+        done
       - |
         if [ -f /tmp/gguf-build ]; then
           GGUF_ID=$(cat /tmp/gguf-build)
@@ -159,18 +213,17 @@ phases:
             case "${STATUS}" in
               IN_PROGRESS) sleep 30 ;;
               SUCCEEDED) break ;;
-              *) echo "gguf build failed: ${STATUS}"; exit 1 ;;
+              *) echo "gguf build failed: ${STATUS}; repair with: make check-infra"; exit 1 ;;
             esac
           done
         fi
   post_build:
     commands:
       - echo "build status ${CODEBUILD_BUILD_SUCCEEDING}"
+      # SUCCESS was already sent after the seed. Only signal here if the build
+      # failed BEFORE that point (no signal yet), so CloudFormation does not hang
+      # on the WaitCondition. A failure in the tail leaves the SUCCESS standing.
       - |
-        if [ -n "${CFN_RESPONSE_URL:-}" ]; then
-          if [ "${CODEBUILD_BUILD_SUCCEEDING}" -eq 1 ]; then
-            curl -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"SUCCESS\",\"Reason\":\"Provisioning complete\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"Cluster and demo ready\"}" "${CFN_RESPONSE_URL}"
-          else
-            curl -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"FAILURE\",\"Reason\":\"Provisioning failed\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"See CodeBuild logs: ${CODEBUILD_LOG_PATH}\"}" "${CFN_RESPONSE_URL}"
-          fi
+        if [ -n "${CFN_RESPONSE_URL:-}" ] && [ ! -f /tmp/cfn-signalled ]; then
+          curl -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"FAILURE\",\"Reason\":\"Provisioning failed\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"See CodeBuild logs: ${CODEBUILD_LOG_PATH}\"}" "${CFN_RESPONSE_URL}"
         fi

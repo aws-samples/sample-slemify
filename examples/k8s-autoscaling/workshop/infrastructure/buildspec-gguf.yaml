@@ -49,7 +49,9 @@ phases:
         if [ -f /tmp/skip.env ]; then
           echo "skipping conversion"
         else
-          # The image is built for both architectures; pull the one matching this host.
+          # This project runs on the x86 fleet, so pull the amd64 tag directly. The
+          # provisioning job starts this build as soon as the amd64 image is pushed,
+          # before the multi-arch :latest manifest exists, so :latest cannot be used.
           docker run --rm \
             -e BASE_MODEL="${BASE_MODEL}" -e QUANTIZE="${QUANTIZE}" \
             -e S3_BUCKET="${MODEL_BUCKET}" -e PROJECT="${PROJECT}" -e GGUF_FILENAME="${GGUF_FILENAME}" \
@@ -57,7 +59,7 @@ phases:
             -e AWS_REGION="${AWS_REGION}" -e AWS_DEFAULT_REGION="${AWS_REGION}" \
             -e AWS_CONTAINER_CREDENTIALS_RELATIVE_URI="${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}" \
             -v /tmp/convert:/tmp/convert \
-            "${REGISTRY}/slemify/gguf-convert:latest"
+            "${REGISTRY}/slemify/gguf-convert:${GGUF_IMAGE_TAG:-latest-amd64}"
         fi
   post_build:
     commands:

@@ -10,8 +10,9 @@ live in the content repository, not here.
 
 ```
 infrastructure/
-  buildspec.yaml         start image builds, terraform apply, join multi-arch manifests, start the GGUF
-                         conversion, seed, wait for the conversion, signal CloudFormation
+  buildspec.yaml         start image builds, terraform apply (VPC, bucket, cluster, everything but the
+                         S3 CSI addon), start the GGUF conversion early, join manifests, seed, signal
+                         CloudFormation READY, then finish the addon and wait for the conversion
   buildspec-images.yaml  build the six images for one architecture and push to the account's ECR
   buildspec-gguf.yaml    convert the analyst base model to GGUF on the 2XLARGE fleet, upload to the bucket
   terraform/             VPC, EKS Auto Mode cluster, addons, model bucket, IAM
@@ -74,6 +75,35 @@ of scratch disk to convert, and Auto Mode's default NodeClass gives nodes an
 conversion runs in CodeBuild instead (`buildspec-gguf.yaml`, 14 minutes on
 `BUILD_GENERAL1_2XLARGE`) and `slemify deploy` skips the convert when the
 file is already in the bucket.
+
+## Two-phase readiness
+
+Provisioning signals CloudFormation (and so Workshop Studio) that the event is
+ready as soon as the seed's smoke query passes: at that point everything
+modules 0 to 2 use is up. Two assets that only module 3 needs are finished
+afterwards, still inside the same build:
+
+- the Mountpoint S3 CSI addon, which takes 8 to 9 minutes to report ACTIVE
+  because its pods cannot schedule until the first node exists. It is applied
+  with `terraform apply -target=aws_eks_addon.s3_csi` (retried), so it stays
+  in Terraform state and a re-apply converges it;
+- the analyst GGUF conversion, started as soon as the amd64 `gguf-convert`
+  image is pushed (it needs only the bucket and that image, not the cluster),
+  so it normally finishes before the seed does.
+
+Measured: the event shows ready around minute 26 instead of 42, and both
+assets are in place a few minutes later, well before anyone reaches module 3.
+
+If either fails, the build shows FAILED in CodeBuild while the event stays
+usable. Module 3's page has attendees run `make check-infra`, which reports
+each asset as ok, wait, or missing, and `make check-infra REPAIR=1` re-runs
+this provisioning build. The re-run is idempotent: Terraform converges, the
+conversion skips when the file exists, the seed skips what is present, and
+the CloudFormation signal is skipped because the stack is already complete.
+The IDE role has `codebuild:StartBuild` on the two projects for this. Without
+the addon, `slemify deploy` falls back to downloading the model into the pod
+(slower start, same answers); without the GGUF, the analyst cannot deploy
+until the repair finishes.
 
 ## Running it by hand
 
