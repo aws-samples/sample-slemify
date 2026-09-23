@@ -99,29 +99,28 @@ phases:
       # The model bucket is created with the VPC target's siblings; make sure it
       # exists now so the GGUF conversion can start before the cluster is up.
       - terraform apply -input=false -auto-approve -target=aws_s3_bucket.models -target=aws_s3_bucket_server_side_encryption_configuration.models -target=aws_s3_bucket_public_access_block.models -target=aws_s3_bucket_versioning.models
-      # Start the cluster apply in the background (it holds the state lock for
-      # 12+ minutes) and, while it runs, wait for the amd64 image and start the
-      # GGUF conversion. The conversion needs only the bucket (applied above)
-      # and the amd64 gguf-convert image (it runs on the x86 fleet), not the
-      # cluster and not the arm64 image. `terraform output` reads state without
-      # taking the lock, so it is safe while the apply runs. Ordering the wait
-      # after the apply starts is deliberate: a first attempt put the amd64
-      # wait before the EKS apply and delayed the cluster by nine minutes.
+      # Apply the cluster and, in parallel, start the GGUF conversion as soon as
+      # the amd64 gguf-convert image exists. The conversion needs only the model
+      # bucket (applied above) and that image (it runs on the x86 fleet), not the
+      # cluster or the arm64 build, so it must not wait on the 12-minute cluster
+      # apply. This whole block is ONE shell command: a CodeBuild build spec runs
+      # each list item in a separate shell, so a background job started in one
+      # item cannot be waited on in another. The cluster apply runs in the
+      # background here and is waited on at the end of the same block.
       - |
         terraform apply -input=false -auto-approve -target=module.eks > /tmp/eks-apply.log 2>&1 &
-        echo $! > /tmp/eks-apply.pid
-        echo "EKS apply started in the background (pid $(cat /tmp/eks-apply.pid))"
-      - |
+        EKS_PID=$!
+        echo "EKS apply started in the background (pid ${EKS_PID}); starting the GGUF conversion meanwhile"
         if [ -n "${GGUF_BUILD:-}" ] && [ -f /tmp/image-builds ]; then
           read -r AMD_ID ARM_ID < /tmp/image-builds
-          echo "Waiting for the amd64 image build before starting the GGUF conversion"
+          echo "Waiting for the amd64 image build"
           while true; do
             STATUS=$(aws codebuild batch-get-builds --ids "${AMD_ID}" --query 'builds[0].buildStatus' --output text)
             echo "  $(date +%H:%M:%S) amd64 ${STATUS}"
             case "${STATUS}" in
               IN_PROGRESS) sleep 20 ;;
               SUCCEEDED) break ;;
-              *) echo "amd64 image build failed: ${STATUS}"; exit 1 ;;
+              *) echo "amd64 image build failed: ${STATUS}"; kill "${EKS_PID}" 2>/dev/null; exit 1 ;;
             esac
           done
           MODEL_BUCKET=$(terraform output -raw model_bucket)
@@ -131,9 +130,8 @@ phases:
           echo "gguf build started: ${GGUF_ID}"
           echo "${GGUF_ID}" > /tmp/gguf-build
         fi
-      - |
-        echo "Waiting for the EKS apply"
-        if wait "$(cat /tmp/eks-apply.pid)"; then
+        echo "Waiting for the EKS apply (pid ${EKS_PID})"
+        if wait "${EKS_PID}"; then
           tail -n 3 /tmp/eks-apply.log
         else
           echo "EKS apply failed:"; tail -n 60 /tmp/eks-apply.log; exit 1
