@@ -91,8 +91,10 @@ afterwards, still inside the same build:
   image is pushed (it needs only the bucket and that image, not the cluster),
   so it normally finishes before the seed does.
 
-Measured: the event shows ready around minute 26 instead of 42, and both
-assets are in place a few minutes later, well before anyone reaches module 3.
+Measured: the event signals ready at build minute 25 to 26 (about 27
+minutes of wall clock including the account vend), against 42 before, and
+both assets are ACTIVE and in the bucket a few minutes later, well before
+anyone reaches module 3.
 
 If either fails, the build shows FAILED in CodeBuild while the event stays
 usable. Module 3's page has attendees run `make check-infra`, which reports
