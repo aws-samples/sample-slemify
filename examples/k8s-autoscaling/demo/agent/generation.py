@@ -92,9 +92,15 @@ def _converse_stream_open(user_content: str):
             return config.bedrock.converse_stream(
                 modelId=config.LLM_MODEL,
                 messages=[{"role": "user", "content": [{"text": user_content}]}],
-                # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
-                inferenceConfig={"maxTokens": 2048},
-                additionalModelRequestFields=config.BEDROCK_EXTRA_FIELDS,
+                # This is the substantive answer (escalation and calibrated
+                # abstention), the one call that benefits from Sonnet 5's
+                # extended thinking: with it disabled, analytical answers get
+                # the consolidation-policy semantics wrong and call valid
+                # configs risky. Leave thinking on and give it room; the stream
+                # handler below ignores reasoning deltas, so only the answer
+                # text reaches the client. temperature/topP stay unset (Sonnet 5
+                # rejects them).
+                inferenceConfig={"maxTokens": 8192},
             )
         except ClientError as e:
             err = e.response.get("Error", {})
