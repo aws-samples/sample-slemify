@@ -84,10 +84,10 @@ data:
     - path: emails/
       type: raw
   synthetic:
-    model: eu.anthropic.claude-sonnet-4-6
+    model: global.anthropic.claude-sonnet-5
     pairs: 800
   evaluation:
-    model: eu.anthropic.claude-sonnet-4-6
+    model: global.anthropic.claude-sonnet-5
     pairs: 100
 
 training:

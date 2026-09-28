@@ -70,7 +70,8 @@ def _classify_llm(text: str) -> str:
     resp = config.bedrock.converse(
         modelId=config.LLM_MODEL,
         messages=[{"role": "user", "content": [{"text": prompts.triage_llm_prompt(text)}]}],
-        inferenceConfig={"maxTokens": 32, "temperature": 0},
+        # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
+        inferenceConfig={"maxTokens": 32},
     )
     metrics.charge(config.LLM_MODEL, "triage", *metrics.usage_from_converse(resp))
     return resp["output"]["message"]["content"][0]["text"]
@@ -108,7 +109,8 @@ def classify_intent(text: str) -> str:
         resp = config.bedrock.converse(
             modelId=config.LLM_MODEL,
             messages=[{"role": "user", "content": [{"text": _INTENT_PROMPT.format(text=text[:2000])}]}],
-            inferenceConfig={"maxTokens": 5, "temperature": 0},
+            # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
+            inferenceConfig={"maxTokens": 5},
         )
         metrics.charge(config.LLM_MODEL, "intent", *metrics.usage_from_converse(resp))
         out = resp["output"]["message"]["content"][0]["text"].lower()

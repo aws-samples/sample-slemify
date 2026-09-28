@@ -1383,7 +1383,8 @@ class BedrockBackend:
         response = client.converse(
             modelId=self.model_id,
             messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={"maxTokens": 8192, "temperature": 0.8},
+            # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
+            inferenceConfig={"maxTokens": 8192},
         )
         return response["output"]["message"]["content"][0]["text"]
 

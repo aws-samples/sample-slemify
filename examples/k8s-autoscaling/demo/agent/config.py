@@ -70,7 +70,7 @@ BEDROCK_INDEX_NAME = os.environ.get("BEDROCK_INDEX_NAME", "k8s-autoscaling-knowl
 ACTIVE_INDEX = BEDROCK_INDEX_NAME if EMBED == "bedrock" else INDEX_NAME
 
 # --- Models ---
-LLM_MODEL = os.environ.get("LLM_MODEL", "us.anthropic.claude-sonnet-4-6")
+LLM_MODEL = os.environ.get("LLM_MODEL", "global.anthropic.claude-sonnet-5")
 # The faithfulness gate defaults to the same capable model as escalation: a small
 # model proved too lenient at catching domain-specific wrong answers. Override
 # GATE_MODEL to trade accuracy for cost.

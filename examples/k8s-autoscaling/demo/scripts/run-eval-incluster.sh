@@ -28,7 +28,7 @@ NAMESPACE="${NAMESPACE:-slemify}"
 # caller's environment so the same script works wherever Bedrock is enabled
 # (Workshop Studio accounts: us-west-2 or us-east-1, us. inference profiles).
 BEDROCK_REGION="${BEDROCK_REGION:-${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}}"
-JUDGE_MODEL="${JUDGE_MODEL:-${LLM_MODEL:-us.anthropic.claude-sonnet-4-6}}"
+JUDGE_MODEL="${JUDGE_MODEL:-${LLM_MODEL:-global.anthropic.claude-sonnet-5}}"
 # Which orchestrator service to evaluate (override to point the eval at an
 # experimental deployment, e.g. a model-candidate A/B).
 ORCHESTRATOR_SVC="${ORCHESTRATOR_SVC:-k8s-autoscaling-orchestrator}"

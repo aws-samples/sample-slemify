@@ -135,7 +135,7 @@ spec:
             - name: BEDROCK_INDEX_NAME
               value: "k8s-autoscaling-knowledge-bedrock"
             - name: LLM_MODEL
-              value: "us.anthropic.claude-sonnet-4-6"
+              value: "global.anthropic.claude-sonnet-5"
             # Steps: who fills each model-backed role. These defaults are the
             # CPU-first system. The monolith is TRIAGE=off EMBED=bedrock
             # RERANK=off ANALYST=llm GATE=off: embed the question, search, one

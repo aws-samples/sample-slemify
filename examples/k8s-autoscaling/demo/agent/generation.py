@@ -92,7 +92,8 @@ def _converse_stream_open(user_content: str):
             return config.bedrock.converse_stream(
                 modelId=config.LLM_MODEL,
                 messages=[{"role": "user", "content": [{"text": user_content}]}],
-                inferenceConfig={"maxTokens": 2048, "temperature": 0.2},
+                # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
+                inferenceConfig={"maxTokens": 2048},
             )
         except ClientError as e:
             err = e.response.get("Error", {})

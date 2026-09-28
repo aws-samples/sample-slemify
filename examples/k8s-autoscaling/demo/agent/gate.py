@@ -21,7 +21,8 @@ def llm_gate(query: str, draft: str, context: str) -> tuple[bool, str]:
         resp = config.bedrock.converse(
             modelId=config.GATE_MODEL,
             messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={"maxTokens": 200, "temperature": 0},
+            # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
+            inferenceConfig={"maxTokens": 200},
         )
         metrics.charge(config.GATE_MODEL, "gate", *metrics.usage_from_converse(resp))
         text = resp["output"]["message"]["content"][0]["text"]

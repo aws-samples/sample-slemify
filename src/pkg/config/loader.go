@@ -72,7 +72,7 @@ const (
 	// data.evaluation.model when a config leaves them empty, so example
 	// configs do not have to hardcode a vendor model id. Override per
 	// project in expert.yaml, or globally with SLEMIFY_BEDROCK_MODEL.
-	DefaultBedrockModel = "eu.anthropic.claude-sonnet-4-6"
+	DefaultBedrockModel = "global.anthropic.claude-sonnet-5"
 )
 
 // defaultBedrockModel resolves the Bedrock model id default, honouring the

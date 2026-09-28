@@ -32,7 +32,7 @@ Usage:
 
 Env:
   ORCHESTRATOR_URL  (default http://localhost:8000)
-  JUDGE_MODEL       (default: LLM_MODEL, else us.anthropic.claude-sonnet-4-6)
+  JUDGE_MODEL       (default: LLM_MODEL, else global.anthropic.claude-sonnet-5)
   AWS_REGION        (judge runs on Bedrock; uses the default AWS credentials)
 """
 import argparse
@@ -49,7 +49,7 @@ import httpx
 import yaml
 
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:8000")
-JUDGE_MODEL = os.environ.get("JUDGE_MODEL", os.environ.get("LLM_MODEL", "us.anthropic.claude-sonnet-4-6"))
+JUDGE_MODEL = os.environ.get("JUDGE_MODEL", os.environ.get("LLM_MODEL", "global.anthropic.claude-sonnet-5"))
 # The judge grounds its grading in the same knowledge base the agent uses, so it
 # verifies the answer's claims against the authoritative docs instead of its own
 # (possibly stale) memory. Retrieved broadly on the question AND the answer's own
@@ -267,7 +267,8 @@ def judge(case: dict, answer: str) -> dict:
     resp = _bedrock.converse(
         modelId=JUDGE_MODEL,
         messages=[{"role": "user", "content": [{"text": prompt}]}],
-        inferenceConfig={"maxTokens": 800, "temperature": 0},
+        # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
+        inferenceConfig={"maxTokens": 800},
     )
     text = resp["output"]["message"]["content"][0]["text"]
     m = re.search(r"\{.*\}", text, re.DOTALL)

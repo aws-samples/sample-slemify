@@ -127,7 +127,8 @@ def bedrock_text(prompt, max_tokens=64):
     resp = bedrock().converse(
         modelId=BEDROCK_MODEL,
         messages=[{"role": "user", "content": [{"text": prompt}]}],
-        inferenceConfig={"maxTokens": max_tokens, "temperature": 0})
+        # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
+        inferenceConfig={"maxTokens": max_tokens})
     return resp["output"]["message"]["content"][0]["text"].strip()
 
 

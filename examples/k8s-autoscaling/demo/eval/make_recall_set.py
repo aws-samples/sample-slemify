@@ -86,7 +86,8 @@ def ask(br, model: str, chunk: dict) -> str:
         messages=[{"role": "user", "content": [{"text": PROMPT.format(
             source=chunk["source"], section=chunk.get("section", ""),
             text=chunk["text"][:3000])}]}],
-        inferenceConfig={"maxTokens": 120, "temperature": 0.7},
+        # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
+        inferenceConfig={"maxTokens": 120},
     )
     return resp["output"]["message"]["content"][0]["text"].strip().strip('"')
 

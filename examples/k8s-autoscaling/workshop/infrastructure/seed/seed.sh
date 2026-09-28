@@ -47,10 +47,10 @@ if [[ -z "${CLUSTER_NAME}" || -z "${REGION}" ]]; then
 fi
 BEDROCK_REGION="${BEDROCK_REGION:-${REGION}}"
 
-# Bedrock model. Workshop Studio vended accounts have Bedrock only in
-# us-east-1/us-west-2; use a us. inference profile there. Sonnet 4.5 is
-# Marketplace-gated in vended accounts and was denied in testing; 4.6 works.
-LLM_MODEL="${LLM_MODEL:-us.anthropic.claude-sonnet-4-6}"
+# Bedrock model. re:Invent 2026 requires Claude Sonnet 5 (4.5/4.6 are on the
+# do-not-use list) via the global Cross-Region Inference profile, which routes
+# from the vended account's region (Bedrock is in us-east-1/us-west-2 there).
+LLM_MODEL="${LLM_MODEL:-global.anthropic.claude-sonnet-5}"
 BEDROCK_EMBED_MODEL="${BEDROCK_EMBED_MODEL:-amazon.titan-embed-text-v2:0}"
 
 # Demo images. Default to the account's ECR (built by build-images.sh); override

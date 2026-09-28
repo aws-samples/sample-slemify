@@ -189,7 +189,7 @@ data:
     - path: examples/
       type: raw
   synthetic:
-    model: <bedrock-model-id>         # e.g., eu.anthropic.claude-sonnet-4-6
+    model: <bedrock-model-id>         # e.g., global.anthropic.claude-sonnet-5
     pairs: 800                        # 500-1000 for classification
 
 training:
