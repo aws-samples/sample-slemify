@@ -80,6 +80,15 @@ def scan_chunks(client: OpenSearch, index: str) -> list[dict]:
     return out
 
 
+def _converse_text(resp: dict) -> str:
+    """First text block of a Converse response. Sonnet 5 leads with a
+    reasoningContent block (no "text" key), so index 0 is not safe."""
+    for block in resp.get("output", {}).get("message", {}).get("content", []) or []:
+        if isinstance(block, dict) and "text" in block:
+            return block["text"]
+    return ""
+
+
 def ask(br, model: str, chunk: dict) -> str:
     resp = br.converse(
         modelId=model,
@@ -88,8 +97,10 @@ def ask(br, model: str, chunk: dict) -> str:
             text=chunk["text"][:3000])}]}],
         # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
         inferenceConfig={"maxTokens": 120},
+        # Disable Sonnet 5 extended thinking (terse output, no reasoning block).
+        additionalModelRequestFields={"thinking": {"type": "disabled"}},
     )
-    return resp["output"]["message"]["content"][0]["text"].strip().strip('"')
+    return _converse_text(resp).strip().strip('"')
 
 
 def main():

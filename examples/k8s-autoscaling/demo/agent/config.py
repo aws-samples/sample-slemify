@@ -75,6 +75,12 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "global.anthropic.claude-sonnet-5")
 # model proved too lenient at catching domain-specific wrong answers. Override
 # GATE_MODEL to trade accuracy for cost.
 GATE_MODEL = os.environ.get("GATE_MODEL", LLM_MODEL)
+# Claude Sonnet 5 turns on extended thinking by default, which leads the
+# response with a reasoning block and can spend the whole token budget before
+# writing the answer. The workshop's Bedrock calls want terse structured output
+# (verdicts, classifications, answers), not visible reasoning, so disable it.
+# Passed as additionalModelRequestFields on every converse/converse_stream call.
+BEDROCK_EXTRA_FIELDS = {"thinking": {"type": "disabled"}}
 # Bedrock embedding model for EMBED=bedrock. Titan Text Embeddings v2 at 1024d;
 # BEDROCK_EMBED_DIM must match the mapping index-knowledge.py wrote.
 BEDROCK_EMBED_MODEL = os.environ.get("BEDROCK_EMBED_MODEL", "amazon.titan-embed-text-v2:0")

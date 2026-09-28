@@ -1380,13 +1380,25 @@ class BedrockBackend:
         from botocore.config import Config
         config = Config(read_timeout=300, connect_timeout=10, retries={"max_attempts": 2})
         client = boto3.client("bedrock-runtime", config=config)
-        response = client.converse(
-            modelId=self.model_id,
-            messages=[{"role": "user", "content": [{"text": prompt}]}],
+        kwargs = {
+            "modelId": self.model_id,
+            "messages": [{"role": "user", "content": [{"text": prompt}]}],
             # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
-            inferenceConfig={"maxTokens": 8192},
-        )
-        return response["output"]["message"]["content"][0]["text"]
+            "inferenceConfig": {"maxTokens": 8192},
+        }
+        # Sonnet 5 turns on extended thinking by default, which leads the
+        # response with a reasoning block and can exhaust the token budget.
+        # Disable it for this terse-output call. Only Claude reasoning models
+        # accept the field, so guard on the model id to keep the backend generic.
+        if "claude-sonnet-5" in self.model_id or "claude-opus-5" in self.model_id:
+            kwargs["additionalModelRequestFields"] = {"thinking": {"type": "disabled"}}
+        response = client.converse(**kwargs)
+        # Sonnet 5 leads with a reasoningContent block (no "text" key), so scan
+        # for the first block that carries text rather than assuming index 0.
+        for block in response.get("output", {}).get("message", {}).get("content", []) or []:
+            if isinstance(block, dict) and "text" in block:
+                return block["text"]
+        return ""
 
 
 class OpenAIBackend:

@@ -134,6 +134,20 @@ def usage_from_converse(resp: dict) -> tuple[int, int]:
     return int(u.get("inputTokens", 0)), int(u.get("outputTokens", 0))
 
 
+def text_from_converse(resp: dict) -> str:
+    """Pull the answer text out of a Converse response.
+
+    Claude Sonnet 5 emits extended thinking by default, so content[0] can be a
+    reasoningContent block with no "text" key. Return the first content block
+    that actually carries text, rather than assuming it is at index 0.
+    """
+    content = resp.get("output", {}).get("message", {}).get("content", []) or []
+    for block in content:
+        if isinstance(block, dict) and "text" in block:
+            return block["text"]
+    return ""
+
+
 def steps_key(steps: dict) -> str:
     return ",".join(f"{k}={v}" for k, v in sorted(steps.items()))
 

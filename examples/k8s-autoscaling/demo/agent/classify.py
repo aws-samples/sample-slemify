@@ -72,9 +72,10 @@ def _classify_llm(text: str) -> str:
         messages=[{"role": "user", "content": [{"text": prompts.triage_llm_prompt(text)}]}],
         # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
         inferenceConfig={"maxTokens": 32},
+        additionalModelRequestFields=config.BEDROCK_EXTRA_FIELDS,
     )
     metrics.charge(config.LLM_MODEL, "triage", *metrics.usage_from_converse(resp))
-    return resp["output"]["message"]["content"][0]["text"]
+    return metrics.text_from_converse(resp)
 
 
 def classify(text: str) -> dict:
@@ -111,9 +112,10 @@ def classify_intent(text: str) -> str:
             messages=[{"role": "user", "content": [{"text": _INTENT_PROMPT.format(text=text[:2000])}]}],
             # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
             inferenceConfig={"maxTokens": 5},
+            additionalModelRequestFields=config.BEDROCK_EXTRA_FIELDS,
         )
         metrics.charge(config.LLM_MODEL, "intent", *metrics.usage_from_converse(resp))
-        out = resp["output"]["message"]["content"][0]["text"].lower()
+        out = metrics.text_from_converse(resp).lower()
         return "action" if re.search(r"\baction\b", out) else "answer"
     except Exception:
         return "answer"

@@ -73,6 +73,15 @@ RESULTS_DIR = os.path.join(HERE, "results")
 _bedrock = boto3.client("bedrock-runtime")
 
 
+def _converse_text(resp: dict) -> str:
+    """First text block of a Converse response. Sonnet 5 leads with a
+    reasoningContent block (no "text" key), so index 0 is not safe."""
+    for block in resp.get("output", {}).get("message", {}).get("content", []) or []:
+        if isinstance(block, dict) and "text" in block:
+            return block["text"]
+    return ""
+
+
 def _judge_embed(text: str) -> list[float]:
     if JUDGE_EMBEDDER == "bedrock":
         resp = _bedrock.invoke_model(
@@ -269,8 +278,11 @@ def judge(case: dict, answer: str) -> dict:
         messages=[{"role": "user", "content": [{"text": prompt}]}],
         # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
         inferenceConfig={"maxTokens": 800},
+        # Sonnet 5's default extended thinking can eat the whole token budget
+        # before writing the verdict; the judge wants terse JSON, so disable it.
+        additionalModelRequestFields={"thinking": {"type": "disabled"}},
     )
-    text = resp["output"]["message"]["content"][0]["text"]
+    text = _converse_text(resp)
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if not m:
         return {"verdict": "fail", "reason": f"unparseable judge output: {text[:120]}"}

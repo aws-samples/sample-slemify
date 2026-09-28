@@ -62,3 +62,7 @@ release:
   draft: false
   prerelease: auto
   name_template: "v{{.Version}}"
+  # The workshop ships a single moving v0.3.0 tag, so a re-release must
+  # overwrite the existing release's assets. Without replace, GoReleaser keeps
+  # the old assets and the upload fails with "already_exists" (422).
+  mode: replace

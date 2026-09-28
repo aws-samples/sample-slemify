@@ -117,6 +117,15 @@ def bedrock():
     return _bedrock
 
 
+def _converse_text(resp):
+    """First text block of a Converse response. Sonnet 5 leads with a
+    reasoningContent block (no "text" key), so index 0 is not safe."""
+    for block in resp.get("output", {}).get("message", {}).get("content", []) or []:
+        if isinstance(block, dict) and "text" in block:
+            return block["text"]
+    return ""
+
+
 def bedrock_text(prompt, max_tokens=64):
     """One rate-limited Bedrock call; returns the text of the reply."""
     global _last_bedrock_call
@@ -128,8 +137,10 @@ def bedrock_text(prompt, max_tokens=64):
         modelId=BEDROCK_MODEL,
         messages=[{"role": "user", "content": [{"text": prompt}]}],
         # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
-        inferenceConfig={"maxTokens": max_tokens})
-    return resp["output"]["message"]["content"][0]["text"].strip()
+        inferenceConfig={"maxTokens": max_tokens},
+        # Disable Sonnet 5 extended thinking (terse output, no reasoning block).
+        additionalModelRequestFields={"thinking": {"type": "disabled"}})
+    return _converse_text(resp).strip()
 
 
 def pct(values, q):

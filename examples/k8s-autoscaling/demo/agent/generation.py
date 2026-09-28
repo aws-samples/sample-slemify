@@ -94,6 +94,7 @@ def _converse_stream_open(user_content: str):
                 messages=[{"role": "user", "content": [{"text": user_content}]}],
                 # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
                 inferenceConfig={"maxTokens": 2048},
+                additionalModelRequestFields=config.BEDROCK_EXTRA_FIELDS,
             )
         except ClientError as e:
             err = e.response.get("Error", {})

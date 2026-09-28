@@ -23,9 +23,10 @@ def llm_gate(query: str, draft: str, context: str) -> tuple[bool, str]:
             messages=[{"role": "user", "content": [{"text": prompt}]}],
             # Claude Sonnet 5 rejects temperature/topP in inferenceConfig.
             inferenceConfig={"maxTokens": 200},
+            additionalModelRequestFields=config.BEDROCK_EXTRA_FIELDS,
         )
         metrics.charge(config.GATE_MODEL, "gate", *metrics.usage_from_converse(resp))
-        text = resp["output"]["message"]["content"][0]["text"]
+        text = metrics.text_from_converse(resp)
         verdict_m = re.search(r'"verdict"\s*:\s*"(\w+)"', text)
         reason_m = re.search(r'"reason"\s*:\s*"([^"]*)"', text)
         verdict = verdict_m.group(1).lower() if verdict_m else "escalate"
