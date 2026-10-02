@@ -3,7 +3,7 @@
 
 SCRIPTS := ./scripts
 
-.PHONY: demo reset clean infra eval eval-incluster scoreboard triage-acc recall index-tuned check-infra swap
+.PHONY: demo reset clean infra eval eval-incluster scoreboard scoreboard-save triage-acc recall index-tuned check-infra swap forward forward-check
 
 # One command to start a demo session: reset the scenarios to their broken
 # state, then port-forward the orchestrator, open the browser, and launch the
@@ -81,3 +81,66 @@ swap:
 	-pkill -f 'port-forward.*8000:80'; sleep 1
 	kubectl port-forward -n slemify svc/k8s-autoscaling-orchestrator 8000:80 > /tmp/pf-orchestrator.log 2>&1 &
 	@sleep 2; curl -s localhost:8000/stats | python3 -c 'import sys,json; print(json.load(sys.stdin)["steps"])'
+
+# (Re)start every port-forward the lab needs, idempotently. Always safe to run,
+# any number of times: for each service it kills any stale forward on that local
+# port before starting a fresh one, so you never end up with two bound to the
+# same port. It covers the two long-lived forwards (orchestrator 8000, OpenSearch
+# 9200) AND each per-model forward (triage 8081, analyst 8082, retriever 8083,
+# reranker 8084), but only for the model services that exist yet, so it is
+# correct at every stage of the lab. If anything cannot connect, run this; it is
+# the one command for "a forward died," whichever forward it was.
+#
+# Each entry is "localPort:svcName:remotePort". The orchestrator and OpenSearch
+# are always present; the model services appear as you deploy them per module.
+FORWARDS := \
+	8000:k8s-autoscaling-orchestrator:80 \
+	9200:opensearch-cluster-master:9200 \
+	8081:k8s-autoscaling-triage-inference:8080 \
+	8082:k8s-autoscaling-analyst-inference:8080 \
+	8083:k8s-autoscaling-retriever-inference:8080 \
+	8084:k8s-autoscaling-reranker:80
+forward:
+	@for f in $(FORWARDS); do \
+	  lp=$${f%%:*}; rest=$${f#*:}; svc=$${rest%%:*}; rp=$${rest##*:}; \
+	  if kubectl get svc -n slemify $$svc >/dev/null 2>&1; then \
+	    pkill -f "port-forward.*$$lp:$$rp" >/dev/null 2>&1; sleep 1; \
+	    kubectl port-forward -n slemify svc/$$svc $$lp:$$rp > /tmp/pf-$$lp.log 2>&1 & \
+	    echo "forwarding $$lp -> $$svc:$$rp"; \
+	  fi; \
+	done
+	@sleep 2; $(MAKE) --no-print-directory forward-check
+
+# Print the HTTP status of each forward that should be up at this stage (a model
+# row only prints once its service exists). 200 means up; 000 means the forward
+# is not up yet (wait a few seconds and re-run) or needs `make forward`.
+forward-check:
+	@for f in $(FORWARDS); do \
+	  lp=$${f%%:*}; rest=$${f#*:}; svc=$${rest%%:*}; \
+	  if kubectl get svc -n slemify $$svc >/dev/null 2>&1; then \
+	    path=$$([ "$$lp" = "8000" ] && echo "/stats" || echo "/"); \
+	    code=$$(curl -s -o /dev/null -w "%{http_code}" localhost:$$lp$$path); \
+	    if [ "$$code" = "000" ]; then state="DOWN (not reachable)"; \
+	    else state="up (HTTP $$code)"; fi; \
+	    printf "%-5s %-36s %s\n" "$$lp" "$$svc" "$$state"; \
+	  fi; \
+	done
+
+# Append the active configuration's scoreboard row to scoreboard.tsv in this
+# directory, so a swap (which clears the orchestrator's in-memory rows for the
+# previous configuration) can never erase a number you already measured. Run it
+# right after each `make eval` / `make eval-incluster`, before the next swap.
+# The file is yours to keep; it is git-ignored.
+SCOREBOARD_FILE ?= scoreboard.tsv
+scoreboard-save:
+	@curl -s $${ORCHESTRATOR_URL:-http://localhost:8000}/stats | python3 -c \
+	  'import json,sys,os,time; \
+d=json.load(sys.stdin); s=d["steps"]; \
+cfg=",".join("%s=%s"%(k,s[k]) for k in sorted(s)); \
+sb=d.get("scoreboard",{}).get(cfg,{}); \
+f=os.environ.get("SCOREBOARD_FILE","scoreboard.tsv"); \
+new=not os.path.exists(f); \
+h="when\tconfig\tqueries\tfrontier_usd_p50\ttotal_ms_p50\tescalation_rate\tfirst_pass_rate\n"; \
+row="%s\t%s\t%s\t%s\t%s\t%s\t%s\n"%(time.strftime("%Y-%m-%d %H:%M"), cfg, sb.get("queries",""), sb.get("frontier_usd_per_query_p50",""), sb.get("total_ms_p50",""), sb.get("escalation_rate",""), d.get("slm_first_pass_rate","")); \
+open(f,"a").write((h if new else "")+row); \
+print("saved row for ["+cfg+"] to "+f)'
