@@ -189,6 +189,12 @@ sed -e "s|REPLACE_WITH_ECR_IMAGE|${DEMO_IMAGE}|g" \
 kubectl apply -f "${manifest}"
 rm -f "${manifest}"
 
+# The re-ranker arrives in module 2, where the attendee scales it up from zero.
+# The manifest ships it at one replica, so scale it down now to match the
+# module's "a new model comes online" narrative and keep the starting state
+# minimal (orchestrator, tools, OpenSearch, and the prewarm pause pod).
+kubectl scale deployment/k8s-autoscaling-reranker -n "${NAMESPACE}" --replicas=0
+
 # Set the region, Bedrock model, and monolith seats on the orchestrator. The
 # analyst URL default already points at the renamed service. env patches are
 # idempotent.
