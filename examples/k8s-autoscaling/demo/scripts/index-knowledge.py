@@ -165,6 +165,28 @@ def chunk_text(text: str, source: str, section: str) -> list[dict]:
 
 # --- Data sources ---
 
+def chunk_local_docs() -> list[dict]:
+    """Chunk the curated markdown under demo/knowledge/. These are short,
+    self-contained facts that exist because the upstream docs split a fact across
+    headings or a wide table that the size-based chunker can break apart. Indexed
+    alongside the cloned sources and exported to the grounding corpus like any
+    other chunk."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    docs_path = os.path.join(here, "..", "knowledge")
+    if not os.path.isdir(docs_path):
+        return []
+    chunks = []
+    for root, _, files in os.walk(docs_path):
+        for f in files:
+            if f.endswith(".md") and not f.startswith("_index"):
+                filepath = os.path.join(root, f)
+                with open(filepath) as fh:
+                    text = fh.read()
+                section = os.path.basename(filepath).replace(".md", "")
+                chunks.extend(chunk_text(text, "curated", section))
+    return chunks
+
+
 def clone_and_chunk(source: dict, tmpdir: str) -> list[dict]:
     """Shallow clone a repo and chunk all markdown files."""
     dest = os.path.join(tmpdir, source["name"])
@@ -402,13 +424,14 @@ def main():
     # Determine which git sources to process
     sources = SOURCES
     if source_filter:
-        if source_filter == "aws-blog":
+        if source_filter in ("aws-blog", "curated"):
+            # Non-git sources handled by their own blocks below.
             sources = []
         else:
             sources = [s for s in SOURCES if s["name"] == source_filter]
             if not sources:
                 print(f"  Error: unknown source '{source_filter}'")
-                print(f"  Available: {[s['name'] for s in SOURCES] + ['aws-blog']}")
+                print(f"  Available: {[s['name'] for s in SOURCES] + ['aws-blog', 'curated']}")
                 return
 
     all_chunks = []
@@ -426,6 +449,14 @@ def main():
             blog_chunks = fetch_blogs()
             all_chunks.extend(blog_chunks)
             print(f"  {len(blog_chunks)} chunks from blogs")
+
+        # Curated authoritative facts (demo/knowledge/). Included in a full index
+        # and when explicitly selected with --source=curated.
+        if not source_filter or source_filter == "curated":
+            print("\n--- Curated facts ---")
+            curated_chunks = chunk_local_docs()
+            all_chunks.extend(curated_chunks)
+            print(f"  {len(curated_chunks)} chunks from curated facts")
 
         print(f"\n  Total chunks: {len(all_chunks)}")
 
