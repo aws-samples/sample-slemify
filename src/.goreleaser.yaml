@@ -32,9 +32,12 @@ checksum:
 
 changelog:
   # Use GitHub's compare API so the changelog is scoped to commits since the
-  # previous tag, not the whole history, and renders short, linked hashes
-  # instead of raw 40-char SHAs.
+  # previous tag rather than the whole history.
   use: github
+  # Drop the commit hash prefix entirely (-1): the Conventional-Commits subjects
+  # are descriptive on their own, so the grouped list reads cleanly without raw
+  # 40-char SHAs in front of every line.
+  abbrev: -1
   sort: asc
   groups:
     - title: Features
