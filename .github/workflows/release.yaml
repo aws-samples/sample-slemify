@@ -39,3 +39,23 @@ jobs:
           workdir: src
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Because v0.3.0 is a moving tag, GitHub allows only one *published*
+      # release per tag: when this run publishes its release, GitHub demotes the
+      # tag's previous release to a draft rather than deleting it, so drafts
+      # accumulate one per release. Delete every draft release for this tag,
+      # keeping the just-published one. Runs after GoReleaser so the published
+      # release always exists first (no empty window). Deletes the release
+      # object only, never the git tag.
+      - name: Remove stale draft releases for this tag
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq ".[] | select(.tag_name == \"$TAG\" and .draft == true) | .id" \
+          | while read -r id; do
+              echo "Deleting stale draft release $id for $TAG"
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id" || true
+            done
