@@ -219,6 +219,21 @@ spec:
       labels:
         app: k8s-autoscaling-reranker
         slemify.io/component: demo
+      annotations:
+        # The reranker runs on the SLM NodePool, whose consolidationPolicy is
+        # WhenEmptyOrUnderutilized. When a later SLM workload (the analyst) is
+        # deployed, Karpenter repacks and can consolidate the node this pod sits
+        # on, evicting and rescheduling the reranker onto another node. That
+        # reschedule silently breaks the local `kubectl port-forward` to :8084,
+        # so `make recall` then prints "Rerank failed, using vector order" and
+        # records a wrong slemify+rerank row. This annotation is Karpenter's
+        # native opt-out from *voluntary* disruption (consolidation and drift):
+        # the pod stays put through repacking. It does not block involuntary
+        # disruption (node failure, Spot reclaim) or a rollout, so it is the
+        # right-sized fix rather than a PodDisruptionBudget, which only bounds
+        # how many replicas may be disrupted at once and would not stop a single
+        # pod from being moved.
+        karpenter.sh/do-not-disrupt: "true"
     spec:
       # The reranker service does not call the Kubernetes API.
       automountServiceAccountToken: false

@@ -86,9 +86,13 @@ ESCALATE if the answer:
 - states a field, value, default, or behavior that is NOT supported by the reference and is NOT basic, well-established Kubernetes fact, OR
 - contradicts the reference, OR
 - accepts a false premise in the question instead of correcting it, OR
-- calls a broken configuration valid, or invents a problem in a valid one.
+- calls a broken configuration valid, or invents a problem in a valid one, OR
+- is INCOMPLETE on an enumeration: the question asks which values/options/policies are valid (or to list them), the reference enumerates a definite set, and the answer omits one or more of those reference-listed items. A confidently-worded partial list is still wrong, OR
+- asserts a closed set ("the only values are...", "no other values are valid", "there are exactly two") that leaves out an item the reference lists.
 
-PASS if every substantive claim is supported by the reference or is well-established fact, OR the answer correctly declines because the docs do not cover it.
+Judge completeness only against what the reference actually enumerates: do not escalate for leaving out an item the reference never mentions, and do not demand detail the question did not ask for. An answer that correctly lists every reference-listed item is complete even if terse.
+
+PASS if every substantive claim is supported by the reference or is well-established fact AND, for an enumeration question, the answer covers every item the reference lists; OR the answer correctly declines because the docs do not cover it.
 
 REFERENCE:
 {context}
