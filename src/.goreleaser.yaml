@@ -34,10 +34,13 @@ changelog:
   # Use GitHub's compare API so the changelog is scoped to commits since the
   # previous tag rather than the whole history.
   use: github
-  # Drop the commit hash prefix entirely (-1): the Conventional-Commits subjects
-  # are descriptive on their own, so the grouped list reads cleanly without raw
-  # 40-char SHAs in front of every line.
+  # Drop the commit hash prefix entirely (-1) and render just the commit subject
+  # with its author: the Conventional-Commits subjects are descriptive on their
+  # own, so the grouped list reads cleanly without raw 40-char SHAs. A custom
+  # format is needed because the default template keeps a "{{.SHA}}: " prefix
+  # that would otherwise leave a dangling ": " once the hash is removed.
   abbrev: -1
+  format: "{{ .Message }}{{ if .Logins }} ({{ .Logins | englishJoin }}){{ end }}"
   sort: asc
   groups:
     - title: Features
