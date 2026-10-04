@@ -22,26 +22,15 @@ jobs:
         with:
           go-version-file: src/go.mod
 
-      # The workshop ships a single moving v0.3.0 tag. When the tag moves, a
-      # GitHub release for it already exists with assets from the previous
-      # position, and GoReleaser's upload then fails with 422 already_exists.
-      # Delete this tag's existing release assets first so GoReleaser
-      # republishes onto a clean release. No-op on a brand-new tag.
-      - name: Clear existing release assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            for asset in $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
-                --json assets --jq '.assets[].name'); do
-              echo "Deleting existing asset: $asset"
-              gh release delete-asset "$TAG" "$asset" --repo "$GITHUB_REPOSITORY" --yes || true
-            done
-          else
-            echo "No existing release for $TAG; nothing to clear."
-          fi
-
+      # The workshop ships a single moving v0.3.0 tag, so each tag move
+      # re-releases onto an existing GitHub release. GoReleaser's
+      # `release.mode: replace` (src/.goreleaser.yaml) handles that by replacing
+      # each asset in place. We deliberately do NOT pre-delete the existing
+      # assets: pre-deleting leaves the release empty if the run later fails
+      # mid-publish (a transient GitHub upload 422 did exactly that once), so a
+      # fresh workshop provision in that window could not download the binary.
+      # Letting `mode: replace` swap assets keeps the previous assets intact
+      # until the new ones are published.
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:

@@ -31,6 +31,10 @@ checksum:
   algorithm: sha256
 
 changelog:
+  # Use GitHub's compare API so the changelog is scoped to commits since the
+  # previous tag, not the whole history, and renders short, linked hashes
+  # instead of raw 40-char SHAs.
+  use: github
   sort: asc
   groups:
     - title: Features
@@ -66,3 +70,20 @@ release:
   # overwrite the existing release's assets. Without replace, GoReleaser keeps
   # the old assets and the upload fails with "already_exists" (422).
   mode: replace
+  # Prose summary rendered above the auto-generated changelog, so the release
+  # reads as a description of what shipped (as v0.2.0 did) rather than a bare
+  # commit list. Update this header when the release's focus changes.
+  header: |
+    Slemify v0.3.0 turns the k8s-autoscaling demo into the full workshop: a
+    multi-agent system on EKS Auto Mode that serves every model on CPU. A
+    classifier triages intent, a fine-tuned encoder plus a stock cross-encoder
+    reranker retrieve from OpenSearch, and a quantized analyst answers on
+    llama.cpp, grounded by RAG. A faithfulness gate escalates to a frontier
+    model only when the small model's answer is not supported by the evidence,
+    and a per-seat scoreboard measures the cost, latency, and quality of each
+    swap so you can see when the small model is good enough.
+
+    This release also hardens the demo for live, multi-account workshops:
+    idempotent port-forwards and a durable scoreboard, a reranker that stays put
+    through node consolidation, a gate that catches incomplete answers, and
+    curated grounding facts so enumeration questions retrieve a complete answer.
