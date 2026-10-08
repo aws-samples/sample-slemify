@@ -95,6 +95,18 @@ async def warmup():
     _ready = True
 
 
+# How long the stream may stay silent before we emit an SSE keepalive comment.
+# The first monolith query waits on the frontier model's time-to-first-token,
+# which is tens of seconds on a cold account and produces no graph events. The
+# browser reaches the UI through the IDE's port proxy, which buffers or idle-
+# times-out a response that sends nothing for that long, so the first query
+# appears to hang in the GUI while the same request streams fine over the CLI
+# (which hits the port-forward directly). A periodic ": keepalive" comment keeps
+# bytes flowing so the proxy neither buffers nor times out; SSE comment lines
+# start with ":" and the client's data-line parser ignores them.
+_KEEPALIVE_SECONDS = 5
+
+
 @app.post("/query")
 async def query_endpoint(q: Query):
     async def event_stream():
@@ -104,14 +116,41 @@ async def query_endpoint(q: Query):
         # and step_done events feed the per-step timings.
         meter = metrics.open_meter()
         escalated = False
-        # stream_mode="custom" yields exactly the dicts each node writes, so the
-        # UI's SSE contract is preserved without LangChain message plumbing.
-        async for event in agent.astream({"query": q.text, "autopilot": q.autopilot}, stream_mode="custom"):
-            if event.get("type") == "step_done":
-                meter.step(event.get("name", ""), int(event.get("ms", 0)))
-            elif event.get("type") == "answer_reset" and event.get("reason") == "escalating":
-                escalated = True
-            yield f"data: {json.dumps(event)}\n\n"
+
+        # Drain the graph's custom event stream into a queue so the response
+        # generator can interleave keepalives during long gaps (e.g. the frontier
+        # model's time-to-first-token). stream_mode="custom" yields exactly the
+        # dicts each node writes, so the UI's SSE contract is preserved.
+        queue: asyncio.Queue = asyncio.Queue()
+        _DONE = object()
+
+        async def drain():
+            try:
+                async for event in agent.astream(
+                    {"query": q.text, "autopilot": q.autopilot}, stream_mode="custom"):
+                    await queue.put(event)
+            finally:
+                await queue.put(_DONE)
+
+        drain_task = asyncio.create_task(drain())
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=_KEEPALIVE_SECONDS)
+                except asyncio.TimeoutError:
+                    # No graph event for a while: keep the connection alive.
+                    yield ": keepalive\n\n"
+                    continue
+                if event is _DONE:
+                    break
+                if event.get("type") == "step_done":
+                    meter.step(event.get("name", ""), int(event.get("ms", 0)))
+                elif event.get("type") == "answer_reset" and event.get("reason") == "escalating":
+                    escalated = True
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            drain_task.cancel()
+
         total_ms = round((time.perf_counter() - t0) * 1000)
         cost = meter.summary()
         metrics.record_query(config.steps(), meter, total_ms, escalated)
@@ -123,7 +162,14 @@ async def query_endpoint(q: Query):
         yield sse("total", ms=total_ms)
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    # Cache-Control and X-Accel-Buffering tell intermediate proxies (including the
+    # IDE's port proxy) not to buffer the event stream, so events reach the
+    # browser as they are produced rather than being held back.
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/stats")
