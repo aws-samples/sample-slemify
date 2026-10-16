@@ -384,12 +384,13 @@ spec:
           resources:
             requests:
               # Memory limit must equal request (security standard).
-              # FP32 weights load first (~1.2 GB) before the encoder is cast.
+              # The FP32 checkpoint loads first and the encoder is then cast to
+              # BF16; with torch the load peaks near 3 GiB, so 3Gi is OOMKilled.
               cpu: "4"
-              memory: 3Gi
+              memory: 5Gi
             limits:
               cpu: "4"
-              memory: 3Gi
+              memory: 5Gi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
