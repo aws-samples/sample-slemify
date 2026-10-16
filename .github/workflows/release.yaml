@@ -23,14 +23,39 @@ jobs:
           go-version-file: src/go.mod
 
       # The workshop ships a single moving v0.3.0 tag, so each tag move
-      # re-releases onto an existing GitHub release. GoReleaser's
-      # `release.mode: replace` (src/.goreleaser.yaml) handles that by replacing
-      # each asset in place. We deliberately do NOT pre-delete the existing
-      # assets: pre-deleting leaves the release empty if the run later fails
-      # mid-publish (a transient GitHub upload 422 did exactly that once), so a
-      # fresh workshop provision in that window could not download the binary.
-      # Letting `mode: replace` swap assets keeps the previous assets intact
-      # until the new ones are published.
+      # re-releases onto the same GitHub release. GitHub ties a release to the
+      # tag *name*, not the commit, so the release object survives a tag move
+      # with its old assets attached. GoReleaser's `release.mode: replace`
+      # only clears assets when it recreates the release (e.g. a draft); on a
+      # reused *published* release it leaves the old assets in place and the
+      # upload then fails with "already_exists" (HTTP 422). So we delete the
+      # tag's existing release assets here, right before GoReleaser uploads the
+      # new ones. This is a controlled re-release (binaries rebuild in minutes),
+      # not an automatic push, so the brief window with no downloadable asset is
+      # acceptable; relying on `mode: replace` alone fails every time GitHub
+      # reuses the release. The release object itself is left
+      # in place, so there is never a 404 on the release, only a short gap in
+      # its assets while GoReleaser re-uploads.
+      - name: Clear existing release assets for this tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          release_id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq ".[] | select(.tag_name == \"$TAG\" and .draft == false) | .id" \
+            | head -n1)
+          if [ -z "$release_id" ]; then
+            echo "No published release for $TAG yet; nothing to clear."
+            exit 0
+          fi
+          echo "Clearing assets on release $release_id for $TAG"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" \
+            --jq '.[].id' \
+          | while read -r asset_id; do
+              echo "Deleting asset $asset_id"
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+            done
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
