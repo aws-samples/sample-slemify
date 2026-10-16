@@ -49,6 +49,14 @@ func GenerateClassifierInferenceManifests(cfg *config.ExpertConfig, sized config
 	if mem == "" {
 		mem = "4Gi"
 	}
+	// ONNX Runtime defaults to one thread per core it can see and spin-waits
+	// between runs, so without this a pod requesting 2 vCPU keeps every core
+	// of the node busy. Size its thread pool to the CPU request instead.
+	cpuQty := resource.MustParse(cpu)
+	ortThreads := cpuQty.Value() // rounds a fractional request up
+	if ortThreads < 1 {
+		ortThreads = 1
+	}
 
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: labels},
@@ -80,6 +88,7 @@ func GenerateClassifierInferenceManifests(cfg *config.ExpertConfig, sized config
 								{Name: "S3_BUCKET", Value: cfg.Data.Bucket},
 								{Name: "PROJECT", Value: cfg.Project.Name},
 								{Name: "TASK", Value: cfg.Project.Task},
+								{Name: "ORT_INTRA_OP_THREADS", Value: fmt.Sprintf("%d", ortThreads)},
 							},
 							Ports: []corev1.ContainerPort{
 								{Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP},

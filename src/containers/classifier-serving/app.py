@@ -14,11 +14,17 @@ Embeds with onnxruntime + tokenizers (no torch, no sentence-transformers), so
 the image is small and starts fast.
 
 Config via environment variables:
-  S3_BUCKET, PROJECT, TASK, CONF_HIGH, CONF_MEDIUM, MAX_INPUT_CHARS
+  S3_BUCKET, PROJECT, TASK, CONF_HIGH, CONF_MEDIUM, MAX_INPUT_CHARS,
+  ORT_INTRA_OP_THREADS, ORT_ALLOW_SPINNING
+
+GET /stats returns the process CPU seconds and the request count, so a
+benchmark can price the pod on the cores it actually used.
 """
 import json
 import math
 import os
+import resource
+import threading
 
 import numpy as np
 import onnxruntime as ort
@@ -34,6 +40,12 @@ TASK = os.environ.get("TASK", "")
 MAX_INPUT_CHARS = int(os.environ.get("MAX_INPUT_CHARS", "8000"))
 CONF_HIGH = float(os.environ.get("CONF_HIGH", "0.8"))
 CONF_MEDIUM = float(os.environ.get("CONF_MEDIUM", "0.5"))
+# ONNX Runtime threading. The default (one thread per core the process can see,
+# with spin-waiting between runs) lets a pod that requests 2 vCPU keep every
+# core of a 32-vCPU node busy. Slemify sets ORT_INTRA_OP_THREADS to the pod's
+# CPU request; 0 means the ONNX Runtime default. Spinning is off unless asked.
+ORT_INTRA_OP_THREADS = int(os.environ.get("ORT_INTRA_OP_THREADS", "0") or 0)
+ORT_ALLOW_SPINNING = os.environ.get("ORT_ALLOW_SPINNING", "0")
 
 ARTIFACT_DIR = "/tmp/model"
 
@@ -42,6 +54,15 @@ _session: ort.InferenceSession | None = None
 _tokenizer: Tokenizer | None = None
 _head: dict | None = None
 _input_names: set[str] = set()
+_encoder_info: dict = {}
+_requests = 0
+_requests_lock = threading.Lock()
+
+
+def _count_request():
+    global _requests
+    with _requests_lock:
+        _requests += 1
 
 
 class ChatMessage(BaseModel):
@@ -73,12 +94,19 @@ def _download_artifacts():
     for fname in files:
         dst = os.path.join(ARTIFACT_DIR, fname)
         s3.download_file(S3_BUCKET, f"{prefix}/{fname}", dst)
+    # encoder.json (written by newer trainers) records the encoder precision.
+    if TASK != "extraction":
+        try:
+            s3.download_file(S3_BUCKET, f"{prefix}/encoder.json",
+                             os.path.join(ARTIFACT_DIR, "encoder.json"))
+        except Exception:
+            pass
     print(f"Downloaded artifacts from s3://{S3_BUCKET}/{prefix}/", flush=True)
 
 
 @app.on_event("startup")
 def load():
-    global _session, _tokenizer, _head, _input_names
+    global _session, _tokenizer, _head, _input_names, _encoder_info
     if not S3_BUCKET or not PROJECT:
         raise RuntimeError("S3_BUCKET and PROJECT are required")
 
@@ -101,10 +129,21 @@ def load():
     _tokenizer.enable_truncation(max_length=512)
     _tokenizer.enable_padding()
 
+    so = ort.SessionOptions()
+    if ORT_INTRA_OP_THREADS > 0:
+        so.intra_op_num_threads = ORT_INTRA_OP_THREADS
+    so.add_session_config_entry("session.intra_op.allow_spinning", ORT_ALLOW_SPINNING)
     _session = ort.InferenceSession(
-        os.path.join(ARTIFACT_DIR, "encoder.onnx"),
+        os.path.join(ARTIFACT_DIR, "encoder.onnx"), sess_options=so,
         providers=["CPUExecutionProvider"])
     _input_names = {i.name for i in _session.get_inputs()}
+    info_path = os.path.join(ARTIFACT_DIR, "encoder.json")
+    if os.path.exists(info_path):
+        with open(info_path) as f:
+            _encoder_info = json.load(f)
+    print(f"Encoder: {_encoder_info.get('precision', 'fp32')}, "
+          f"intra-op threads {ORT_INTRA_OP_THREADS or 'default'}, "
+          f"spinning {'on' if ORT_ALLOW_SPINNING == '1' else 'off'}", flush=True)
 
     head_path = os.path.join(ARTIFACT_DIR, "head.json")
     if os.path.exists(head_path):
@@ -148,6 +187,16 @@ def health():
     if not _is_extraction() and _session is None:
         return JSONResponse({"status": "loading"}, status_code=503)
     return {"status": "ok"}
+
+
+@app.get("/stats")
+def stats():
+    """Process CPU seconds (user + system, all threads) and requests served."""
+    r = resource.getrusage(resource.RUSAGE_SELF)
+    return {"cpu_seconds": round(r.ru_utime + r.ru_stime, 3), "requests": _requests,
+            "precision": _encoder_info.get("precision", "fp32") if not _is_extraction() else None,
+            "intra_op_threads": ORT_INTRA_OP_THREADS or None,
+            "spinning": ORT_ALLOW_SPINNING == "1"}
 
 
 def _embed(text: str) -> np.ndarray:
@@ -221,6 +270,7 @@ def _confidence_word(p: float) -> str:
 
 @app.post("/v1/chat/completions")
 def chat_completions(req: ChatRequest):
+    _count_request()
     text = req.messages[-1].content if req.messages else ""
     if _is_embedding():
         vec = _embed(text).tolist()
@@ -278,6 +328,7 @@ class ScoreRequest(BaseModel):
 @app.post("/score")
 def score(req: ScoreRequest):
     """Native scoring endpoint. Returns {"score": <float in [0,1]>}."""
+    _count_request()
     if not _is_scoring():
         return JSONResponse(
             {"error": "this model is a classifier, not a scoring head"},
@@ -297,6 +348,7 @@ def embed(req: EmbedRequest):
     Returns a list of L2-normalized vectors, one per input — a drop-in for the
     demo's stock bge embedding pod, now domain-tuned.
     """
+    _count_request()
     if not _is_embedding():
         return JSONResponse(
             {"error": "this model is not an embedding model"},
@@ -312,6 +364,7 @@ class ExtractRequest(BaseModel):
 @app.post("/extract")
 def extract_endpoint(req: ExtractRequest):
     """Native extraction endpoint. Returns {"spans": [{"type","text"}, ...]}."""
+    _count_request()
     if not _is_extraction():
         return JSONResponse(
             {"error": "this model is not an extraction tagger"},

@@ -3,3 +3,4 @@
 results/scorecard-*.json
 results/triage-*.json
 results/recall-*.json
+results/bench-*.json

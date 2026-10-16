@@ -216,21 +216,59 @@ def _embed(model, texts):
                      show_progress_bar=False), dtype=np.float32)
 
 
-def _export_and_upload_encoder(prefix, source=None):
+def _onnx_cls_vectors(onnx_path, tokenizer_path, texts):
+    """Embed texts through an exported ONNX encoder the way serving does:
+    512-token truncation, CLS pooling, L2 normalization, one text per run."""
+    import onnxruntime as ort
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(tokenizer_path)
+    tok.enable_truncation(max_length=512)
+    tok.enable_padding()
+    sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+    names = {i.name for i in sess.get_inputs()}
+    out = []
+    for t in texts:
+        e = tok.encode(t[:8000])
+        ids = np.array([e.ids], dtype=np.int64)
+        feed = {"input_ids": ids, "attention_mask": np.array([e.attention_mask], dtype=np.int64)}
+        if "token_type_ids" in names:
+            feed["token_type_ids"] = np.zeros_like(ids)
+        v = sess.run(None, feed)[0][0, 0, :].astype(np.float32)
+        out.append(v / (np.linalg.norm(v) + 1e-12))
+    return np.asarray(out, dtype=np.float32)
+
+
+def _export_and_upload_encoder(prefix, source=None, int8=False):
     """Export the encoder to ONNX and upload encoder.onnx + tokenizer.json.
 
     source defaults to the configured HF model id; embedding training passes the
     locally fine-tuned model directory so the exported graph is the tuned model.
+    With int8, the uploaded encoder.onnx is the int8 graph (dynamic, per-channel
+    weights), which runs on the CPU's native int8 matrix instructions (Arm i8mm,
+    x86 VNNI). Classification uses it; scoring and embedding stay fp32, because
+    their output is a number or a vector and int8 shifts it. encoder.json records
+    the precision. Returns (path of the uploaded encoder, path of the tokenizer).
     """
     log("Exporting encoder to ONNX...")
     onnx_dir = "/tmp/onnx-export"
     os.makedirs(onnx_dir, exist_ok=True)
     export_onnx(onnx_dir, source=source)
-    for fname in ("model.onnx", "tokenizer.json"):
-        fpath = os.path.join(onnx_dir, fname)
-        key = f"{prefix}/encoder.onnx" if fname == "model.onnx" else f"{prefix}/tokenizer.json"
+    encoder_path = os.path.join(onnx_dir, "model.onnx")
+    tokenizer_path = os.path.join(onnx_dir, "tokenizer.json")
+    if int8:
+        from onnxruntime.quantization import QuantType, quantize_dynamic
+        log("Quantizing encoder to int8 (dynamic, per-channel weights)...")
+        int8_path = os.path.join(onnx_dir, "model-int8.onnx")
+        quantize_dynamic(encoder_path, int8_path, weight_type=QuantType.QInt8, per_channel=True)
+        encoder_path = int8_path
+    for fpath, key in ((encoder_path, f"{prefix}/encoder.onnx"),
+                       (tokenizer_path, f"{prefix}/tokenizer.json")):
         s3.upload_file(fpath, S3_BUCKET, key)
         log(f"  uploaded {key} ({os.path.getsize(fpath) / 1048576:.0f} MB)")
+    s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}/encoder.json",
+                  Body=json.dumps({"precision": "int8" if int8 else "fp32"}).encode(),
+                  ContentType="application/json")
+    return encoder_path, tokenizer_path
 
 
 def train_classification(model, train_rows, eval_rows):
@@ -260,9 +298,18 @@ def train_classification(model, train_rows, eval_rows):
     clf = LogisticRegression(max_iter=2000, C=10.0, class_weight="balanced")
     clf.fit(Xtr, ytr)
 
+    # Export the int8 encoder before scoring, so the eval metrics and
+    # predictions the report shows come from the encoder that ships.
+    prefix = f"models/{PROJECT}"
+    encoder_path, tokenizer_path = _export_and_upload_encoder(prefix, int8=True)
+    if Xev_txt:
+        t0 = time.time()
+        Xev = _onnx_cls_vectors(encoder_path, tokenizer_path, Xev_txt)
+        embed_ms = (time.time() - t0) * 1000
+
     metrics = {"task": "classification", "embedding_dim": dim, "head": HEAD,
                "num_classes": len(classes), "train_samples": len(ytr),
-               "eval_samples": len(yev)}
+               "eval_samples": len(yev), "encoder_precision": "int8"}
 
     eval_predictions = []
     if Xev_txt:
@@ -304,7 +351,6 @@ def train_classification(model, train_rows, eval_rows):
                 "pooling": "cls", "classes": list(clf.classes_),
                 "coef": clf.coef_.tolist(), "intercept": clf.intercept_.tolist()}
 
-    prefix = f"models/{PROJECT}"
     log("Uploading head/labels/metrics to S3...")
     s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}/head.json",
                   Body=json.dumps(head_obj).encode(), ContentType="application/json")
@@ -318,7 +364,6 @@ def train_classification(model, train_rows, eval_rows):
         s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}/eval_predictions.jsonl",
                       Body="\n".join(json.dumps(r, ensure_ascii=False) for r in eval_predictions).encode(),
                       ContentType="application/json")
-    _export_and_upload_encoder(prefix)
     log(f"Artifacts uploaded to s3://{S3_BUCKET}/{prefix}/")
     log("=== Training complete ===")
 

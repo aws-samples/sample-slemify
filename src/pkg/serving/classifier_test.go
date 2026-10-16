@@ -44,6 +44,10 @@ func TestClassifierServingIsCPUClassifierMode(t *testing.T) {
 	if env["S3_BUCKET"] != "my-bucket" || env["PROJECT"] != "k8s-autoscaling-triage" {
 		t.Errorf("classifier serving missing S3_BUCKET/PROJECT env: %v", env)
 	}
+	// ONNX Runtime threads follow the CPU request, so the pod stays inside it.
+	if want := c.Resources.Requests.Cpu().String(); env["ORT_INTRA_OP_THREADS"] != want {
+		t.Errorf("ORT_INTRA_OP_THREADS = %q, want the CPU request %q", env["ORT_INTRA_OP_THREADS"], want)
+	}
 	// Serving is the lean ONNX image (no torch / sentence-transformers).
 	if c.Image == "" {
 		t.Error("classifier serving image not set")
