@@ -59,6 +59,7 @@ ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 REGISTRY_DEFAULT="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
 DEMO_IMAGE="${DEMO_IMAGE:-${REGISTRY_DEFAULT}/slemify/k8s-autoscaling-orchestrator:latest}"
 RERANKER_IMAGE="${RERANKER_IMAGE:-${REGISTRY_DEFAULT}/slemify/k8s-autoscaling-reranker:latest}"
+DECISION_IMAGE="${DECISION_IMAGE:-${REGISTRY_DEFAULT}/slemify/k8s-autoscaling-decision:latest}"
 
 echo "Cluster:        ${CLUSTER_NAME} (${REGION})"
 echo "Model bucket:   ${MODEL_BUCKET}"
@@ -185,6 +186,7 @@ log "Deploying the demo (monolith seats)"
 manifest="$(mktemp)"
 sed -e "s|REPLACE_WITH_ECR_IMAGE|${DEMO_IMAGE}|g" \
     -e "s|REPLACE_WITH_RERANKER_IMAGE|${RERANKER_IMAGE}|g" \
+    -e "s|REPLACE_WITH_DECISION_IMAGE|${DECISION_IMAGE}|g" \
     "${DEMO_DIR}/k8s-manifest.yaml" > "${manifest}"
 kubectl apply -f "${manifest}"
 rm -f "${manifest}"
@@ -194,6 +196,8 @@ rm -f "${manifest}"
 # module's "a new model comes online" narrative and keep the starting state
 # minimal (orchestrator, tools, OpenSearch, and the prewarm pause pod).
 kubectl scale deployment/k8s-autoscaling-reranker -n "${NAMESPACE}" --replicas=0
+# The decision model is module 4's optional gate; same pattern, scaled up there.
+kubectl scale deployment/k8s-autoscaling-decision -n "${NAMESPACE}" --replicas=0
 
 # Set the region, Bedrock model, and monolith seats on the orchestrator. The
 # analyst URL default already points at the renamed service. env patches are

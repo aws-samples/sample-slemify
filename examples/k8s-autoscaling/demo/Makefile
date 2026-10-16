@@ -76,13 +76,13 @@ scoreboard:
 
 # Swap the model in one or more steps and re-establish the port-forward.
 # Usage: make swap TRIAGE=classifier | make swap EMBED=slemify RERANK=on
-#        make swap ANALYST=slm | make swap GATE=llm
+#        make swap ANALYST=slm | make swap GATE=llm | make swap GATE=decision
 # Sets the given step variables on the orchestrator Deployment, waits for the
 # rollout, restarts the local 8000 port-forward the rollout killed, and prints
 # the resulting steps block.
 SWAP_VARS := $(foreach v,TRIAGE EMBED RERANK ANALYST GATE,$(if $($(v)),$(v)=$($(v))))
 swap:
-	@test -n "$(SWAP_VARS)" || { echo "usage: make swap TRIAGE=classifier|llm|off EMBED=bedrock|slemify RERANK=on|off ANALYST=llm|slm GATE=llm|off"; exit 1; }
+	@test -n "$(SWAP_VARS)" || { echo "usage: make swap TRIAGE=classifier|llm|off EMBED=bedrock|slemify RERANK=on|off ANALYST=llm|slm GATE=llm|decision|off"; exit 1; }
 	kubectl set env deployment/k8s-autoscaling-orchestrator -n slemify $(SWAP_VARS)
 	kubectl rollout status deployment/k8s-autoscaling-orchestrator -n slemify
 	@# The rollout killed the 8000 forward; re-establish it by delegating to the
@@ -111,7 +111,8 @@ FORWARDS_MODEL := \
 	8081:k8s-autoscaling-triage-inference:8080 \
 	8082:k8s-autoscaling-analyst-inference:8080 \
 	8083:k8s-autoscaling-retriever-inference:8080 \
-	8084:k8s-autoscaling-reranker:80
+	8084:k8s-autoscaling-reranker:80 \
+	8085:k8s-autoscaling-decision:80
 # A model forward is active only if the Service has at least one ready endpoint
 # address (a running pod); the forward targets check that with `kubectl get
 # endpoints` inline below.

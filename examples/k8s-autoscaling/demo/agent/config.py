@@ -22,9 +22,11 @@ from opensearchpy import OpenSearch
 #                                the OpenSearch index follows, see below)
 #   RERANK  = off | on           whether the cross-encoder re-ranks candidates
 #   ANALYST = llm | slm          who drafts the answer (Bedrock, or the CPU SLM)
+#   GATE    = off | llm | decision  who checks the draft against the evidence:
+#                                nobody, the frontier model on Bedrock, or a
+#                                CPU decision model (decision/app.py)
 #
-# The gate is always the LLM: judging a draft needs a capable model, and that is
-# true in every configuration. Invalid values fail fast at import.
+# Invalid values fail fast at import.
 def _step(name: str, default: str, allowed: tuple[str, ...]) -> str:
     val = os.environ.get(name, default).strip().lower()
     if val not in allowed:
@@ -40,7 +42,11 @@ TRIAGE = _step("TRIAGE", "classifier", ("off", "llm", "classifier"))
 EMBED = _step("EMBED", "slemify", ("bedrock", "slemify"))
 RERANK = _step("RERANK", "on", ("off", "on"))
 ANALYST = _step("ANALYST", "slm", ("llm", "slm"))
-GATE = _step("GATE", "llm", ("off", "llm"))
+GATE = _step("GATE", "llm", ("off", "llm", "decision"))
+# GATE=decision: the decision model returns P(the draft has an unsupported
+# claim); at or above this threshold the draft is escalated. Lower catches more
+# errors and escalates more good drafts; see the module 4 worksheet.
+GATE_THRESHOLD = float(os.environ.get("GATE_THRESHOLD", "0.6"))
 
 
 def steps() -> dict:
@@ -57,6 +63,8 @@ OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:9200")
 EMBEDDING_URL = os.environ.get("EMBEDDING_URL", "http://localhost:8083")
 # In-cluster cross-encoder re-ranker.
 RERANKER_URL = os.environ.get("RERANKER_URL", "http://localhost:8084")
+# In-cluster decision model, the gate when GATE=decision.
+DECISION_URL = os.environ.get("DECISION_URL", "http://localhost:8085")
 # Sandbox that executes the cluster-touching tools in a separate pod. When set,
 # the orchestrator holds NO cluster RBAC and calls this service over HTTP; the
 # tools pod is the only workload with K8s credentials. Empty = run tools in-process

@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT-0
 #
 # Build every image the workshop needs for one architecture and push them to
-# the account's ECR tagged latest-<arch>: the two demo images (orchestrator,
-# re-ranker) and the four Slemify pipeline images (data-pipeline,
+# the account's ECR tagged latest-<arch>: the three demo images (orchestrator,
+# re-ranker, decision model) and the four Slemify pipeline images (data-pipeline,
 # classifier-trainer, classifier-serving, gguf-convert). slemify deploy
 # auto-detects the account's ECR as its registry, so the pipeline images have
 # to be there before an attendee's first deploy. The llama.cpp server image
@@ -24,7 +24,7 @@ env:
     DEMO_DIR: "examples/k8s-autoscaling/demo"
     SLEMIFY_SRC: "src"
     # name=context, relative to the directory named in the comment above each group
-    DEMO_IMAGES: "k8s-autoscaling-orchestrator=. k8s-autoscaling-reranker=reranker"
+    DEMO_IMAGES: "k8s-autoscaling-orchestrator=. k8s-autoscaling-reranker=reranker k8s-autoscaling-decision=decision"
     SLEMIFY_IMAGES: "data-pipeline=containers/data-pipeline classifier-trainer=containers/classifier-trainer classifier-serving=containers/classifier-serving gguf-convert=containers/gguf-convert"
 
 phases:

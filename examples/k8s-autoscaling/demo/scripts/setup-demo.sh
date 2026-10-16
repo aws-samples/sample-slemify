@@ -22,6 +22,7 @@ ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 REGISTRY="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
 IMAGE="${REGISTRY}/slemify/k8s-autoscaling-orchestrator:latest"
 RERANKER_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-reranker:latest"
+DECISION_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-decision:latest"
 NAMESPACE="slemify"
 
 echo "=== Demo Setup ==="
@@ -84,6 +85,7 @@ echo "--- Step 4: Deploying manifests ---"
 
 sed -e "s|REPLACE_WITH_ECR_IMAGE|${IMAGE}|g" \
     -e "s|REPLACE_WITH_RERANKER_IMAGE|${RERANKER_IMAGE}|g" \
+    -e "s|REPLACE_WITH_DECISION_IMAGE|${DECISION_IMAGE}|g" \
     "${DEMO_DIR}/k8s-manifest.yaml" | \
   kubectl apply -f -
 

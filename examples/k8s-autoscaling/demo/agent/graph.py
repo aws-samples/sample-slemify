@@ -35,6 +35,8 @@ from .validation import validate_config, validate_draft_fix
 LBL_TRIAGE = ("Triage \u00b7 LLM (Bedrock)" if config.TRIAGE == "llm"
               else "Triage classifier \u00b7 ONNX Runtime (CPU)")
 LBL_INTENT = "Intent router (LLM)" if config.TRIAGE == "llm" else "Intent router (CPU)"
+LBL_GATE = ("Faithfulness gate \u00b7 decision model (CPU)" if config.GATE == "decision"
+            else "Faithfulness gate (LLM)")
 LBL_EMBED = ("Embedder (hosted, Bedrock)" if config.EMBED == "bedrock"
              else "Embedder (tuned encoder, CPU)")
 LBL_EMBED_DETAIL = (f"hosted embedding model, {config.BEDROCK_EMBED_DIM}d" if config.EMBED == "bedrock"
@@ -236,7 +238,7 @@ async def n_generate(state: AgentState) -> dict:
 
 
 async def n_critic(state: AgentState) -> dict:
-    """Faithfulness gate (LLM) + deterministic deprecated-config lint. Decides:
+    """Faithfulness gate (LLM or decision model) + deprecated-config lint. Decides:
     accept, retry a deprecated fix, gather live evidence for a runtime claim, or
     escalate to the LLM."""
     writer = get_stream_writer()
@@ -244,13 +246,13 @@ async def n_critic(state: AgentState) -> dict:
     context = _build_context(state)
     used_llm = state.get("used_llm", False)
     attempts = state.get("attempts", 0)
-    writer({"type": "step_start", "name": "Faithfulness gate (LLM)", "note": "is the draft supported by the evidence?"})
+    writer({"type": "step_start", "name": LBL_GATE, "note": "is the draft supported by the evidence?"})
     t = time.perf_counter()
     fix_issues = await asyncio.to_thread(validate_draft_fix, draft)
     # Gate every answer, including the escalated LLM's: the top of the ladder is
     # not exempt. If even the LLM answer isn't supported, we abstain rather than
     # ship a confidently-wrong answer.
-    escalate, reason = await asyncio.to_thread(gate.llm_gate, state["query"], draft, context)
+    escalate, reason = await asyncio.to_thread(gate.check, state["query"], draft, context)
 
     passed = (not escalate) and (not fix_issues)
     can_retry = attempts <= config.MAX_CRITIC_RETRIES
@@ -284,7 +286,7 @@ async def n_critic(state: AgentState) -> dict:
     detail = "supported" if not escalate else f"not supported \u2192 {'abstain' if used_llm else 'escalate'}: {reason}"
     if fix_issues:
         detail += " \u00b7 fix uses deprecated/invalid config"
-    writer({"type": "step_done", "name": "Faithfulness gate (LLM)", "ms": _ms(t), "detail": f"{detail} \u00b7 {verdict}"})
+    writer({"type": "step_done", "name": LBL_GATE, "ms": _ms(t), "detail": f"{detail} \u00b7 {verdict}"})
 
     out = {"critic_pass": passed, "correction": "", "needs_evidence": needs_evidence, "gate_reason": reason}
     if fix_issues and can_retry:
