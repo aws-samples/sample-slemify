@@ -11,8 +11,10 @@ Usage (port-forward the classifier first for TRIAGE=classifier):
   TRIAGE=classifier python3 eval/triage_acc.py
   TRIAGE=llm        python3 eval/triage_acc.py
 
-Prints per-label accuracy, the confusion pairs, and latency p50, and writes
-eval/results/triage-<step>-<stamp>.json.
+Prints per-label accuracy, the confusion pairs, latency p50, and (for
+TRIAGE=llm) the frontier model's cost per call, and writes
+eval/results/triage-<step>-<stamp>.json. `make bench-triage` reads the cost
+from the latest llm run to compare the two models on price.
 """
 import argparse
 import json
@@ -28,7 +30,7 @@ import yaml
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))  # the demo dir, for `agent`
 
-from agent import classify, config  # noqa: E402
+from agent import classify, config, metrics  # noqa: E402
 
 RESULTS_DIR = os.path.join(HERE, "results")
 
@@ -63,8 +65,10 @@ def main():
     per_label = defaultdict(lambda: [0, 0])  # label -> [correct, total]
     confusions = Counter()
     latencies = []
+    usd = []
     rows = []
     for it in items:
+        meter = metrics.open_meter()  # records the Bedrock cost when TRIAGE=llm
         t0 = time.perf_counter()
         try:
             pred = classify.classify(it["query"])
@@ -72,6 +76,7 @@ def main():
             pred = {"category": f"error: {e}", "confidence": "unknown"}
         ms = round((time.perf_counter() - t0) * 1000)
         latencies.append(ms)
+        usd.append(meter.summary()["usd"])
         ok = pred["category"] in it["accept"]
         per_label[it["label"]][1] += 1
         if ok:
@@ -89,6 +94,9 @@ def main():
     correct = sum(v[0] for v in per_label.values())
     print(f"\n=== Triage accuracy [{step}]: {correct}/{total} = {correct / total:.1%}  "
           f"latency p50 {statistics.median(latencies):.0f} ms ===")
+    usd_mean = statistics.fmean(usd) if usd else 0.0
+    if usd_mean:
+        print(f"  frontier cost: ${usd_mean:.6f} per call = ${usd_mean * 1e6:,.0f} per 1M calls")
     for label in sorted(per_label):
         c, n = per_label[label]
         print(f"  {label:<18} {c}/{n}")
@@ -103,6 +111,7 @@ def main():
     with open(out, "w", encoding="utf-8") as f:
         json.dump({"step": step, "accuracy": correct / total, "correct": correct,
                    "total": total, "latency_p50_ms": statistics.median(latencies),
+                   "usd_per_call_mean": round(usd_mean, 8),
                    "per_label": {k: {"correct": v[0], "total": v[1]} for k, v in per_label.items()},
                    "rows": rows}, f, indent=2)
     print(f"Wrote {out}")

@@ -17,8 +17,12 @@ How a model is served depends on its `project.task`:
   A lean CPU pod (onnxruntime + tokenizers, **no torch**) downloads the project's
   `encoder.onnx`, `tokenizer.json`, and `head.json` from S3, embeds the query
   with ONNX Runtime (CLS pooling + L2 normalize), applies the logistic head, and
-  returns a label. The encoder is exported to ONNX by the training job, so the
-  embeddings match training exactly and serving carries no heavyweight ML deps.
+  returns a label. The encoder is exported to ONNX (int8 for classification) by the training job, so serving carries no heavyweight
+  ML deps. ONNX Runtime's thread pool is sized to the pod's CPU request
+  (`ORT_INTRA_OP_THREADS`) with spin-waiting off; its default of one spinning
+  thread per visible core lets a 2-vCPU pod keep every core of the node busy.
+  `GET /stats` returns the process CPU seconds and requests served, so a
+  benchmark can price the pod on the CPU it actually used.
 - **Scoring** (`task: scoring`) → **the same ONNX encoder pod with a regression
   head**. The pod embeds the query identically, then computes `weights · vector +
   intercept` and clamps the result to `[0,1]`, returning a single number instead

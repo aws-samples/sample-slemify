@@ -3,7 +3,7 @@
 
 SCRIPTS := ./scripts
 
-.PHONY: demo reset clean infra eval eval-incluster scoreboard scoreboard-save triage-acc recall index-tuned check-infra swap forward forward-check
+.PHONY: demo reset clean infra eval eval-incluster scoreboard scoreboard-save triage-acc bench-triage recall index-tuned check-infra swap forward forward-check
 
 # One command to start a demo session: reset the scenarios to their broken
 # state, then port-forward the orchestrator, open the browser, and launch the
@@ -45,6 +45,13 @@ eval-incluster:
 # recall set. Both need the relevant services port-forwarded; see the scripts.
 triage-acc:
 	python3 eval/triage_acc.py
+
+# Price-performance of the triage classifier on CPU: throughput, latency, the CPU
+# it used per message, and that CPU priced at the node's on-demand rate. Runs as a
+# Job next to the model (no port-forward); about a minute. Compares against the
+# frontier model when a `TRIAGE=llm make triage-acc` result is in eval/results/.
+bench-triage:
+	bash scripts/run-bench-incluster.sh triage
 
 recall:
 	python3 eval/recall.py $(if $(MODE),--mode $(MODE),)

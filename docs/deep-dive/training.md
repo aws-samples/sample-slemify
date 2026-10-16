@@ -29,7 +29,11 @@ head over those vectors: a logistic head (`embedding_dim × num_classes` weights
 for classification, or a ridge regression head (`embedding_dim` weights + an
 intercept) for scoring. There is no backpropagation through the encoder, no
 epochs, and no GPU. The same job then exports the frozen encoder to ONNX so
-serving needs neither torch nor sentence-transformers. The expensive, GPU-hungry
+serving needs neither torch nor sentence-transformers. For `classification` the
+exported encoder is quantized to int8 (dynamic, per-channel weights), which runs
+on the CPU's native int8 matrix instructions (Arm i8mm, x86 VNNI), and the eval
+metrics are computed with that int8 encoder. Scoring and embedding encoders stay
+fp32, because their output is a number or a vector rather than a label. The expensive, GPU-hungry
 work (learning language) was already done once when the encoder was pretrained;
 every encoder-head task rides on top of it cheaply.
 
