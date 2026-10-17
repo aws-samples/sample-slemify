@@ -103,6 +103,40 @@ def score(mode: str, items: list[dict]) -> dict:
             "misses": misses}
 
 
+def _check_tuned_index(modes: list[str]) -> None:
+    """Guard against a half-built tuned index scoring as a false regression.
+
+    `make index-tuned` builds the slemify index over a port-forward; if that
+    forward drops mid-run the index is left partial, and recall then looks like
+    the tuned retriever lost to Bedrock when the real cause is a truncated index.
+    The bedrock index is built from the same corpus, so compare counts and fail
+    with an actionable message rather than reporting misleading numbers.
+    """
+    if not any(m.startswith("slemify") for m in modes):
+        return
+    try:
+        tuned = config.opensearch.count(index=config.INDEX_NAME)["count"]
+    except Exception as e:
+        print(f"  ERROR: cannot read the tuned index {config.INDEX_NAME} ({e}).\n"
+              f"  Build it first with `make index-tuned`.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        bedrock = config.opensearch.count(index=config.BEDROCK_INDEX_NAME)["count"]
+    except Exception:
+        bedrock = 0  # bedrock index may not exist in every module; skip the ratio check
+    if tuned == 0:
+        print(f"  ERROR: the tuned index {config.INDEX_NAME} is empty. Run `make index-tuned`.",
+              file=sys.stderr)
+        sys.exit(1)
+    if bedrock and tuned < 0.95 * bedrock:
+        print(f"  ERROR: the tuned index {config.INDEX_NAME} holds {tuned} documents but the "
+              f"bedrock index holds {bedrock}.\n  The tuned index looks incomplete (likely a "
+              f"dropped port-forward during `make index-tuned`), which would make recall report "
+              f"a false regression.\n  Rebuild it: `make index-tuned` (keep the port-forward in "
+              f"its own shell).", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=MODES + ["all"], default="all")
@@ -115,6 +149,7 @@ def main():
     if args.limit:
         items = items[: args.limit]
     modes = MODES if args.mode == "all" else [args.mode]
+    _check_tuned_index(modes)
     print(f"{len(items)} held-out queries\n")
     print(f"  {'mode':<16} {'recall@2':>9} {'recall@5':>9} {'MRR':>7} {'p50 ms':>8}")
     results = []

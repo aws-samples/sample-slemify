@@ -343,6 +343,30 @@ def index_chunks(client: OpenSearch, chunks: list[dict]) -> int:
     return indexed
 
 
+def verify_index_count(client: OpenSearch, expected: int) -> None:
+    """Fail loudly if the index does not hold the full corpus.
+
+    A dropped port-forward mid-index leaves a partial index with no error on the
+    happy path, which later makes `make recall` report a misleading retrieval
+    regression. Compare the indexed document count against the number of chunks
+    we set out to index and exit non-zero on a shortfall, so the problem surfaces
+    here (where it can be fixed by re-running) rather than as bad recall numbers
+    downstream.
+    """
+    client.indices.refresh(index=INDEX_NAME)
+    actual = client.count(index=INDEX_NAME)["count"]
+    if actual < expected:
+        print(
+            f"\n  ERROR: index {INDEX_NAME} holds {actual} of {expected} expected "
+            f"documents.\n  The index is incomplete — most likely the OpenSearch "
+            f"port-forward dropped mid-run.\n  Re-run `make index-tuned` (it rebuilds "
+            f"from scratch); if it keeps failing, keep the port-forward in its own "
+            f"shell and watch /tmp/pf-9200.log.",
+            file=sys.stderr)
+        sys.exit(1)
+    print(f"  Verified {actual}/{expected} documents indexed in {INDEX_NAME}.")
+
+
 def create_index(client: OpenSearch):
     """Create (or recreate) the k-NN index."""
     if client.indices.exists(index=INDEX_NAME):
@@ -464,6 +488,11 @@ def main():
             print("\n--- Indexing ---")
             n = index_chunks(client, all_chunks)
             print(f"=== Done: {n} chunks indexed ===")
+            # A full (non-append) build must hold every chunk. If a dropped
+            # port-forward truncated it, fail here instead of leaving a partial
+            # index for `make recall` to score as a false regression.
+            if not append:
+                verify_index_count(client, len(all_chunks))
 
         if export_s3:
             print("\n--- Exporting grounding corpus ---")
