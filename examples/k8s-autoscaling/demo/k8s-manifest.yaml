@@ -128,6 +128,8 @@ spec:
               value: "http://k8s-autoscaling-retriever-inference.slemify:8080"
             - name: RERANKER_URL
               value: "http://k8s-autoscaling-reranker.slemify:80"
+            - name: DECISION_URL
+              value: "http://k8s-autoscaling-decision.slemify:80"
             - name: TOOLSVC_URL
               value: "http://k8s-autoscaling-tools.slemify"
             - name: INDEX_NAME
@@ -316,6 +318,117 @@ spec:
   type: ClusterIP
   selector:
     app: k8s-autoscaling-reranker
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+---
+# Decision model (Vela 2.0 0.3B): the faithfulness gate when GATE=decision.
+# One forward pass per check, no text generation, so it runs on CPU next to
+# the re-ranker. Provisioning scales it to zero; module 4's optional step
+# scales it up.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-autoscaling-decision
+  namespace: slemify
+  labels:
+    app: k8s-autoscaling-decision
+    slemify.io/component: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k8s-autoscaling-decision
+  template:
+    metadata:
+      labels:
+        app: k8s-autoscaling-decision
+        slemify.io/component: demo
+      annotations:
+        # Same reason as the re-ranker: keep the pod (and a port-forward to it)
+        # in place when Karpenter repacks the SLM NodePool.
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      # The decision service does not call the Kubernetes API.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+        slemify.io/workload: slm
+      tolerations:
+        - key: slemify.io/slm
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: decision
+          image: REPLACE_WITH_DECISION_IMAGE
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            # Threads match the CPU request: the cheapest cost per check on
+            # Graviton5 (see decision/app.py). BF16 is used when the CPU has
+            # native BF16 instructions, FP32 otherwise (DECISION_PRECISION).
+            - name: DECISION_THREADS
+              value: "4"
+            - name: HOME
+              value: "/tmp"
+            - name: TMPDIR
+              value: "/tmp"
+          resources:
+            requests:
+              # Memory limit must equal request (security standard).
+              # The FP32 checkpoint loads first and the encoder is then cast to
+              # BF16; with torch the load peaks near 3 GiB, so 3Gi is OOMKilled.
+              cpu: "4"
+              memory: 5Gi
+            limits:
+              cpu: "4"
+              memory: 5Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-autoscaling-decision
+  namespace: slemify
+  labels:
+    app: k8s-autoscaling-decision
+    slemify.io/component: demo
+spec:
+  type: ClusterIP
+  selector:
+    app: k8s-autoscaling-decision
   ports:
     - port: 80
       targetPort: 8080

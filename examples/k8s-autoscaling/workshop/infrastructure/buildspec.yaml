@@ -35,7 +35,7 @@ env:
     ORCH_REPO: "slemify/k8s-autoscaling-orchestrator"
     RERANK_REPO: "slemify/k8s-autoscaling-reranker"
     # Every repository buildspec-images.yaml pushes; each gets a multi-arch manifest.
-    IMAGE_REPOS: "slemify/k8s-autoscaling-orchestrator slemify/k8s-autoscaling-reranker slemify/data-pipeline slemify/classifier-trainer slemify/classifier-serving slemify/gguf-convert"
+    IMAGE_REPOS: "slemify/k8s-autoscaling-orchestrator slemify/k8s-autoscaling-reranker slemify/k8s-autoscaling-decision slemify/data-pipeline slemify/classifier-trainer slemify/classifier-serving slemify/gguf-convert"
 
 phases:
   install:

@@ -69,6 +69,7 @@ CPU; the gate is one LLM call per answer.
 | OpenSearch | OpenSearch k-NN | CPU pod | Vector search over 3900+ doc chunks | — |
 | Analyst SLM | llama.cpp | c8g (Graviton4 CPU) | Structured config analysis, streamed | No — a stock 30B-A3B MoE at q4 (3.3B active params/token; only lever that raised accuracy AND speed together vs the previous dense 8B), grounded by RAG |
 | Faithfulness gate | Bedrock LLM | Managed | Judges whether the draft is supported by the evidence; drives accept/retry/escalate/abstain | No — LLM judge |
+| Decision model (optional gate) | PyTorch, BF16 encoder | c9g/c8g (Graviton CPU), 4 vCPU | `GATE=decision`: scores which spans of the draft the evidence does not support, in one forward pass; a threshold makes the verdict | No — stock Vela 2.0 0.3B |
 | LLM API | Bedrock | Managed | Open-ended fallback / escalation | No — general model |
 
 Routing (which tool to use) and argument extraction (the resource name) are
@@ -89,7 +90,7 @@ choose (see `agent/config.py`):
 | `EMBED` | `bedrock` | `slemify` | Who embeds the query (Titan v2, 1024d, or the tuned encoder, 768d). The OpenSearch index follows: `BEDROCK_INDEX_NAME` or `INDEX_NAME`. |
 | `RERANK` | `off` | `on` | Whether the cross-encoder re-orders candidates, or vector order is kept. |
 | `ANALYST` | `llm` | `slm` | Who drafts the answer. |
-| `GATE` | `off` | `llm` | Whether the draft is checked against the evidence before it ships. The gate is the frontier model whenever it exists; `off` ships the draft as written, with no escalation and no remediation. |
+| `GATE` | `off` | `llm` or `decision` | Whether the draft is checked against the evidence before it ships, and by whom. `llm` is the frontier model; `decision` is a CPU decision model (`decision/app.py`, see below); `off` ships the draft as written, with no escalation and no remediation. |
 
 `TRIAGE=off EMBED=bedrock RERANK=off ANALYST=llm GATE=off` is the
 **monolith**: embed the question, search, one frontier-model call, ship. That
@@ -290,6 +291,40 @@ answer that states only what the evidence supports and says plainly what it coul
 not confirm. That abstain step is the "never confidently wrong" backstop: the top
 of the ladder is not exempt from the gate. A replaced draft is updated in the UI,
 so the audience sees the agent catch and correct itself.
+
+### The gate on CPU: `GATE=decision`
+
+A **decision model** answers a typed question about some text in one forward
+pass and returns a probability for each option instead of generating text.
+`decision/` serves Vela 2.0 0.3B (vLLM Semantic Router and KR Labs, Apache-2.0
+weights; the tokenizer carries the Gemma Terms of Use) at a pinned revision,
+baked into the image. For each draft the orchestrator asks it one Span
+question over the answer, "which spans are not supported by the context?",
+with the same question, evidence, and draft the frontier gate would read. It
+returns `P(unsupported)` and the suspect spans; `GATE_THRESHOLD` (default 0.6)
+turns the probability into the verdict. Everything downstream (escalation, the
+second check, abstention, `/stats`) is unchanged, so the decision model is a
+model swap in the gate step like any other.
+
+```bash
+kubectl scale deployment/k8s-autoscaling-decision -n slemify --replicas=1
+make swap GATE=decision           # or GATE_THRESHOLD=... via kubectl set env
+```
+
+What changes: no frontier call per check, so frontier load per query is only
+the escalations, `(1 - p) x A`. What it does not check: the frontier gate's
+prompt also escalates incomplete enumerations, accepted false premises, and a
+valid config called broken; the decision model only scores support. Run the
+eval with both and compare quality before choosing. On 90 gate triples from
+this corpus (45 drafts, 45 with one seeded error) it caught 31 of 45 seeded
+errors at 0.6, against 32 of 45 for the frontier gate, and escalated about a
+third of the drafts the frontier gate passed.
+
+Engine: PyTorch eager with the encoder in BF16 on CPUs with native BF16 (FP32
+otherwise), 4 threads, about 1.3 s for a ~2,400-token check on Graviton5 at
+$0.06 per 1,000 checks. ONNX Runtime (FP32, Arm BF16 fast-math, INT8) and
+`torch.compile` were measured and were slower, less accurate, or both; the
+table is in `decision/app.py`.
 
 ### Cost model: the gate calls Bedrock on every query, not some
 
