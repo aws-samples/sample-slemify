@@ -111,14 +111,21 @@ func deploySingleExpert(ctx context.Context, cmd *cobra.Command, cfg *config.Exp
 	}
 
 	var client *k8s.Client
-	var k8sErr error
 	if !dryRun {
-		client, k8sErr = k8s.NewClient(kubeconfig, namespace)
-	} else {
-		k8sErr = fmt.Errorf("dry-run mode")
+		var err error
+		client, err = k8s.NewClient(kubeconfig, namespace)
+		if err != nil {
+			return fmt.Errorf("connecting to the Kubernetes cluster: %w\n\n"+
+				"If you intended a dry run, pass --dry-run explicitly. A connectivity "+
+				"failure is now a hard error rather than an implicit dry run: the state "+
+				"store and ECR auto-detection above are gated on the --dry-run flag, not "+
+				"on cluster reachability, so they already ran as if this were a real "+
+				"deploy. Silently downgrading to dry-run here used to leave real "+
+				"stage-completion markers in S3 that a later real deploy would then skip", err)
+		}
 	}
 
-	if k8sErr == nil {
+	if !dryRun {
 		if err := setupClusterInfrastructure(ctx, client, cfg, sized, pc); err != nil {
 			return err
 		}
@@ -146,7 +153,7 @@ func deploySingleExpert(ctx context.Context, cmd *cobra.Command, cfg *config.Exp
 			runner.RegisterStage(pipeline.StageServing, serving.Stage(client, cfg, sized, namespace, pc))
 		}
 	} else {
-		fmt.Printf("⚠ No K8s cluster available (%v), running in dry-run mode\n\n", k8sErr)
+		fmt.Printf("Dry run: showing what would be deployed without connecting to a cluster\n\n")
 		registerDryRunStages(runner, cfg, sized, pc)
 	}
 
