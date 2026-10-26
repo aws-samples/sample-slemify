@@ -328,16 +328,27 @@ def index_chunks(client: OpenSearch, chunks: list[dict]) -> int:
     indexed = 0
 
     batch_size = BEDROCK_EMBED_CONCURRENCY if EMBEDDER == "bedrock" else 10
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i + batch_size]
-        embeddings = embed_texts([c["text"] for c in batch])
+    batches = [chunks[i:i + batch_size] for i in range(0, len(chunks), batch_size)]
 
-        for chunk, embedding in zip(batch, embeddings):
-            client.index(index=INDEX_NAME, body={**chunk, "embedding": embedding})
-            indexed += 1
+    def embed_batch(batch):
+        return batch, embed_texts([c["text"] for c in batch])
 
-        if indexed % 50 == 0:
-            print(f"    {indexed}/{len(chunks)} indexed")
+    # Bedrock already fans each batch out across BEDROCK_EMBED_CONCURRENCY
+    # threads inside embed_texts(), so the outer loop stays sequential there
+    # (max_workers=1) to avoid multiplying concurrency. TEI (the slemify
+    # path) makes one synchronous call per batch with no concurrency of its
+    # own -- the same problem Bedrock already solved, just unfixed here --
+    # so submit several batches at once and let TEI's internal dynamic
+    # batching do the work instead of ~450 serial round trips.
+    outer_workers = 1 if EMBEDDER == "bedrock" else int(os.environ.get("SLEMIFY_EMBED_CONCURRENCY", "8"))
+    with ThreadPoolExecutor(max_workers=outer_workers) as pool:
+        for batch, embeddings in pool.map(embed_batch, batches):
+            for chunk, embedding in zip(batch, embeddings):
+                client.index(index=INDEX_NAME, body={**chunk, "embedding": embedding})
+                indexed += 1
+
+            if indexed % 50 == 0:
+                print(f"    {indexed}/{len(chunks)} indexed")
 
     client.indices.refresh(index=INDEX_NAME)
     return indexed
