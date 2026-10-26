@@ -6,6 +6,7 @@ live here so the rest of the package imports them from one place.
 import os
 
 import boto3
+from botocore.config import Config
 from opensearchpy import OpenSearch
 
 # --- Steps: which model fills each role ---
@@ -164,7 +165,19 @@ DEBUG_CONTEXT = bool(os.environ.get("DEBUG_CONTEXT"))
 # Prompt text lives in prompts.py (all instructions and templates in one place).
 
 # --- Shared clients (initialized once) ---
-bedrock = boto3.client("bedrock-runtime")
+# The pod reaches Bedrock through a NAT gateway, which drops a TCP connection
+# that is idle for 350 s without telling either end. With botocore defaults
+# (read_timeout 60 s, legacy retries) the next call on that pooled connection
+# waited 60 s, timed out, and retried: a 62 s gate. tcp_keepalive turns on
+# SO_KEEPALIVE; the pod sets net.ipv4.tcp_keepalive_time=60 so the probes keep
+# the NAT mapping alive. The timeouts are the backstop if a connection dies
+# anyway: normal Bedrock latency is 1.7 s p50, 3.3 s p99.
+bedrock = boto3.client("bedrock-runtime", config=Config(
+    connect_timeout=5,
+    read_timeout=15,
+    retries={"max_attempts": 3, "mode": "standard"},
+    tcp_keepalive=True,
+))
 
 
 def _make_opensearch() -> OpenSearch:

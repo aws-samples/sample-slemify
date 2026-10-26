@@ -101,6 +101,14 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+        # Keepalive probes after 60 s idle, under the NAT gateway's 350 s idle
+        # timeout. Only sockets with SO_KEEPALIVE are affected (the Bedrock
+        # client, see agent/config.py). Safe sysctl since Kubernetes 1.29.
+        sysctls:
+          - name: net.ipv4.tcp_keepalive_time
+            value: "60"
+          - name: net.ipv4.tcp_keepalive_intvl
+            value: "30"
       nodeSelector:
         slemify.io/workload: slm
       tolerations:
