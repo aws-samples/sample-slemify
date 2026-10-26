@@ -176,6 +176,13 @@ def _query_once(text: str) -> dict:
                 if t == "token":
                     buf.append(ev.get("text", ""))
                 elif t == "response":
+                    # A standalone message (e.g. the propose-check prompt) can
+                    # follow streamed analyst tokens with no boundary between
+                    # them. Without a separator the join below glues the two
+                    # together mid-sentence, e.g. "...configured.I answered
+                    # from the documentation...". Start it on its own line.
+                    if buf and not buf[-1].endswith(("\n", " ")):
+                        buf.append("\n\n")
                     buf.append(ev.get("text", ""))
                 elif t == "model":
                     model = ev.get("name", "")
