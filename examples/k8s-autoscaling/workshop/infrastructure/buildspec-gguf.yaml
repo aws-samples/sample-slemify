@@ -40,6 +40,9 @@ phases:
           echo "SKIP=1" > /tmp/skip.env
         fi
       - aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY}"
+      # Authenticated ECR Public pulls (base images) get a far higher rate
+      # limit than anonymous ones. Auth API is us-east-1 only. Non-fatal.
+      - aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws || echo "WARN ECR Public login failed, pulling anonymously"
       # The image runs as an unprivileged user; the bind-mounted scratch dir must be writable by it.
       - mkdir -p /tmp/convert && chmod 0777 /tmp/convert
       - df -h /tmp | tail -1

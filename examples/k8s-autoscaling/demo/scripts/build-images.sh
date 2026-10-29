@@ -62,6 +62,10 @@ sync_and_build() {
   rsync -az --delete --exclude='__pycache__' --exclude='*.pyc' \
     "${DEMO_DIR}/" "${host}:~/demo-build/"
   ssh "${host}" "aws ecr get-login-password --region ${REGION} | ${dkr} docker login --username AWS --password-stdin ${REGISTRY}"
+  # Base images come from ECR Public; authenticated pulls get a higher rate
+  # limit. The auth API is us-east-1 only. Non-fatal on failure.
+  ssh "${host}" "aws ecr-public get-login-password --region us-east-1 | ${dkr} docker login --username AWS --password-stdin public.ecr.aws" \
+    || echo "WARN ECR Public login failed on ${host}, pulling anonymously"
   ssh "${host}" "cd ~/demo-build && ${dkr} docker build -t ${ORCH_IMAGE}-${arch} . && ${dkr} docker push ${ORCH_IMAGE}-${arch}"
   ssh "${host}" "cd ~/demo-build/reranker && ${dkr} docker build -t ${RERANK_IMAGE}-${arch} . && ${dkr} docker push ${RERANK_IMAGE}-${arch}"
   ssh "${host}" "cd ~/demo-build/decision && ${dkr} docker build -t ${DECISION_IMAGE}-${arch} . && ${dkr} docker push ${DECISION_IMAGE}-${arch}"
