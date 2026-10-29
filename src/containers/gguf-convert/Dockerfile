@@ -1,6 +1,6 @@
 # Builder stage: clone llama.cpp at a pinned tag and build the quantize binary.
 # build-essential + cmake are only needed here; they never reach the runtime image.
-FROM python:3.12-slim@sha256:46cb7cc2877e60fbd5e21a9ae6115c30ace7a077b9f8772da879e4590c18c2e3 AS builder
+FROM public.ecr.aws/docker/library/python:3.12-slim@sha256:46cb7cc2877e60fbd5e21a9ae6115c30ace7a077b9f8772da879e4590c18c2e3 AS builder
 
 # Pin llama.cpp to a specific release tag for reproducible conversions. Must be
 # recent enough to support the base model architectures we convert.
@@ -22,7 +22,7 @@ RUN cmake -B build -DGGML_NATIVE=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -D
     && cmake --build build --target llama-quantize --config Release -j "$(nproc)"
 
 # Runtime stage: CPU image with the conversion toolchain.
-FROM python:3.12-slim@sha256:46cb7cc2877e60fbd5e21a9ae6115c30ace7a077b9f8772da879e4590c18c2e3
+FROM public.ecr.aws/docker/library/python:3.12-slim@sha256:46cb7cc2877e60fbd5e21a9ae6115c30ace7a077b9f8772da879e4590c18c2e3
 
 WORKDIR /app
 
