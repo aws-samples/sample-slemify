@@ -42,6 +42,11 @@ phases:
               --image-scanning-configuration scanOnPush=true >/dev/null 2>&1 || true
         done
       - aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY}"
+      # Base images come from ECR Public. Authenticated pulls get a far higher
+      # rate limit than anonymous ones, which matters when many teams build at
+      # once behind a shared NAT. The ECR Public auth API exists only in
+      # us-east-1. Non-fatal: if login fails, pulls fall back to anonymous.
+      - aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws || echo "WARN ECR Public login failed, pulling anonymously"
   build:
     commands:
       - |
