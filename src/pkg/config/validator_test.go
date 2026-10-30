@@ -362,3 +362,58 @@ func hasFieldError(errs []ValidationError, field string) bool {
 	}
 	return false
 }
+
+func TestValidateClassificationLabeledOnly(t *testing.T) {
+	cfg := validConfig()
+	cfg.Project.Task = TaskClassification
+	cfg.Project.Labels = map[string][]string{"routing": {"a", "b"}}
+	cfg.Model.Base = "BAAI/bge-base-en-v1.5"
+	cfg.Data.Synthetic.Pairs = 0
+	cfg.Data.Synthetic.Labeled = []SourceConfig{{Path: "train-labeled/a.jsonl"}}
+	if errs := Validate(cfg); len(errs) > 0 {
+		t.Fatalf("expected labeled-only classification config to be valid, got: %v", errs)
+	}
+}
+
+func TestValidateSyntheticNeedsPairsOrLabeled(t *testing.T) {
+	cfg := validConfig()
+	cfg.Data.Synthetic.Pairs = 0
+	if errs := Validate(cfg); !hasFieldError(errs, "data.synthetic.pairs") {
+		t.Errorf("expected pairs-or-labeled error, got: %v", errs)
+	}
+}
+
+func TestValidateLabeledRejectedForGeneration(t *testing.T) {
+	cfg := validConfig() // task=generation
+	cfg.Data.Synthetic.Labeled = []SourceConfig{{Path: "train-labeled/a.jsonl"}}
+	if errs := Validate(cfg); !hasFieldError(errs, "data.synthetic.labeled") {
+		t.Errorf("expected labeled-only-for-classification-or-scoring error, got: %v", errs)
+	}
+}
+
+func TestParseSyntheticLabeled(t *testing.T) {
+	cfg, warnings, err := Parse([]byte(`apiVersion: slemify/v1
+project:
+  name: triage
+  task: classification
+  domain: route messages
+  labels:
+    routing: [a, b]
+data:
+  bucket: my-bucket
+  path: p/
+  synthetic:
+    pairs: 0
+    labeled:
+      - path: train-labeled/x.jsonl
+`))
+	if err != nil || len(warnings) > 0 {
+		t.Fatalf("parse: err=%v warnings=%v", err, warnings)
+	}
+	if len(cfg.Data.Synthetic.Labeled) != 1 || cfg.Data.Synthetic.Model == "" {
+		t.Errorf("labeled not parsed or default model not applied: %+v", cfg.Data.Synthetic)
+	}
+	if errs := Validate(cfg); len(errs) > 0 {
+		t.Errorf("expected valid, got: %v", errs)
+	}
+}

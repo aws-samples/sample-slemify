@@ -325,9 +325,22 @@ def main():
                                raw_content, synthetic_cfg)
         return
 
+    # Committed labeled training records (synthetic.labeled). They go into the
+    # training set as-is. With pairs: 0 they are the whole training set, so
+    # every run trains on the same data instead of a fresh generation.
+    labeled_train = read_labeled_records(
+        data_cfg["bucket"], data_cfg["path"], synthetic_cfg.get("labeled") or [],
+        origin="labeled")
+    if labeled_train:
+        logger.info("Read %d labeled training records", len(labeled_train))
+    elif synthetic_cfg.get("labeled"):
+        logger.error("synthetic.labeled is set but no records were found under %s",
+                     data_cfg["path"])
+        sys.exit(1)
+
     # Phase 2: Generate training pairs via Bedrock
-    if not synthetic_cfg.get("model") or not synthetic_cfg.get("pairs", 0):
-        logger.error("synthetic.model and synthetic.pairs are required")
+    if not synthetic_cfg.get("model") or not (synthetic_cfg.get("pairs", 0) or labeled_train):
+        logger.error("synthetic.model and synthetic.pairs (or synthetic.labeled) are required")
         sys.exit(1)
 
     # Grounded free-form generation reproduces the serving RAG contract by
@@ -347,7 +360,10 @@ def main():
         logger.info("Loaded %d grounding chunks for RAG-faithful generation",
                     len(grounding_chunks))
 
-    if is_grounded:
+    if not synthetic_cfg.get("pairs", 0):
+        logger.info("synthetic.pairs is 0: training on the labeled records only")
+        records = []
+    elif is_grounded:
         records = generate_grounded_freeform(
             grounding_chunks=grounding_chunks,
             model=synthetic_cfg["model"],
@@ -370,6 +386,7 @@ def main():
             output_format=gen_format,
         )
     logger.info("Generated %d training records", len(records))
+    records = labeled_train + records
 
     if not records:
         logger.error("No training records generated")
@@ -700,9 +717,12 @@ def read_raw_sources(bucket: str, path: str, sources: list[dict]) -> list[dict]:
     return records
 
 
-def read_labeled_records(bucket: str, path: str, sources: list[dict]) -> list[dict]:
-    """Read human-labeled held-out records (JSONL, one object per line) from the
-    configured data.evaluation.labeled paths and tag them origin=real."""
+def read_labeled_records(bucket: str, path: str, sources: list[dict],
+                         origin: str = "real") -> list[dict]:
+    """Read labeled records (JSONL, one object per line) from the given paths
+    under data.path and tag them with origin: "real" for the human-labeled
+    held-out set (data.evaluation.labeled), "labeled" for committed training
+    records (data.synthetic.labeled)."""
     records = []
     for raw in read_raw_sources(bucket, path, sources):
         for line in raw["content"].splitlines():
@@ -716,7 +736,7 @@ def read_labeled_records(bucket: str, path: str, sources: list[dict]) -> list[di
                 continue
             if not isinstance(obj, dict):
                 continue
-            obj["origin"] = "real"
+            obj["origin"] = origin
             records.append(obj)
     return records
 
