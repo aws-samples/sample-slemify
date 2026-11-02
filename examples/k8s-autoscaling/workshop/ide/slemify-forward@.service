@@ -1,0 +1,25 @@
+[Unit]
+Description=Workshop port-forward on 127.0.0.1:%i
+After=network-online.target
+Wants=network-online.target
+PartOf=slemify-forwards.target
+# Never give up: the cluster may still be creating when the IDE boots.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The IDE user: its kubeconfig, and the instance role through IMDS.
+User=ubuntu
+Group=ubuntu
+EnvironmentFile=/etc/slemify/forward.env
+ExecStart=/usr/local/bin/slemify-forward %i
+Restart=always
+RestartSec=3
+# Exit 2 means the port is not in forwards.conf; do not loop on a typo.
+RestartPreventExitStatus=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=slemify-forwards.target
