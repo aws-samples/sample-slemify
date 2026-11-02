@@ -93,7 +93,7 @@ func (c *ExpertConfig) ApplyDefaults() {
 	if v := os.Getenv("SLEMIFY_BUCKET"); v != "" {
 		c.Data.Bucket = v
 	}
-	if c.Data.Synthetic != (SyntheticConfig{}) && c.Data.Synthetic.Model == "" {
+	if !c.Data.Synthetic.IsZero() && c.Data.Synthetic.Model == "" {
 		c.Data.Synthetic.Model = defaultBedrockModel()
 	}
 	if c.Data.Evaluation != nil && c.Data.Evaluation.Model == "" {

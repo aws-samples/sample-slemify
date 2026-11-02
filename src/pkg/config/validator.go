@@ -67,10 +67,28 @@ func Validate(cfg *ExpertConfig) []ValidationError {
 			Message: "model.base is empty and no default applied; set it or load the config with config.Load",
 		})
 	}
+	// A synthetic block needs something to train on: generated pairs, or
+	// committed labeled records (pairs: 0 then means "use only those").
+	// Labeled training records carry an {"input", "output"} label, which only
+	// the classification and scoring heads read.
+	if s := cfg.Data.Synthetic; !s.IsZero() {
+		if s.Pairs == 0 && len(s.Labeled) == 0 {
+			errs = append(errs, ValidationError{
+				Field:   "data.synthetic.pairs",
+				Message: "set data.synthetic.pairs (>= 10) or data.synthetic.labeled",
+			})
+		}
+		if len(s.Labeled) > 0 && cfg.Project.Task != TaskClassification && cfg.Project.Task != TaskScoring {
+			errs = append(errs, ValidationError{
+				Field:   "data.synthetic.labeled",
+				Message: "labeled training records apply only to task=classification or task=scoring",
+			})
+		}
+	}
 	if cfg.Project.IsEncoderHead() {
 		// Encoder-head families generate synthetic training data (the head is fit
 		// on synthesized examples), so synthetic generation is required here.
-		if cfg.Data.Synthetic == (SyntheticConfig{}) {
+		if cfg.Data.Synthetic.IsZero() {
 			errs = append(errs, ValidationError{
 				Field:   "data.synthetic",
 				Message: fmt.Sprintf("task %q requires data.synthetic (model + pairs) for training data generation", cfg.Project.Task),
@@ -100,7 +118,7 @@ func Validate(cfg *ExpertConfig) []ValidationError {
 		// Embedding (contrastive) trains an encoder on (query, document) pairs
 		// synthesized from the raw corpus. It has no label taxonomy, no
 		// classifier head, and is not quantized to GGUF.
-		if cfg.Data.Synthetic == (SyntheticConfig{}) {
+		if cfg.Data.Synthetic.IsZero() {
 			errs = append(errs, ValidationError{
 				Field:   "data.synthetic",
 				Message: "task=embedding requires data.synthetic (model + pairs) for contrastive pair generation",

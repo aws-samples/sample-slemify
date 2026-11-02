@@ -43,6 +43,14 @@ if [ -d "$EVAL_DIR" ]; then
     aws s3 sync "$EVAL_DIR" "s3://$BUCKET/$EVAL_PREFIX/" --exclude "*" --include "*.txt"
 fi
 
+# Upload committed labeled training sets if they exist (data.synthetic.labeled)
+TRAIN_LABELED_DIR="$(dirname "$0")/data/train-labeled"
+TRAIN_LABELED_PREFIX="k8s-autoscaling/data/train-labeled"
+if [ -d "$TRAIN_LABELED_DIR" ]; then
+    echo "Uploading labeled training sets to s3://$BUCKET/$TRAIN_LABELED_PREFIX/"
+    aws s3 sync "$TRAIN_LABELED_DIR" "s3://$BUCKET/$TRAIN_LABELED_PREFIX/" --exclude "*" --include "*.jsonl"
+fi
+
 # Upload human-labeled held-out sets if they exist
 LABELED_DIR="$(dirname "$0")/data/eval-labeled"
 LABELED_PREFIX="k8s-autoscaling/data/eval-labeled"

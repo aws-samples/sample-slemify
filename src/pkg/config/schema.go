@@ -260,10 +260,22 @@ type SourceMetadata struct {
 
 // SyntheticConfig controls synthetic training data generation.
 // If Endpoint is empty, Bedrock is assumed. If set, any OpenAI-compatible API is used.
+//
+// Labeled points at JSONL files of labeled training records under data.path
+// (classification and scoring: {"input", "output"}). They are added to the
+// training set as-is, ahead of any generated pairs. With Labeled set, Pairs
+// may be 0: the training set is then exactly the committed records, so every
+// run trains on the same data instead of a fresh Bedrock generation.
 type SyntheticConfig struct {
-	Model    string `json:"model" yaml:"model" validate:"required"`
-	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
-	Pairs    int    `json:"pairs" yaml:"pairs" validate:"required,min=10"`
+	Model    string         `json:"model" yaml:"model" validate:"required"`
+	Endpoint string         `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
+	Pairs    int            `json:"pairs" yaml:"pairs" validate:"omitempty,min=10"`
+	Labeled  []SourceConfig `json:"labeled,omitempty" yaml:"labeled,omitempty" validate:"omitempty,dive"`
+}
+
+// IsZero reports whether no synthetic field is set (the block is absent).
+func (s SyntheticConfig) IsZero() bool {
+	return s.Model == "" && s.Endpoint == "" && s.Pairs == 0 && len(s.Labeled) == 0
 }
 
 // EvalDataConfig controls independent evaluation data generation.

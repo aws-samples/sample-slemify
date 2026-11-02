@@ -44,8 +44,21 @@ data:
   sources:
     - path: queries/
       type: raw
+  # The training set is committed, not generated per run: every deploy trains
+  # on the same 785 labeled records, so the classifier (and its accuracy) is
+  # the same in every account. The frontier model wrote them once:
+  #   triage-generated.jsonl  694 messages, about 100 per label, written per
+  #                           label against the boundary rules in project.domain
+  #                           in the style of the real messages in queries/
+  #   triage-sources.jsonl    the 91 real messages in queries/, labeled by the
+  #                           frontier model and checked against those rules
+  # Neither file contains any of the 43 held-out messages in eval-labeled/.
+  # To generate instead, set pairs (e.g. 1200) and drop labeled.
   synthetic:
-    pairs: 1200
+    pairs: 0
+    labeled:
+      - path: train-labeled/triage-generated.jsonl
+      - path: train-labeled/triage-sources.jsonl
   evaluation:
     pairs: 150
     sources:
