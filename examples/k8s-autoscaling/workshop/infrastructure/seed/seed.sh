@@ -25,7 +25,26 @@ TF_DIR="${INFRA_DIR}/terraform"
 DEMO_DIR="$(cd "${INFRA_DIR}/../../demo" && pwd)"
 NAMESPACE="slemify"
 
-log() { printf '\n=== %s ===\n' "$1"; }
+# Each phase header carries the time since the seed started, and the phases
+# are summed up at the end, so the CodeBuild log shows where the time goes.
+SEED_PHASES=""
+log() {
+  printf '\n=== [+%02dm%02ds] %s ===\n' $((SECONDS / 60)) $((SECONDS % 60)) "$1"
+  SEED_PHASES="${SEED_PHASES}${SECONDS}	$1
+"
+}
+phase_timings() {
+  printf '\n=== Seed phase timings ===\n'
+  printf '%s' "$SEED_PHASES" | awk -F '\t' -v end="$SECONDS" '
+    { t[NR] = $1; m[NR] = $2 }
+    END {
+      for (i = 1; i <= NR; i++) {
+        d = ((i < NR) ? t[i + 1] : end) - t[i]
+        printf "  %3dm%02ds  %s\n", int(d / 60), d % 60, m[i]
+      }
+      printf "  total %dm%02ds\n", int(end / 60), end % 60
+    }'
+}
 
 # --- Resolve configuration: env vars first (CodeBuild sets them), terraform
 # outputs as the fallback for local runs.
@@ -222,6 +241,7 @@ bash "${SEED_DIR}/smoke.sh" || {
   exit 1
 }
 
+phase_timings
 log "Seed complete"
 echo "The cluster is in the module 0 (monolith) start state."
 echo "Open the UI:  kubectl port-forward -n ${NAMESPACE} svc/k8s-autoscaling-orchestrator 8000:80"
