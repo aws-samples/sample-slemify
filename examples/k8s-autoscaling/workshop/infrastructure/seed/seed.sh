@@ -44,7 +44,31 @@ phase_timings() {
       }
       printf "  total %dm%02ds\n", int(end / 60), end % 60
     }'
+  # Background stages overlap the phases above, so their time is not in the
+  # phase rows. Each one is recorded when the seed joins it.
+  if [[ -n "$SEED_BG" ]]; then
+    printf '  background, overlapped with the phases above:\n'
+    printf '%s' "$SEED_BG" | awk -F '\t' '{ printf "  %3dm%02ds  %s\n", int($1 / 60), $1 % 60, $2 }'
+  fi
 }
+SEED_BG=""
+PF_OS_PID=""
+# The summary prints from the EXIT trap, so a failed seed still shows where
+# the time went, and the failing phase is the last row.
+on_exit() {
+  local rc=$?
+  if [[ -n "$PF_OS_PID" ]]; then
+    kill "$PF_OS_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$SEED_PHASES" ]]; then
+    phase_timings || true
+    if [[ "$rc" -ne 0 ]]; then
+      printf '  seed failed (exit %d) in the last phase above\n' "$rc"
+    fi
+  fi
+  exit "$rc"
+}
+trap on_exit EXIT
 
 # --- Resolve configuration: env vars first (CodeBuild sets them), terraform
 # outputs as the fallback for local runs.
@@ -130,17 +154,31 @@ AWS_DEFAULT_REGION="${REGION}" bash "${EXAMPLE_DIR}/upload-to-s3.sh" "${MODEL_BU
 # Both data stages are Bedrock-only Jobs (the frontier model writing training
 # examples) with no dependency on the Titan index below, so start them now and
 # let them run while the index builds. They are waited on before the seed ends.
+# Each one writes its end time (epoch seconds) to <log>.end, so the join can
+# report the stage's own wall time even when it finished long before.
 TRIAGE_DATA_PID=""
 RETRIEVER_DATA_PID=""
+start_data() {  # config logfile; sets DATA_PID and DATA_T0
+  rm -f "$2.end"
+  DATA_T0="$(date +%s)"
+  (
+    cd "${EXAMPLE_DIR}" || exit 1
+    rc=0
+    slemify deploy --config "$1" --until data || rc=$?
+    date +%s > "$2.end"
+    exit "$rc"
+  ) > "$2" 2>&1 &
+  DATA_PID=$!
+}
 if command -v slemify >/dev/null 2>&1; then
   log "Triage: starting the data stage in the background (Bedrock writes the training examples)"
-  ( cd "${EXAMPLE_DIR}" && slemify deploy --config triage/expert.yaml --until data ) \
-    > /tmp/triage-data.log 2>&1 &
-  TRIAGE_DATA_PID=$!
+  start_data triage/expert.yaml /tmp/triage-data.log
+  TRIAGE_DATA_PID="${DATA_PID}"
+  TRIAGE_DATA_T0="${DATA_T0}"
   log "Retriever: starting the data stage in the background (Bedrock writes the (query, chunk) pairs)"
-  ( cd "${EXAMPLE_DIR}" && slemify deploy --config retriever/expert.yaml --until data ) \
-    > /tmp/retriever-data.log 2>&1 &
-  RETRIEVER_DATA_PID=$!
+  start_data retriever/expert.yaml /tmp/retriever-data.log
+  RETRIEVER_DATA_PID="${DATA_PID}"
+  RETRIEVER_DATA_T0="${DATA_T0}"
 fi
 
 # --- Knowledge base: the Bedrock (Titan) index the monolith reads ---
@@ -163,15 +201,15 @@ else
   fi
   kubectl port-forward -n "${NAMESPACE}" svc/opensearch-cluster-master 9200:9200 &
   PF_OS_PID=$!
-  # Give the port-forward a moment to establish.
+  # Give the port-forward a moment to establish. on_exit kills it if the
+  # indexer fails.
   sleep 4
-  trap 'kill "${PF_OS_PID}" 2>/dev/null || true' EXIT
   AWS_REGION="${BEDROCK_REGION}" \
   BEDROCK_EMBED_MODEL="${BEDROCK_EMBED_MODEL}" \
   BEDROCK_INDEX_NAME="${BEDROCK_INDEX_NAME}" \
     python3 "${DEMO_DIR}/scripts/index-knowledge.py" --embedder=bedrock
   kill "${PF_OS_PID}" 2>/dev/null || true
-  trap - EXIT
+  PF_OS_PID=""
 fi
 
 # --- Slemify data stages: join the two background jobs ---
@@ -180,10 +218,19 @@ fi
 # fine-tune the retriever. The tuned knowledge index is not built here; it has
 # to be built against the encoder the attendee trains (see `make index-tuned`).
 if command -v slemify >/dev/null 2>&1; then
-  wait_data() {  # name pid logfile
+  wait_data() {  # name pid logfile start_epoch
     [[ -z "$2" ]] && return 0
     log "$1: waiting for the background data stage"
-    if wait "$2"; then
+    local rc=0 end took
+    wait "$2" || rc=$?
+    # The stage's own end time; if it is missing, it ended no later than now.
+    end="$(cat "$3.end" 2>/dev/null || date +%s)"
+    took=$((end - $4))
+    printf '  %s data stage: %dm%02ds wall time in the background (exit %d)\n' \
+      "$1" $((took / 60)) $((took % 60)) "$rc"
+    SEED_BG="${SEED_BG}${took}	$1 data stage (exit ${rc})
+"
+    if [[ "$rc" -eq 0 ]]; then
       tail -n 4 "$3" || true
     else
       echo "ERROR: $1 data stage failed" >&2
@@ -191,8 +238,8 @@ if command -v slemify >/dev/null 2>&1; then
       exit 1
     fi
   }
-  wait_data "Triage" "${TRIAGE_DATA_PID}" /tmp/triage-data.log
-  wait_data "Retriever" "${RETRIEVER_DATA_PID}" /tmp/retriever-data.log
+  wait_data "Triage" "${TRIAGE_DATA_PID}" /tmp/triage-data.log "${TRIAGE_DATA_T0:-0}"
+  wait_data "Retriever" "${RETRIEVER_DATA_PID}" /tmp/retriever-data.log "${RETRIEVER_DATA_T0:-0}"
 else
   echo "  slemify not installed; skipping the triage and retriever data stages" >&2
 fi
@@ -241,7 +288,7 @@ bash "${SEED_DIR}/smoke.sh" || {
   exit 1
 }
 
-phase_timings
+# on_exit prints the phase timings after these lines.
 log "Seed complete"
 echo "The cluster is in the module 0 (monolith) start state."
 echo "Open the UI:  kubectl port-forward -n ${NAMESPACE} svc/k8s-autoscaling-orchestrator 8000:80"
