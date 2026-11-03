@@ -133,6 +133,9 @@ async def query_endpoint(q: Query):
                 await queue.put(_DONE)
 
         drain_task = asyncio.create_task(drain())
+        # First event: which model runs each step, so the UI draws the flow map
+        # for this configuration (a swap shows up without a page reload).
+        yield sse("steps", steps=config.steps())
         try:
             while True:
                 try:
@@ -158,7 +161,7 @@ async def query_endpoint(q: Query):
         # what it cost without scraping logs.
         yield sse("cost", usd=cost["usd"], bedrock_calls=cost["bedrock_calls"],
                   tokens_in=cost["tokens_in"], tokens_out=cost["tokens_out"],
-                  by_purpose=cost["by_purpose"], steps=config.steps())
+                  by_purpose=cost["by_purpose"], steps=config.steps(), total_ms=total_ms)
         yield sse("total", ms=total_ms)
         yield "data: [DONE]\n\n"
 
@@ -176,7 +179,8 @@ async def query_endpoint(q: Query):
 async def stats():
     """Gate-outcome counters and the measured SLM first-pass rate. The cost
     model of the CPU-first architecture hinges on this number (breakeven vs
-    calling the LLM directly is ~87-92%); until now it was only ever estimated
+    calling the LLM directly is about 86 percent with the measured G and A,
+    2G / (A + G)); until now it was only ever estimated
     from the eval scorecard. Counters reset on restart; the JSON-line metric
     events in the pod logs are the durable record. `steps` says which
     configuration produced these numbers."""
@@ -185,9 +189,11 @@ async def stats():
 
 @app.get("/config")
 async def get_config():
-    """Tell the UI whether apply (approve/autopilot) is available. In sandbox
-    mode this reflects the tools pod's ALLOW_APPLY (where writes execute)."""
-    return {"apply_enabled": toolclient.apply_enabled()}
+    """Tell the UI whether apply (approve/autopilot) is available, and which
+    model runs each step (the same `steps` /stats returns), so the flow map
+    draws only what this configuration runs. In sandbox mode apply_enabled
+    reflects the tools pod's ALLOW_APPLY (where writes execute)."""
+    return {"apply_enabled": toolclient.apply_enabled(), "steps": config.steps()}
 
 
 @app.post("/apply")
