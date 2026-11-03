@@ -24,6 +24,18 @@ project:
     classify them as multi_resource. Treat any "pods are Pending, how do I
     fix it" question as multi_resource unless it clearly names a single
     autoscaler resource as the cause.
+    Boundary rules. spot_interruption covers Spot capacity and Spot
+    reliability, not only interruption notices: Spot reclaims and rebalance
+    recommendations, insufficient Spot capacity, how many and which instance
+    types to spread a Spot workload across, and falling back from Spot to
+    on-demand. Such a question stays spot_interruption when it also shows a
+    NodePool. Use karpenter_config for NodePool and EC2NodeClass settings
+    that are not about Spot capacity, such as consolidation, limits, weights,
+    and AMI selection. noise also covers Kubernetes and cloud topics outside
+    autoscaling: ingress controllers and load balancers, DNS and CoreDNS,
+    certificates, RBAC and service accounts, Helm, Terraform and other
+    infrastructure as code, CI/CD pipelines, image registries, and databases.
+    A message is not in scope only because it mentions Kubernetes.
   labels:
     routing:
       - karpenter_config

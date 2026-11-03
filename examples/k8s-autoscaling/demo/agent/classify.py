@@ -2,7 +2,9 @@
 
 The TRIAGE step (config.TRIAGE) decides who classifies:
   - "classifier": the Slemify-trained encoder + head, served as ONNX on CPU.
-  - "llm": the frontier model on Bedrock, given the same prompt.
+  - "llm": the frontier model on Bedrock, given the label set and the labeling
+    rules from triage/expert.yaml (prompts.triage_llm_prompt). The classifier
+    is sent the message alone.
 Both return the same `label|confidence` line and go through the same parser, so
 the two are scored identically by the eval and differ only in who answered.
 

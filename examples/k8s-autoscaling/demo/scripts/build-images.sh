@@ -20,9 +20,12 @@ X86_BUILD_HOST="${X86_BUILD_HOST:-x86-host}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEMO_DIR="$(dirname "$SCRIPT_DIR")"
 
-ORCH_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-orchestrator:latest"
-RERANK_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-reranker:latest"
-DECISION_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-decision:latest"
+# IMAGE_TAG picks the tag (default latest). Use another tag to test a branch
+# without replacing the images a running demo pulls.
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+ORCH_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-orchestrator:${IMAGE_TAG}"
+RERANK_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-reranker:${IMAGE_TAG}"
+DECISION_IMAGE="${REGISTRY}/slemify/k8s-autoscaling-decision:${IMAGE_TAG}"
 
 if [ -z "${ARM64_BUILD_HOST}" ]; then
   echo "ERROR: ARM64_BUILD_HOST must be set (e.g. ARM64_BUILD_HOST=my-graviton-host)"
@@ -61,6 +64,9 @@ sync_and_build() {
   echo "=== Building ${arch} natively on ${host} (docker: ${dkr:-direct}) ==="
   rsync -az --delete --exclude='__pycache__' --exclude='*.pyc' \
     "${DEMO_DIR}/" "${host}:~/demo-build/"
+  # The TRIAGE=llm prompt reads project.domain from the triage expert config,
+  # which sits outside the demo build context.
+  rsync -az "${DEMO_DIR}/../triage/expert.yaml" "${host}:~/demo-build/agent/triage_expert.yaml"
   ssh "${host}" "aws ecr get-login-password --region ${REGION} | ${dkr} docker login --username AWS --password-stdin ${REGISTRY}"
   # Base images come from ECR Public; authenticated pulls get a higher rate
   # limit. The auth API is us-east-1 only. Non-fatal on failure.

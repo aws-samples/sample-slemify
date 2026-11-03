@@ -60,6 +60,9 @@ phases:
             docker push "${img}"
           done
         }
+        # The orchestrator's TRIAGE=llm prompt reads project.domain from the
+        # triage expert config, which sits outside the demo build context.
+        cp "${CODEBUILD_SRC_DIR}/examples/k8s-autoscaling/triage/expert.yaml" "${CODEBUILD_SRC_DIR}/${DEMO_DIR}/agent/triage_expert.yaml"
         build_group "${DEMO_DIR}" "${DEMO_IMAGES}"
         build_group "${SLEMIFY_SRC}" "${SLEMIFY_IMAGES}"
   post_build:

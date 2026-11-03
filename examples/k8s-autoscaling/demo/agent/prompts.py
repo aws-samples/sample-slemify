@@ -3,8 +3,10 @@
 Every instruction string and prompt template the agent sends to a model lives
 here, with small builder functions that assemble the final prompt (instruction +
 framing + context + query). Centralized so the prompts can be read, reviewed, and
-edited together rather than scattered across modules. Behavior is identical to the
-previous inline strings; this module only collects them.
+edited together rather than scattered across modules. The one exception is the
+domain text of the triage prompt: it is read from project.domain in
+triage/expert.yaml, the same rules the classifier's training data was written
+against, so the two triage models follow one definition of each label.
 
 Which model sees which prompt:
   - triage_llm_prompt -> frontier model (TRIAGE=llm) : classify intent; the classifier gets the raw message
@@ -15,39 +17,68 @@ Which model sees which prompt:
   - fix_proposal_prompt -> analyst SLM (llama.cpp, CPU), schema-constrained:
     propose a remediation within patch_schema's allowed fields
 """
+import functools
+import os
+
+import yaml
+
 from . import patch_schema
+
+# --- The triage domain (from triage/expert.yaml) ---
+
+_AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
+# The repo checkout (make triage-acc on the IDE), then the copy the image
+# build stages next to this file (the image build context is demo/ only).
+_TRIAGE_EXPERT_CANDIDATES = (
+    os.path.join(os.path.dirname(os.path.dirname(_AGENT_DIR)), "triage", "expert.yaml"),
+    os.path.join(_AGENT_DIR, "triage_expert.yaml"),
+)
+
+
+def triage_expert_path() -> str:
+    """The triage expert config: env TRIAGE_EXPERT_CONFIG when set, else the
+    repo's triage/expert.yaml, else agent/triage_expert.yaml in the image."""
+    env = os.environ.get("TRIAGE_EXPERT_CONFIG", "")
+    tried = [env] if env else list(_TRIAGE_EXPERT_CANDIDATES)
+    for path in tried:
+        if os.path.isfile(path):
+            return path
+    raise FileNotFoundError(
+        "TRIAGE=llm needs the triage expert config for its prompt; tried "
+        + ", ".join(tried) + ". Set TRIAGE_EXPERT_CONFIG to the path of triage/expert.yaml.")
+
+
+@functools.lru_cache(maxsize=1)
+def triage_domain() -> tuple[tuple[str, ...], str]:
+    """(labels.routing, project.domain) from the triage expert config."""
+    path = triage_expert_path()
+    with open(path, encoding="utf-8") as f:
+        project = (yaml.safe_load(f) or {}).get("project") or {}
+    labels = tuple(((project.get("labels") or {}).get("routing")) or ())
+    domain = " ".join(str(project.get("domain") or "").split())
+    if not labels or not domain:
+        raise ValueError(f"{path}: project.domain and project.labels.routing must both be set")
+    return labels, domain
+
 
 # --- Instruction strings ---
 
-# The triage label set, one line each. This is the only domain-specific part
-# of the triage prompt; it mirrors project.domain in triage/expert.yaml, which
-# is what the classifier's training data was generated from. To run this
-# agent on another domain, replace this list.
-TRIAGE_LABELS = (
-    "  karpenter_config   Karpenter NodePool or EC2NodeClass questions\n"
-    "  keda_config        KEDA ScaledObject or TriggerAuthentication questions\n"
-    "  hpa_config         HorizontalPodAutoscaler questions\n"
-    "  pdb_disruption     PodDisruptionBudget questions\n"
-    "  spot_interruption  Spot instance interruption handling\n"
-    "  multi_resource     spans several resource types with no single autoscaler "
-    "named as the cause\n"
-    "  noise              off-topic: meetings, social chat, unrelated topics\n"
-)
-
-# The frontier model's zero-shot triage prompt (TRIAGE=llm). The classifier
-# learned the label set from its training examples; the frontier model has to
-# be told it, and told the one-line output the parser reads. Nothing else is
-# needed: on the 43 held-out labels, label set + format scored 40/43, adding
-# domain heuristics 41/43 (within noise), and the bare task sentence 4/43
-# (the model answered with a Markdown report that named no label).
-# The classifier does not see this prompt; it is sent the message alone,
-# which is what it was trained on.
-TRIAGE_LLM_INSTRUCTION = (
-    "Classify the support message below into exactly one routing category:\n"
-    + TRIAGE_LABELS +
+# The frontier model's zero-shot triage prompt (TRIAGE=llm): the label names,
+# the labeling rules from project.domain, and the one-line output the parser
+# reads. The classifier does not see this prompt; it is sent the message
+# alone, which is what it was trained on.
+TRIAGE_LLM_FORMAT = (
     "Reply with one line and nothing else, in the form  label|confidence  where "
     "confidence is high, medium, or low. Example:  karpenter_config|high"
 )
+
+
+def triage_llm_instruction() -> str:
+    labels, domain = triage_domain()
+    return ("Classify the support message below into exactly one routing category. "
+            "The categories:\n"
+            + "".join(f"  {label}\n" for label in labels)
+            + f"\nLabeling rules:\n{domain}\n\n{TRIAGE_LLM_FORMAT}")
 
 ANALYST_INSTRUCTION = (
     "You are a Kubernetes autoscaling auditor. "
@@ -111,7 +142,7 @@ Return ONLY a JSON object: {{"verdict": "pass|escalate", "reason": "<short>"}}""
 def triage_llm_prompt(text: str) -> str:
     """The frontier model's zero-shot triage prompt (TRIAGE=llm only; the
     classifier is sent the raw message, see classify.py)."""
-    return f"{TRIAGE_LLM_INSTRUCTION}\n\n--- MESSAGE ---\n{text}\n--- END MESSAGE ---\n\nAnswer:"
+    return f"{triage_llm_instruction()}\n\n--- MESSAGE ---\n{text}\n--- END MESSAGE ---\n\nAnswer:"
 
 
 def analyst_prompt(text: str, context: str = "") -> str:
