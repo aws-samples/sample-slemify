@@ -1,0 +1,100 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Tear down what buildspec.yaml built, for a run in your own account. Deleting
+# the CloudFormation stack does not do it: Terraform created the cluster, the
+# VPC and the model bucket, and the stack only holds the Terraform state.
+#
+# Run it through the stack's own provisioning project, which already has the
+# state bucket, the stack name, the Terraform variables and an admin role:
+#
+#   aws codebuild start-build --project-name slemify-workshop-provision \
+#     --buildspec-override examples/k8s-autoscaling/workshop/infrastructure/buildspec-destroy.yaml
+#
+# When the build succeeds, delete the CloudFormation stack. Only for
+# own-account runs: a Workshop Studio event cleans up the account itself.
+#
+# Steps: delete the slemify namespace and the NodePools the seed and the demo
+# scenarios create (so load balancers, volumes and nodes release), empty the
+# versioned model bucket, terraform destroy, then delete the state file so the
+# stack can delete its state bucket. This build never signals the stack's wait
+# condition, so it ignores CFN_RESPONSE_URL.
+#
+# Environment variables (set on the provisioning project by CloudFormation):
+#   TF_STATE_BUCKET, STACK_NAME, AWS_REGION, EKS_CLUSTER_NAME,
+#   EKS_CLUSTER_VERSION, BEDROCK_REGION, PARTICIPANT_ROLE_ARN, IDE_ROLE_ARN,
+#   OPS_ROLE_ARN
+version: 0.2
+env:
+  variables:
+    TERRAFORM_VERSION: "1.16.3"
+    KUBECTL_VERSION: "v1.36.4"
+    INFRA_DIR: "examples/k8s-autoscaling/workshop/infrastructure"
+    # seed/slm-nodepools.yaml and demo/scenarios/*.yaml
+    NODEPOOLS: "slemify-slm slemify-slm-previous slemify-slm-fallback demo-payments demo-spot-misconfigured"
+phases:
+  install:
+    commands:
+      - echo "Installing terraform ${TERRAFORM_VERSION}"
+      - curl -fsSL -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+      - unzip -q -o /tmp/terraform.zip -d /usr/local/bin && rm /tmp/terraform.zip
+      - terraform version
+      - curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl
+      - pip3 install --quiet boto3
+  pre_build:
+    commands:
+      - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/terraform"
+      - |
+        cat > backend.tf <<EOF
+        terraform {
+          backend "s3" {
+            bucket = "${TF_STATE_BUCKET}"
+            key    = "${STACK_NAME}/terraform.tfstate"
+            region = "${AWS_REGION}"
+          }
+        }
+        EOF
+      - cat backend.tf
+      # The same Terraform variables the apply used. NONE means "not set".
+      - export TF_VAR_region="${AWS_REGION}"
+      - export TF_VAR_cluster_name="${EKS_CLUSTER_NAME}"
+      - export TF_VAR_cluster_version="${EKS_CLUSTER_VERSION}"
+      - export TF_VAR_bedrock_region="${BEDROCK_REGION:-${AWS_REGION}}"
+      - '[ "${PARTICIPANT_ROLE_ARN:-NONE}" != "NONE" ] && export TF_VAR_participant_role_arn="${PARTICIPANT_ROLE_ARN}" || true'
+      - '[ "${IDE_ROLE_ARN:-NONE}" != "NONE" ] && export TF_VAR_ide_role_arn="${IDE_ROLE_ARN}" || true'
+      - '[ "${OPS_ROLE_ARN:-NONE}" != "NONE" ] && export TF_VAR_ops_role_arn="${OPS_ROLE_ARN}" || true'
+      - terraform init -input=false
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/terraform"
+
+        # 1 to 3: release what the cluster holds, while the cluster still exists.
+        if aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}"; then
+          kubectl delete namespace slemify --ignore-not-found --timeout=600s
+          # shellcheck disable=SC2086  # NODEPOOLS is a word list
+          kubectl delete nodepool ${NODEPOOLS} --ignore-not-found
+          for pool in ${NODEPOOLS}; do
+            kubectl wait --for=delete nodeclaim -l "karpenter.sh/nodepool=${pool}" --timeout=600s 2>/dev/null || true
+          done
+        else
+          echo "cluster ${EKS_CLUSTER_NAME} not found; skipping the namespace and NodePool cleanup"
+        fi
+
+        # 4: the model bucket is versioned; Terraform cannot delete it while
+        # any object version or delete marker is left.
+        MODEL_BUCKET=$(terraform output -raw model_bucket 2>/dev/null || true)
+        if [ -n "${MODEL_BUCKET}" ]; then
+          echo "emptying s3://${MODEL_BUCKET} (every version)"
+          python3 -c "import boto3,sys; boto3.resource('s3').Bucket(sys.argv[1]).object_versions.delete()" "${MODEL_BUCKET}"
+        fi
+
+        # 5
+        terraform destroy -input=false -auto-approve -var enable_s3_csi_addon=true
+
+        # 6: the stack's state bucket is versioned, so delete every version of
+        # the state file, or the stack cannot delete the bucket.
+        python3 -c "import boto3,sys; boto3.resource('s3').Bucket(sys.argv[1]).object_versions.filter(Prefix=sys.argv[2]).delete()" \
+          "${TF_STATE_BUCKET}" "${STACK_NAME}/terraform.tfstate"
+        echo "destroy complete; delete the CloudFormation stack next"
