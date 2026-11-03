@@ -21,9 +21,15 @@ PORT="${1:-}"
 CONF="${FORWARDS_CONF:-/etc/slemify/forwards.conf}"
 KUBECTL="${KUBECTL:-kubectl}"
 NAMESPACE="${NAMESPACE:-slemify}"
+# A hung forward (accepts connections, never answers) is restarted after
+# HEALTH_FAILS checks of HEALTH_INTERVAL + HEALTH_TIMEOUT each, plus the
+# unit's RestartSec: 3 x (10 + 3) + 3 = 42 s at most. The servers behind
+# these ports answer a GET outside the request that is busy (FastAPI runs
+# sync handlers in a thread pool, llama.cpp has its own HTTP threads), so a
+# busy model still answers well inside 3 s.
 HEALTH_INTERVAL="${HEALTH_INTERVAL:-10}"
 HEALTH_FAILS="${HEALTH_FAILS:-3}"
-HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-10}"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-3}"
 ENDPOINT_POLL="${ENDPOINT_POLL:-10}"
 
 log() { echo "slemify-forward[$PORT]: $*"; }

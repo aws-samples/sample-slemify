@@ -123,7 +123,9 @@ cloned repo.
   `slemify-forwards.target`. Each runs `/usr/local/bin/slemify-forward <port>`
   as the `ubuntu` user. It waits for a ready pod behind the Service, forwards
   to `127.0.0.1:<port>` only, and exits when the forward exits or stops
-  answering HTTP three times in a row. systemd then starts it again.
+  answering HTTP three times in a row. systemd then starts it again. A
+  forward that exits is back in about 5 to 15 s. A forward that hangs is
+  back within about 40 s.
 - State and logs: `systemctl status 'slemify-forward@*'` and
   `journalctl -u slemify-forward@8083`. `make forward` restarts the target.
 - The stack clones `RepoRef`. A ref without `workshop/ide/` gets no service;
