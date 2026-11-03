@@ -96,6 +96,12 @@ func TestDeploymentInitContainer(t *testing.T) {
 	if len(ic.VolumeMounts) == 0 {
 		t.Error("init container should mount model-storage volume")
 	}
+	if ic.Image != ModelLoaderImage {
+		t.Errorf("init container image = %q, want %q", ic.Image, ModelLoaderImage)
+	}
+	if !strings.HasPrefix(ic.Image, "public.ecr.aws/") {
+		t.Errorf("init container image %q should come from ECR Public, not Docker Hub", ic.Image)
+	}
 }
 
 func TestDeploymentReadinessProbe(t *testing.T) {

@@ -85,76 +85,30 @@ swap:
 	@test -n "$(SWAP_VARS)" || { echo "usage: make swap TRIAGE=classifier|llm|off EMBED=bedrock|slemify RERANK=on|off ANALYST=llm|slm GATE=llm|decision|off"; exit 1; }
 	kubectl set env deployment/k8s-autoscaling-orchestrator -n slemify $(SWAP_VARS)
 	kubectl rollout status deployment/k8s-autoscaling-orchestrator -n slemify
-	@# The rollout killed the 8000 forward; re-establish it by delegating to the
-	@# `forward` target, which detaches the forward (setsid+nohup) and kills any
-	@# stale one precisely. Done in a sub-make so no stray job-control "Terminated"
-	@# line from a backgrounded child reaches this recipe's output.
-	@$(MAKE) --no-print-directory forward >/dev/null 2>&1 || true
+	@# The rollout killed the 8000 forward. Restart only that one: on the IDE
+	@# this restarts its forward service, elsewhere it starts a detached forward.
+	@# Output is dropped so no stray job-control line reaches this recipe.
+	@bash $(SCRIPTS)/forward.sh up 8000 >/dev/null 2>&1 || true
 	@sleep 1; curl -s localhost:8000/stats | python3 -c 'import sys,json; print(json.load(sys.stdin)["steps"])'
 
-# (Re)start every port-forward the lab needs, idempotently. Always safe to run,
-# any number of times: for each service it kills any stale forward on that local
-# port before starting a fresh one, so you never end up with two bound to the
-# same port. It covers the two long-lived forwards (orchestrator 8000, OpenSearch
-# 9200) AND each per-model forward (triage 8081, analyst 8082, retriever 8083,
-# reranker 8084). The long-lived two are always forwarded; a per-model forward is
-# started only once that model has a ready pod behind its Service, so it is
-# correct at every stage of the lab and does not forward a model you have not
-# deployed yet (or one scaled to zero, like the reranker before module 2). If
-# anything cannot connect, run this; it is the one command for "a forward died,"
-# whichever forward it was.
-#
-# Each entry is "localPort:svcName:remotePort". The first two are always present;
-# the model services get a forward as you deploy (or scale up) each one.
-FORWARDS_CORE := 8000:k8s-autoscaling-orchestrator:80 9200:opensearch-cluster-master:9200
-FORWARDS_MODEL := \
-	8081:k8s-autoscaling-triage-inference:8080 \
-	8082:k8s-autoscaling-analyst-inference:8080 \
-	8083:k8s-autoscaling-retriever-inference:8080 \
-	8084:k8s-autoscaling-reranker:80 \
-	8085:k8s-autoscaling-decision:80
-# A model forward is active only if the Service has at least one ready endpoint
-# address (a running pod); the forward targets check that with `kubectl get
-# endpoints` inline below.
+# (Re)start every port-forward the lab needs, then print forward-check. Safe to
+# run any number of times. The port table is forwards.conf: the orchestrator
+# (8000) and OpenSearch (9200) always, and each model (8081 to 8085) once it has
+# a ready pod behind its Service.
+# On the workshop IDE a service already keeps every forward alive and restarts
+# one that drops, so you rarely need this. There it restarts that service. On
+# any other host it starts the forwards itself, bound to 127.0.0.1. Pass ports
+# to restart only those: `bash scripts/forward.sh up 8083`.
 forward:
-	@for f in $(FORWARDS_CORE); do \
-	  lp=$${f%%:*}; rest=$${f#*:}; svc=$${rest%%:*}; rp=$${rest##*:}; \
-	  pkill -f "port-forward.*$$lp:$$rp" >/dev/null 2>&1 || true; sleep 1; \
-	  setsid nohup kubectl port-forward -n slemify svc/$$svc $$lp:$$rp > /tmp/pf-$$lp.log 2>&1 < /dev/null & disown 2>/dev/null || true; \
-	  echo "forwarding $$lp -> $$svc"; \
-	done
-	@for f in $(FORWARDS_MODEL); do \
-	  lp=$${f%%:*}; rest=$${f#*:}; svc=$${rest%%:*}; rp=$${rest##*:}; \
-	  ready=$$(kubectl get endpoints -n slemify $$svc -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null); \
-	  if [ -n "$$ready" ]; then \
-	    pkill -f "port-forward.*$$lp:$$rp" >/dev/null 2>&1 || true; sleep 1; \
-	    setsid nohup kubectl port-forward -n slemify svc/$$svc $$lp:$$rp > /tmp/pf-$$lp.log 2>&1 < /dev/null & disown 2>/dev/null || true; \
-	    echo "forwarding $$lp -> $$svc"; \
-	  fi; \
-	done
-	@sleep 2; $(MAKE) --no-print-directory forward-check
+	@bash $(SCRIPTS)/forward.sh up
 
 # Print the HTTP status of each forward that should be up at this stage. The two
 # long-lived forwards always print; a model row prints only once that model has
 # a ready pod (so a not-yet-deployed or scaled-to-zero model is simply omitted,
-# not shown as DOWN). 200/4xx means the forward is up; 000 means not reachable.
+# not shown as DOWN). Any HTTP code means the forward is up; DOWN means not
+# reachable.
 forward-check:
-	@for f in $(FORWARDS_CORE); do \
-	  lp=$${f%%:*}; rest=$${f#*:}; svc=$${rest%%:*}; \
-	  path=$$([ "$$lp" = "8000" ] && echo "/stats" || echo "/"); \
-	  code=$$(curl -s -o /dev/null -w "%{http_code}" localhost:$$lp$$path); \
-	  if [ "$$code" = "000" ]; then state="DOWN (not reachable)"; else state="up (HTTP $$code)"; fi; \
-	  printf "%-5s %-36s %s\n" "$$lp" "$$svc" "$$state"; \
-	done
-	@for f in $(FORWARDS_MODEL); do \
-	  lp=$${f%%:*}; rest=$${f#*:}; svc=$${rest%%:*}; \
-	  ready=$$(kubectl get endpoints -n slemify $$svc -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null); \
-	  if [ -n "$$ready" ]; then \
-	    code=$$(curl -s -o /dev/null -w "%{http_code}" localhost:$$lp/); \
-	    if [ "$$code" = "000" ]; then state="DOWN (not reachable)"; else state="up (HTTP $$code)"; fi; \
-	    printf "%-5s %-36s %s\n" "$$lp" "$$svc" "$$state"; \
-	  fi; \
-	done
+	@bash $(SCRIPTS)/forward.sh check
 
 # Append the active configuration's scoreboard row to scoreboard.tsv in this
 # directory, so a swap (which clears the orchestrator's in-memory rows for the

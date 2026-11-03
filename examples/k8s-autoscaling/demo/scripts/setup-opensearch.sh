@@ -10,6 +10,16 @@ NAMESPACE="slemify"
 RELEASE="opensearch-demo"
 # EKS Auto Mode clusters have no gp2 class; the workshop seed passes gp3.
 STORAGE_CLASS="${OPENSEARCH_STORAGE_CLASS:-gp2}"
+# Pin the chart so a new chart release does not change the OpenSearch
+# version under a running workshop. Chart 3.8.0 ships OpenSearch 3.8.0.
+OPENSEARCH_CHART_VERSION="${OPENSEARCH_CHART_VERSION:-3.8.0}"
+# Pull from ECR Public, not Docker Hub, to avoid Docker Hub rate limits.
+# Both images are multi-arch (amd64 and arm64). The busybox tag is pinned
+# because the chart default for the init container is busybox:latest.
+OPENSEARCH_IMAGE="${OPENSEARCH_IMAGE:-public.ecr.aws/opensearchproject/opensearch}"
+OPENSEARCH_IMAGE_TAG="${OPENSEARCH_IMAGE_TAG:-3.8.0}"
+INIT_IMAGE="${OPENSEARCH_INIT_IMAGE:-public.ecr.aws/docker/library/busybox}"
+INIT_IMAGE_TAG="${OPENSEARCH_INIT_IMAGE_TAG:-1.37.0}"
 
 echo "=== Setting up OpenSearch for RAG ==="
 
@@ -21,7 +31,12 @@ helm repo update opensearch
 # Deploy OpenSearch (single node, no security for demo)
 echo "Deploying OpenSearch..."
 helm upgrade --install $RELEASE opensearch/opensearch \
+  --version "${OPENSEARCH_CHART_VERSION}" \
   --namespace $NAMESPACE \
+  --set image.repository="${OPENSEARCH_IMAGE}" \
+  --set image.tag="${OPENSEARCH_IMAGE_TAG}" \
+  --set persistence.image="${INIT_IMAGE}" \
+  --set persistence.imageTag="${INIT_IMAGE_TAG}" \
   --set replicas=1 \
   --set minimumMasterNodes=1 \
   --set persistence.size=10Gi \

@@ -46,6 +46,10 @@ func GenerateInferenceManifests(cfg *config.ExpertConfig, sized config.SizedConf
 	}
 }
 
+// ModelLoaderImage is the init container that copies the GGUF from S3.
+// Pinned, multi-arch, and pulled from ECR Public to avoid Docker Hub rate limits.
+const ModelLoaderImage = "public.ecr.aws/aws-cli/aws-cli:2.22.35"
+
 func inferenceDeployment(cfg *config.ExpertConfig, sized config.SizedConfig, ns string, labels, selectorLabels map[string]string, pc *pipeline.PipelineContext) *appsv1.Deployment {
 	replicas := int32(1)
 	automountSA := pc.ServiceAccount != ""
@@ -79,7 +83,7 @@ func inferenceDeployment(cfg *config.ExpertConfig, sized config.SizedConfig, ns 
 		initContainers = []corev1.Container{
 			{
 				Name:  "model-loader",
-				Image: "amazon/aws-cli:2.22.35",
+				Image: ModelLoaderImage,
 				// Use explicit args instead of sh -c to prevent injection
 				Command: []string{"aws", "s3", "cp",
 					fmt.Sprintf("s3://%s/models/%s/%s", cfg.Data.Bucket, cfg.Project.Name, cfg.Model.GGUFFilename()),

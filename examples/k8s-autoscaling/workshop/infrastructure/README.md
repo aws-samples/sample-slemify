@@ -107,6 +107,32 @@ the addon, `slemify deploy` falls back to downloading the model into the pod
 (slower start, same answers); without the GGUF, the analyst cannot deploy
 until the repair finishes.
 
+## IDE port-forwards
+
+The services in the cluster are ClusterIP only. Attendees reach them from the
+IDE through port-forwards, and a systemd service on the IDE keeps those
+forwards open, so nobody runs `kubectl port-forward` by hand. The IDE
+bootstrap (step `InstallPortForwards` in the Workshop Studio stack) writes
+`/etc/slemify/forward.env` and runs `workshop/ide/install-forwards.sh` from the
+cloned repo.
+
+- The port table is `demo/forwards.conf`, installed as
+  `/etc/slemify/forwards.conf`. `make forward` and `make forward-check` read
+  the same file.
+- One unit per port, `slemify-forward@<port>.service`, grouped by
+  `slemify-forwards.target`. Each runs `/usr/local/bin/slemify-forward <port>`
+  as the `ubuntu` user. It waits for a ready pod behind the Service, forwards
+  to `127.0.0.1:<port>` only, and exits when the forward exits or stops
+  answering HTTP three times in a row. systemd then starts it again. A
+  forward that exits is back in about 5 to 15 s. A forward that hangs is
+  back within about 40 s.
+- State and logs: `systemctl status 'slemify-forward@*'` and
+  `journalctl -u slemify-forward@8083`. `make forward` restarts the target.
+- The stack clones `RepoRef`. A ref without `workshop/ide/` gets no service;
+  the bootstrap prints a warning and the IDE still comes up.
+- `bash workshop/ide/test-slemify-forward.sh` tests the supervisor with a stub
+  `kubectl` (no cluster, no systemd).
+
 ## Running it by hand
 
 Useful while iterating on the Terraform or the seed. Same commands CodeBuild
