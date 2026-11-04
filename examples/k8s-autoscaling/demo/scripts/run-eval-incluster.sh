@@ -153,19 +153,30 @@ EOF
 echo "=== Waiting for pod, then streaming logs ==="
 kubectl wait --for=condition=ready pod -l job-name="$JOB_NAME" -n "$NAMESPACE" --timeout=300s || true
 LOG_FILE="$(mktemp)"
-kubectl logs -f "job/$JOB_NAME" -n "$NAMESPACE" | tee "$LOG_FILE" || true
+# The full log goes to LOG_FILE. The terminal gets the same lines minus the
+# scorecard JSON block, which is for the extraction below, not for reading.
+hide_scorecard_json() {
+  awk '/^===SCORECARD_JSON_BEGIN===$/ {skip = 1}
+       !skip {print; fflush()}
+       /^===SCORECARD_JSON_END===$/ {skip = 0}'
+}
+kubectl logs -f "job/$JOB_NAME" -n "$NAMESPACE" | tee "$LOG_FILE" | hide_scorecard_json || true
 
 # The follow stream can drop before the Job ends (seen after about 5 minutes
 # with the CPU analyst: the API server closes the long-lived stream). Wait for
 # the Job itself, as long as the eval can take, then read the complete log so
 # the scorecard comes from the Job and not from whatever happened to stream.
-if ! kubectl wait --for=condition=complete "job/$JOB_NAME" -n "$NAMESPACE" --timeout=1s >/dev/null 2>&1; then
+# When the stream already holds the end marker it saw the whole run, and the
+# Job is only a few seconds from Complete, so wait without re-reading.
+if grep -q '^===SCORECARD_JSON_END===$' "$LOG_FILE"; then
+  kubectl wait --for=condition=complete "job/$JOB_NAME" -n "$NAMESPACE" --timeout=120s >/dev/null 2>&1 || true
+elif ! kubectl wait --for=condition=complete "job/$JOB_NAME" -n "$NAMESPACE" --timeout=1s >/dev/null 2>&1; then
   echo "=== Log stream ended before the Job did; waiting for the Job to finish ==="
   kubectl wait --for=condition=complete "job/$JOB_NAME" -n "$NAMESPACE" --timeout=1800s 2>/dev/null || \
     kubectl wait --for=condition=failed "job/$JOB_NAME" -n "$NAMESPACE" --timeout=10s 2>/dev/null || true
   kubectl logs "job/$JOB_NAME" -n "$NAMESPACE" > "$LOG_FILE" 2>/dev/null || true
   # Show the lines the stream missed.
-  grep -E '^\s*\[(PASS|FAIL|PARTIAL|ERROR)\]|^=== Score' "$LOG_FILE" || true
+  grep -E '^\s*\[(PASS|PART|FAIL|ERR )\]|^=== Score' "$LOG_FILE" || true
 fi
 
 # Extract the scorecard from the log markers into local results/.
