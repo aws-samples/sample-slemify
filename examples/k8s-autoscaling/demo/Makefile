@@ -33,8 +33,9 @@ eval:
 	python3 eval/run_eval.py --repeat $(REPEAT)
 
 # Same eval, run as a Job next to the orchestrator. Use this once the analyst
-# step is on CPU: a query then takes 25 to 75 seconds and a local port-forward
-# does not reliably survive the run. The scorecard is copied back to
+# step is on CPU: a new question then takes 35 to 70 seconds (about 12 s when the
+# analyst has just answered the same question) and a local port-forward does
+# not reliably survive the run. The scorecard is copied back to
 # eval/results/ when the Job finishes.
 eval-incluster:
 	bash scripts/run-eval-incluster.sh --repeat $(REPEAT)
