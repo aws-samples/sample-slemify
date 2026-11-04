@@ -13,6 +13,9 @@ RUN pip install --no-cache-dir \
     pyyaml==6.0.2
 
 COPY server.py ui.html ./
+# The image builds (scripts/build-images.sh, buildspec-images.yaml) stage
+# ../triage/expert.yaml as agent/triage_expert.yaml before this COPY. The
+# TRIAGE=llm prompt reads project.domain from it and fails without it.
 COPY agent ./agent
 
 EXPOSE 8000

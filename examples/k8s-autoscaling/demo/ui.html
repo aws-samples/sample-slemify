@@ -99,6 +99,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .gconn{width:1px;height:9px;background:var(--border);margin:0 auto}
 .gbranch{font-size:11px;color:var(--muted)}
 .gloop{font-size:10px;color:var(--muted)}
+.gmap [hidden]{display:none !important}
 @keyframes gpulse{0%,100%{opacity:1}50%{opacity:.5}}
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes slidein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
@@ -129,23 +130,20 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   </section>
   <aside class="trace-pane">
     <div class="trace-head"><span>Agent trace</span><span class="total" id="traceTotal"></span></div>
+    <!-- The flow map. applySteps() shows only the rows and nodes the active
+         step configuration runs, and colors each by where it runs. Each block
+         holds a row and the connector above it, so they hide together. -->
     <div class="gmap" id="gmap">
-      <div class="grow"><div class="gnode cpu tuned" id="g-triage">Triage</div></div>
-      <div class="gconn"></div>
-      <div class="grow"><div class="gnode cpu" id="g-plan">Intent</div></div>
-      <div class="gconn"></div>
-      <div class="grow"><div class="gnode cpu" id="g-lint">Lint</div><span class="gbranch">/</span><div class="gnode cpu" id="g-tools">Tools &#8635;</div></div>
-      <div class="gconn"></div>
-      <div class="grow"><div class="gnode cpu tuned" id="g-retrieve">Retrieve</div><span class="gbranch">&middot;</span><div class="gnode cpu" id="g-rerank">Rerank</div></div>
-      <div class="gconn"></div>
-      <div class="grow"><div class="gnode cpu" id="g-generate">Analyst SLM</div><span class="gbranch">&rarr;</span><div class="gnode llm" id="g-llm">LLM</div></div>
-      <div class="gconn"></div>
-      <div class="grow"><div class="gnode llm" id="g-critic">Gate</div><span class="gloop">&#8635; refine</span></div>
-      <div class="gconn"></div>
-      <div class="grow"><div class="gnode cpu" id="g-remediate">Remediate</div></div>
+      <div class="gblock" id="gb-triage"><div class="gconn"></div><div class="grow"><div class="gnode" id="g-triage"><span class="glbl">Triage</span></div></div></div>
+      <div class="gblock" id="gb-plan"><div class="gconn"></div><div class="grow"><div class="gnode" id="g-plan"><span class="glbl">Intent</span></div></div></div>
+      <div class="gblock" id="gb-lint"><div class="gconn"></div><div class="grow"><div class="gnode" id="g-lint"><span class="glbl">Lint</span></div><span class="gbranch">/</span><div class="gnode" id="g-tools"><span class="glbl">Tools &#8635;</span></div></div></div>
+      <div class="gblock" id="gb-retrieve"><div class="gconn"></div><div class="grow"><div class="gnode" id="g-retrieve"><span class="glbl">Retrieve</span></div><span class="gbranch" id="gs-rerank">&middot;</span><div class="gnode" id="g-rerank"><span class="glbl">Rerank</span></div></div></div>
+      <div class="gblock" id="gb-generate"><div class="gconn"></div><div class="grow"><div class="gnode" id="g-generate"><span class="glbl">Analyst SLM</span></div><span class="gbranch" id="gs-llm">&rarr;</span><div class="gnode" id="g-llm"><span class="glbl">LLM</span></div></div></div>
+      <div class="gblock" id="gb-critic"><div class="gconn"></div><div class="grow"><div class="gnode" id="g-critic"><span class="glbl">Gate</span></div><span class="gloop">&#8635; refine</span></div></div>
+      <div class="gblock" id="gb-remediate"><div class="gconn"></div><div class="grow"><div class="gnode" id="g-remediate"><span class="glbl">Remediate</span></div></div></div>
     </div>
-    <div class="trace" id="trace"><div class="hint">The agent's steps appear here as it works &mdash; each node, its timing, and whether it ran on CPU or the LLM.</div></div>
-    <div class="legend"><span><span class="sw" style="background:var(--cpu)"></span>CPU</span><span><span class="sw" style="background:var(--llm)"></span>LLM</span><span><span class="sw" style="background:var(--tuned)"></span>Fine-tuned model</span></div>
+    <div class="trace" id="trace"><div class="hint">The agent's steps appear here as it works &mdash; each node, its timing, and whether it ran on CPU or on Bedrock.</div></div>
+    <div class="legend"><span><span class="sw" style="background:var(--cpu)"></span>CPU</span><span><span class="sw" style="background:var(--llm)"></span>Bedrock</span><span><span class="sw" style="background:var(--tuned)"></span>Fine-tuned model</span></div>
   </aside>
 </div>
 <script>
@@ -176,14 +174,18 @@ function nodeType(name){
   if(n.includes('refine')) return 'refine';
   return 'other';
 }
-// Agents backed by a Slemify-trained / fine-tuned model: the triage classifier
-// (classification head) and the retriever (contrastively tuned encoder).
-// NOT the reranker (stock cross-encoder) or analyst SLM (stock), and not a
-// step currently filled by the LLM (step names say "LLM" / "Bedrock" then).
+// Purple when the step runs on Bedrock (its name says LLM or Bedrock, see
+// the labels in agent/graph.py), green when it runs on CPU.
+function onBedrock(name){
+  const n = name.toLowerCase();
+  return n.includes('llm') || n.includes('bedrock');
+}
+// Steps backed by a Slemify-trained model: the triage classifier
+// (classification head) and the tuned encoder. Not the reranker (stock
+// cross-encoder), the analyst SLM (stock), or a hosted model.
 function isTuned(name){
   const n = name.toLowerCase();
-  if(n.includes('llm') || n.includes('bedrock')) return false;
-  return n.includes('triage') || n.includes('retriever');
+  return n.includes('triage classifier') || n.includes('tuned encoder');
 }
 const BAR_SCALE = 3000;
 function fmt(ms){ return ms>=1000 ? (ms/1000).toFixed(2)+'s' : ms+' ms'; }
@@ -202,7 +204,7 @@ function addMsg(html, cls){
 
 let steps={};
 function addStep(name, note){
-  const t = nodeType(name), cpu = t!=='llm', tuned = isTuned(name);
+  const t = nodeType(name), cpu = !onBedrock(name), tuned = isTuned(name);
   const d=document.createElement('div');
   d.className='step running '+(cpu?'cpu':'llm')+(tuned?' tuned':'');
   d.innerHTML='<span class="ic">'+(NODE[t]||NODE.other).ic+'</span>'+
@@ -228,12 +230,61 @@ function traceNote(text){
 
 const GIDS=['triage','plan','lint','tools','retrieve','rerank','generate','llm','critic','remediate'];
 const GMAP={classify:'triage',plan:'plan',lint:'lint',extract:'lint',tool:'tools',retrieve:'retrieve',generate:'generate',llm:'llm',critic:'critic',remediate:'remediate'};
-function graphEl(name){
-  // Reranker is a separate stock model from the tuned retriever; map it to its own node.
-  if(name.toLowerCase().includes('rerank')) return document.getElementById('g-rerank');
-  const id=GMAP[nodeType(name)]; return id?document.getElementById('g-'+id):null;
+// The step configuration the map draws (server.py sends it on /config and as
+// the first event of every /query). Without one (an older server), the map
+// shows every step, as the fully moved configuration runs them.
+const DEFAULT_STEPS={triage:'classifier',embed:'slemify',rerank:'on',analyst:'slm',gate:'llm'};
+let curSteps=DEFAULT_STEPS;
+function gEl(id){ return document.getElementById(id); }
+function gShow(id, show){ const el=gEl(id); if(el) el.hidden=!show; }
+function gNode(id, show, cls, label){
+  const el=gEl('g-'+id); if(!el) return;
+  el.hidden=!show;
+  el.classList.remove('cpu','llm','tuned');
+  if(cls) cls.split(' ').forEach(c=>el.classList.add(c));
+  if(label) el.querySelector('.glbl').textContent=label;
 }
-function gReset(){ GIDS.forEach(id=>{ const el=document.getElementById('g-'+id); if(el){ el.classList.remove('active','done'); const c=el.querySelector('.gchk'); if(c) c.remove(); } }); }
+// The first visible row has no connector above it.
+function gConnectors(){
+  let first=true;
+  document.querySelectorAll('#gmap .gblock').forEach(b=>{
+    if(b.hidden) return;
+    b.querySelector('.gconn').hidden=first; first=false;
+  });
+}
+function applySteps(s){
+  s=Object.assign({}, DEFAULT_STEPS, s||{}); curSteps=s;
+  const triage=s.triage!=='off', gate=s.gate!=='off', rerank=s.rerank==='on';
+  ['gb-triage','gb-plan','gb-lint'].forEach(id=>gShow(id, triage));
+  gNode('triage', triage, s.triage==='llm'?'llm':'cpu tuned');
+  gNode('plan', triage, s.triage==='llm'?'llm':'cpu');
+  gNode('lint', triage, 'cpu');
+  gNode('tools', triage, 'cpu');
+  gNode('retrieve', true, s.embed==='bedrock'?'llm':'cpu tuned');
+  gShow('gs-rerank', rerank); gNode('rerank', rerank, 'cpu');
+  gNode('generate', true, s.analyst==='llm'?'llm':'cpu', s.analyst==='llm'?'Analyst LLM':'Analyst SLM');
+  gShow('gs-llm', gate); gNode('llm', gate, 'llm');
+  gShow('gb-critic', gate);
+  gNode('critic', gate, s.gate==='decision'?'cpu':'llm', s.gate==='decision'?'Gate (decision model)':'Gate');
+  gShow('gb-remediate', gate); gNode('remediate', gate, 'cpu');
+  gConnectors();
+}
+function graphEl(name){
+  const n=name.toLowerCase();
+  let id;
+  // Retrieval: the embedder (hosted or tuned) and the OpenSearch lookups.
+  // Checked before the LLM test, because the hosted embedder runs on Bedrock.
+  if(n.includes('embedder')||n.includes('opensearch')||n.includes('field definitions')) id='retrieve';
+  // "Reranker (off)" ran nothing, so it lights nothing.
+  else if(n.includes('rerank')) id=curSteps.rerank==='on'?'rerank':null;
+  // The LLM drafts an unclassified query even with the gate off: show the node.
+  else if(n.includes('fallback')){ id='llm'; gShow('gs-llm', true); gNode('llm', true, 'llm'); }
+  else id=GMAP[nodeType(name)];
+  const el=id?gEl('g-'+id):null;
+  // A step whose node is hidden lights nothing.
+  return el && !el.hidden ? el : null;
+}
+function gReset(){ GIDS.forEach(id=>{ const el=gEl('g-'+id); if(el){ el.classList.remove('active','done'); const c=el.querySelector('.gchk'); if(c) c.remove(); } }); applySteps(curSteps); }
 function gActivate(name){ const el=graphEl(name); if(el){ el.classList.remove('done'); el.classList.add('active'); } }
 function gDone(name){ const el=graphEl(name); if(!el) return; el.classList.remove('active'); el.classList.add('done'); if(!el.querySelector('.gchk')){ const c=document.createElement('span'); c.className='gchk'; c.textContent='\u2713'; el.appendChild(c); } }
 
@@ -280,7 +331,8 @@ async function send(){
       }
       try{
         const msg=JSON.parse(data);
-        if(msg.type==='step_start'){ addStep(msg.name, msg.note); gActivate(msg.name); }
+        if(msg.type==='steps'){ applySteps(msg.steps); }
+        else if(msg.type==='step_start'){ addStep(msg.name, msg.note); gActivate(msg.name); }
         else if(msg.type==='step_done'){ finishStep(msg.name, msg.ms, msg.detail); gDone(msg.name); }
         else if(msg.type==='total'){ traceTotal.textContent='total '+fmt(msg.ms); }
         else if(msg.type==='model'){
@@ -343,8 +395,10 @@ async function applyFix(kind, target, field, value, btn){
   btn.textContent='Applied';
 }
 
+applySteps(null);
 fetch('config').then(r=>r.json()).then(c=>{
   if(c && c.apply_enabled){ const w=document.getElementById('autopilotWrap'); if(w) w.style.display=''; }
+  if(c && c.steps) applySteps(c.steps);
 }).catch(()=>{});
 
 input.addEventListener('keydown', e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); }});

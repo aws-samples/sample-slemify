@@ -154,3 +154,17 @@ bash seed/seed.sh
 kubectl delete namespace slemify --timeout=300s
 terraform -chdir=terraform destroy
 ```
+
+To tear down an account the CloudFormation stack provisioned, run the
+destroy build through the stack's provisioning project, then delete the
+stack. Deleting the stack alone leaves the cluster, because Terraform
+created it. Only for own-account runs.
+
+```bash
+aws codebuild start-build --project-name slemify-workshop-provision \
+  --buildspec-override examples/k8s-autoscaling/workshop/infrastructure/buildspec-destroy.yaml
+```
+
+`buildspec-destroy.yaml` deletes the `slemify` namespace and the demo
+NodePools, empties the versioned model bucket, runs `terraform destroy`, and
+deletes the Terraform state file.

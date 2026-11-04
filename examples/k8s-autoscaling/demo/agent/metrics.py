@@ -4,8 +4,9 @@ Two things are measured here.
 
 1. Gate outcomes: how often the CPU SLM's draft clears the faithfulness gate on
    the first try. The cost model of this architecture hinges on that number:
-   below roughly 87-92%, the escalation path (gate -> escalate -> gate again)
-   makes CPU-first more expensive per query than calling the LLM directly.
+   below about 86 percent with the measured G and A (2G / (A + G)), the
+   escalation path (gate -> escalate -> gate again) makes CPU-first more
+   expensive per query than calling the LLM directly.
 
 2. The scoreboard: for every query, the Bedrock tokens spent (by model and by
    purpose), the resulting USD, and the wall-clock of each step. Aggregated per
@@ -214,7 +215,8 @@ def snapshot() -> dict:
     return {
         "uptime_seconds": round(time.time() - _started),
         # The headline number: of the SLM's first drafts, how many cleared the
-        # gate without escalation. Compare against the ~87-92% breakeven.
+        # gate without escalation. Compare against the breakeven,
+        # about 86 percent with the measured G and A (2G / (A + G)).
         "slm_first_pass_rate": round(passes / checks, 4) if checks else None,
         "slm_first_checks": checks,
         "slm_first_pass": passes,

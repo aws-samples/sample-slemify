@@ -1,2 +1,5 @@
 # Attendee-local scoreboard written by `make scoreboard-save`
 scoreboard.tsv
+# Staged from ../triage/expert.yaml by the image builds (build-images.sh,
+# buildspec-images.yaml); the repo copy is the source of truth
+agent/triage_expert.yaml
