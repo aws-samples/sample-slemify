@@ -114,7 +114,9 @@ func (r *Runner) persistState(ctx context.Context) {
 
 // Run executes the pipeline from the given start stage through completion.
 // If startStage is empty, starts from the beginning.
-// Stages with status "completed" and valid artifacts are skipped.
+// Stages with status "completed" and valid artifacts are skipped, unless an
+// earlier stage in this run produced artifacts. A stage that runs and returns
+// no artifacts (a no-op) does not force the later stages.
 func (r *Runner) Run(ctx context.Context, startStage Stage) error {
 	startIdx := 0
 	explicitStart := startStage != ""
@@ -127,6 +129,11 @@ func (r *Runner) Run(ctx context.Context, startStage Stage) error {
 		}
 	}
 
+	// Set once a stage in this run produces artifacts. The later stages consume
+	// that output, so their saved completion no longer describes it (for
+	// example, a new encoder must restart the serving pod).
+	rerunRest := false
+
 	for i := startIdx; i < len(StageOrder); i++ {
 		stage := StageOrder[i]
 
@@ -134,7 +141,7 @@ func (r *Runner) Run(ctx context.Context, startStage Stage) error {
 		// When the user explicitly requests a start stage, force it (and the
 		// stages after it) to re-run rather than trusting persisted state —
 		// the prior artifacts may have been removed or regenerated out of band.
-		if !(explicitStart && i >= startIdx) {
+		if !(explicitStart && i >= startIdx) && !rerunRest {
 			if result, ok := r.state.Stages[stage]; ok {
 				if result.Status == StatusCompleted && len(result.Artifacts) > 0 {
 					r.onProgress(stage, StatusCompleted, "skipped (artifacts exist)")
@@ -201,6 +208,9 @@ func (r *Runner) Run(ctx context.Context, startStage Stage) error {
 			Artifacts:   artifacts,
 		}
 		r.persistState(ctx)
+		if len(artifacts) > 0 {
+			rerunRest = true
+		}
 
 		duration := r.state.Stages[stage].CompletedAt.Sub(r.state.Stages[stage].StartedAt)
 		r.onProgress(stage, StatusCompleted, fmt.Sprintf("done (%s)", duration.Round(time.Second)))

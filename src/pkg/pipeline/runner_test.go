@@ -198,6 +198,64 @@ func TestExplicitStartStageForcesRerun(t *testing.T) {
 	}
 }
 
+func assertExecuted(t *testing.T, executed, want []Stage) {
+	t.Helper()
+	if len(executed) != len(want) {
+		t.Fatalf("executed %v, want %v", executed, want)
+	}
+	for i := range want {
+		if executed[i] != want[i] {
+			t.Fatalf("executed %v, want %v", executed, want)
+		}
+	}
+}
+
+func TestExecutedStageForcesLaterStages(t *testing.T) {
+	// A re-train left TRAINING in progress (--no-wait). SERVING completed in an
+	// earlier run, but it serves the old model, so it must run again.
+	state := NewState("test-project")
+	state.Stages[StageData] = StageResult{Stage: StageData, Status: StatusCompleted, Artifacts: []string{"data"}}
+	state.Stages[StageTraining] = StageResult{Stage: StageTraining, Status: StatusInProgress, Artifacts: []string{"job"}}
+	state.Stages[StageQuantize] = StageResult{Stage: StageQuantize, Status: StatusCompleted, Artifacts: []string{"gguf"}}
+	state.Stages[StageServing] = StageResult{Stage: StageServing, Status: StatusCompleted, Artifacts: []string{"svc"}}
+
+	runner := NewRunner("test-project", state)
+	runner.SetProgressCallback(func(Stage, Status, string) {})
+
+	var executed []Stage
+	runner.RegisterStage(StageData, mockStageFunc(&executed, StageData, []string{"data"}))
+	runner.RegisterStage(StageTraining, mockStageFunc(&executed, StageTraining, []string{"model"}))
+	runner.RegisterStage(StageQuantize, mockStageFunc(&executed, StageQuantize, nil))
+	runner.RegisterStage(StageServing, mockStageFunc(&executed, StageServing, []string{"svc"}))
+
+	if err := runner.Run(context.Background(), ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertExecuted(t, executed, []Stage{StageTraining, StageQuantize, StageServing})
+}
+
+func TestStageWithoutArtifactsDoesNotForceLaterStages(t *testing.T) {
+	// A no-op DATA and a no-op QUANTIZE run every time. They produce nothing
+	// new, so the completed TRAINING and SERVING stay skipped.
+	state := NewState("test-project")
+	state.Stages[StageTraining] = StageResult{Stage: StageTraining, Status: StatusCompleted, Artifacts: []string{"model"}}
+	state.Stages[StageServing] = StageResult{Stage: StageServing, Status: StatusCompleted, Artifacts: []string{"svc"}}
+
+	runner := NewRunner("test-project", state)
+	runner.SetProgressCallback(func(Stage, Status, string) {})
+
+	var executed []Stage
+	runner.RegisterStage(StageData, mockStageFunc(&executed, StageData, nil))
+	runner.RegisterStage(StageTraining, mockStageFunc(&executed, StageTraining, []string{"model"}))
+	runner.RegisterStage(StageQuantize, mockStageFunc(&executed, StageQuantize, nil))
+	runner.RegisterStage(StageServing, mockStageFunc(&executed, StageServing, []string{"svc"}))
+
+	if err := runner.Run(context.Background(), ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertExecuted(t, executed, []Stage{StageData, StageQuantize})
+}
+
 func TestUnregisteredStageReturnsError(t *testing.T) {
 	state := NewState("test-project")
 	runner := NewRunner("test-project", state)
