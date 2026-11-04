@@ -4,19 +4,20 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/aws-samples/sample-slemify/pkg/config"
+	"github.com/aws-samples/sample-slemify/pkg/data"
 	"github.com/aws-samples/sample-slemify/pkg/k8s"
 	"github.com/spf13/cobra"
 )
 
 var dataCmd = &cobra.Command{
 	Use:   "data",
-	Short: "Review generated training data",
-	Long:  "Download and display training data samples from S3 for quick validation before training.",
+	Short: "Review the training data",
+	Long:  "Download the training and eval data from S3 and show the record counts, the label mix and one sample per label, for a quick check before training.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 
@@ -42,82 +43,57 @@ var dataCmd = &cobra.Command{
 		}
 		evalData, _ := client.DownloadFromS3(ctx, cfg.Data.Bucket, evalKey)
 
-		trainRecords := parseJSONL(trainData)
-		evalRecords := parseJSONL(evalData)
+		trainRecords := data.ParseJSONL(trainData)
+		evalRecords := data.ParseJSONL(evalData)
+		byOrigin := func(r data.Record) string { return r["origin"] }
+		byLabel := func(r data.Record) string { return data.PrimaryLabel(r["output"]) }
 
 		fmt.Printf("━━━ Training Data Review ━━━\n\n")
-		fmt.Printf("  Train records:  %d\n", len(trainRecords))
-		fmt.Printf("  Eval records:   %d\n", len(evalRecords))
+		fmt.Printf("  Train records:  %d%s\n", len(trainRecords), originSummary(data.CountBy(trainRecords, byOrigin)))
+		fmt.Printf("  Eval records:   %d%s\n", len(evalRecords), originSummary(data.CountBy(evalRecords, byOrigin)))
 		fmt.Printf("  Total:          %d\n\n", len(trainRecords)+len(evalRecords))
 
-		// Output distribution
-		// Primary label distribution (first pipe-delimited field)
-		labelCounts := make(map[string]int)
-		for _, r := range append(trainRecords, evalRecords...) {
-			output := r["output"]
-			label := output
-			if idx := strings.Index(output, "|"); idx > 0 {
-				label = output[:idx]
-			}
-			labelCounts[strings.TrimSpace(label)]++
-		}
-
-		type kv struct {
-			k string
-			v int
-		}
-		var labelSorted []kv
-		for k, v := range labelCounts {
-			labelSorted = append(labelSorted, kv{k, v})
-		}
-		for i := 0; i < len(labelSorted); i++ {
-			for j := i + 1; j < len(labelSorted); j++ {
-				if labelSorted[j].v > labelSorted[i].v {
-					labelSorted[i], labelSorted[j] = labelSorted[j], labelSorted[i]
-				}
-			}
-		}
+		// Primary label distribution (first pipe-delimited field), training
+		// records only: that is the set the model learns from.
+		labelCounts := data.CountBy(trainRecords, byLabel)
+		labelSorted := sortedCounts(labelCounts)
 
 		fmt.Printf("  Labels: %d\n", len(labelCounts))
-		fmt.Printf("  Distribution:\n")
+		fmt.Printf("  Distribution (train):\n")
 		minPerClass := 50
+		var weakLabels []string
 		for _, s := range labelSorted {
-			pct := float64(s.v) / float64(len(trainRecords)+len(evalRecords)) * 100
+			pct := float64(s.v) / float64(len(trainRecords)) * 100
 			marker := ""
 			if s.v < minPerClass {
 				marker = " ⚠ LOW"
+				weakLabels = append(weakLabels, s.k)
 			}
 			fmt.Printf("    %-30s %4d (%4.1f%%)%s\n", s.k, s.v, pct, marker)
 		}
 
 		// Warn about underrepresented labels
-		weak := 0
-		var weakLabels []string
-		for _, s := range labelSorted {
-			if s.v < minPerClass {
-				weak++
-				weakLabels = append(weakLabels, s.k)
-			}
-		}
-		if weak > 0 {
-			fmt.Printf("\n  ⚠ %d label(s) below %d samples: %s\n", weak, minPerClass, strings.Join(weakLabels, ", "))
+		if len(weakLabels) > 0 {
+			fmt.Printf("\n  ⚠ %d label(s) below %d training samples: %s\n", len(weakLabels), minPerClass, strings.Join(weakLabels, ", "))
 			fmt.Printf("    Add more raw source data for these labels to improve accuracy.\n")
 		} else {
-			fmt.Printf("\n  ✓ All labels have %d+ samples.\n", minPerClass)
+			fmt.Printf("\n  ✓ All labels have %d+ training samples.\n", minPerClass)
 		}
 
-		// Show samples
-		fmt.Printf("\n━━━ Samples ━━━\n")
-		show := samples
-		if show > len(trainRecords) {
-			show = len(trainRecords)
-		}
-		for i := 0; i < show; i++ {
-			r := trainRecords[i]
-			fmt.Printf("\n[%d/%d]\n", i+1, show)
-			fmt.Printf("  Instruction: %s\n", truncate(r["instruction"], 80))
+		// Show samples, one per label, so a run of one label at the start of
+		// the file does not fill every slot.
+		picked := data.SampleByLabel(trainRecords, samples)
+		fmt.Printf("\n━━━ Samples (one per label) ━━━\n")
+		for i, r := range picked {
+			fmt.Printf("\n[%d/%d]\n", i+1, len(picked))
+			if r["instruction"] != "" {
+				fmt.Printf("  Instruction: %s\n", truncate(r["instruction"], 80))
+			}
 			fmt.Printf("  Input:       %s\n", truncate(r["input"], 120))
 			fmt.Printf("  Output:      %s\n", r["output"])
+			if r["origin"] != "" {
+				fmt.Printf("  Origin:      %s\n", r["origin"])
+			}
 		}
 		fmt.Println()
 
@@ -125,19 +101,37 @@ var dataCmd = &cobra.Command{
 	},
 }
 
-func parseJSONL(data string) []map[string]string {
-	var records []map[string]string
-	for _, line := range strings.Split(data, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var r map[string]string
-		if err := json.Unmarshal([]byte(line), &r); err == nil {
-			records = append(records, r)
-		}
+type countEntry struct {
+	k string
+	v int
+}
+
+// sortedCounts orders counts by value, highest first, then by key.
+func sortedCounts(counts map[string]int) []countEntry {
+	out := make([]countEntry, 0, len(counts))
+	for k, v := range counts {
+		out = append(out, countEntry{k, v})
 	}
-	return records
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].v != out[j].v {
+			return out[i].v > out[j].v
+		}
+		return out[i].k < out[j].k
+	})
+	return out
+}
+
+// originSummary formats origin counts as "  (labeled 785)", or "" when no
+// record has an origin.
+func originSummary(counts map[string]int) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, e := range sortedCounts(counts) {
+		parts = append(parts, fmt.Sprintf("%s %d", e.k, e.v))
+	}
+	return "  (" + strings.Join(parts, ", ") + ")"
 }
 
 func truncate(s string, max int) string {
