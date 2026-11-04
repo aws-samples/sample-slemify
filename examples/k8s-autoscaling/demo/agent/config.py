@@ -141,6 +141,12 @@ RERANK_QUERY_CHARS = 512
 # and extra pulled when a retry broadens the search.
 KEEP_DOCS = int(os.environ.get("KEEP_DOCS", "5"))
 BROADEN_EXTRA = 4
+# Client timeout for one re-rank call. The re-ranker scores one request at a
+# time, so a request queued behind one or two others needs two to three times
+# the single-request time. Kept well under the analyst's 60 s timeout.
+RERANK_TIMEOUT_S = float(os.environ.get("RERANK_TIMEOUT_S", "30"))
+# Reciprocal rank fusion constant for the fallback order when a re-rank fails.
+RRF_K = 60
 
 # --- Control flow ---
 # Hard cap on tool calls per query so the plan -> tool loop can never run away.

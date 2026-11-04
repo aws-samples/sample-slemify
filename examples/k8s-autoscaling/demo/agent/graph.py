@@ -175,7 +175,7 @@ async def n_retrieve(state: AgentState) -> dict:
 
     writer({"type": "step_start", "name": "OpenSearch (vector DB)", "note": "hybrid k-NN + BM25"})
     t = time.perf_counter()
-    candidates = await asyncio.to_thread(retrieval.hybrid_candidates, embedding, query, broaden)
+    candidates, fused = await asyncio.to_thread(retrieval.hybrid_candidates, embedding, query, broaden)
     writer({"type": "step_done", "name": "OpenSearch (vector DB)", "ms": _ms(t), "detail": f"{len(candidates)} candidates"})
 
     keep = config.KEEP_DOCS + (config.BROADEN_EXTRA if broaden else 0)
@@ -183,7 +183,8 @@ async def n_retrieve(state: AgentState) -> dict:
             else f"scoring {len(candidates)} \u2192 top {keep}")
     writer({"type": "step_start", "name": LBL_RERANK, "note": note})
     t = time.perf_counter()
-    docs = await asyncio.to_thread(retrieval.rerank_docs, query[:config.RERANK_QUERY_CHARS], candidates, keep)
+    docs = await asyncio.to_thread(retrieval.rerank_docs, query[:config.RERANK_QUERY_CHARS],
+                                   candidates, keep, fused)
     writer({"type": "step_done", "name": LBL_RERANK, "ms": _ms(t), "detail": f"kept top {len(docs)}"})
 
     # Field-aware guarantee for pasted configs: similarity ranking can bury the

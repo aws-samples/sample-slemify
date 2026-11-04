@@ -83,9 +83,27 @@ def keyword_search(query: str, k: int) -> list[str]:
         return []
 
 
-def hybrid_candidates(embedding: list[float], query: str, broaden: bool = False) -> list[str]:
-    """Union dense + lexical candidates, de-duplicated, dense-first. The reranker
-    reorders by relevance so merge order only affects ties."""
+def fuse_ranked(*lists: list[str], k: int | None = None) -> list[str]:
+    """Reciprocal rank fusion: score each doc sum(1 / (k + rank + 1)) over the
+    lists it appears in (rank is 0-based) and sort by score, highest first.
+    Ties keep first-seen order across the lists in argument order. The top hit
+    of any list lands near the top of the result, whatever the other lists say."""
+    k = config.RRF_K if k is None else k
+    scores: dict[str, float] = {}
+    for ranked in lists:
+        for rank, doc in enumerate(ranked):
+            scores[doc] = scores.get(doc, 0.0) + 1.0 / (k + rank + 1)
+    # dict keeps insertion (first-seen) order and sorted() is stable.
+    return sorted(scores, key=lambda d: scores[d], reverse=True)
+
+
+def hybrid_candidates(embedding: list[float], query: str,
+                      broaden: bool = False) -> tuple[list[str], list[str]]:
+    """Return two orders of the dense + lexical candidates, de-duplicated:
+    - the dense-first union, which the reranker scores and which RERANK=off
+      truncates (merge order only affects ties once the reranker runs);
+    - the reciprocal rank fusion of the two lists, which rerank_docs uses as
+      its fallback so a top lexical hit survives a reranker failure."""
     extra = config.BROADEN_EXTRA if broaden else 0
     vec = vector_search(embedding, config.RETRIEVE_CANDIDATES + extra)
     lex = keyword_search(query, config.LEXICAL_CANDIDATES + extra)
@@ -94,7 +112,7 @@ def hybrid_candidates(embedding: list[float], query: str, broaden: bool = False)
         if c not in seen:
             seen.add(c)
             out.append(c)
-    return out
+    return out, fuse_ranked(vec, lex)
 
 
 # Field-aware retrieval: official-docs sources whose chunks define API fields
@@ -144,16 +162,18 @@ def field_definition_docs(fields: list[str], exclude: list[str],
     return out
 
 
-def rerank_docs(query: str, docs: list[str], top_k: int) -> list[str]:
+def rerank_docs(query: str, docs: list[str], top_k: int,
+                fallback: list[str] | None = None) -> list[str]:
     """Re-rank candidates with the cross-encoder, keeping the best top_k. With
     RERANK=off, keep vector order truncated to top_k (the monolith's retrieval).
-    Also falls back to vector order if the reranker is unavailable."""
+    If the reranker fails or times out, keep the top_k of `fallback` (the fused
+    dense + lexical order from hybrid_candidates) when given, else of `docs`."""
     if not docs:
         return []
     if config.RERANK == "off":
         return docs[:top_k]
     try:
-        with httpx.Client(timeout=10) as client:
+        with httpx.Client(timeout=config.RERANK_TIMEOUT_S) as client:
             resp = client.post(
                 f"{config.RERANKER_URL}/rerank",
                 json={"query": query[:config.RERANK_QUERY_CHARS], "documents": docs, "top_k": top_k},
@@ -162,5 +182,8 @@ def rerank_docs(query: str, docs: list[str], top_k: int) -> list[str]:
             results = resp.json()["results"]
         return [docs[r["index"]] for r in results]
     except Exception as e:
+        if fallback:
+            print(f"  Rerank failed, using fused dense+lexical order: {e}")
+            return fallback[:top_k]
         print(f"  Rerank failed, using vector order: {e}")
         return docs[:top_k]

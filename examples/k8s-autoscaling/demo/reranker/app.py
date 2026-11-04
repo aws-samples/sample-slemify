@@ -13,12 +13,16 @@ API:
 The model is baked into the image at build time so the pod needs no internet
 access at runtime.
 
+Requests are scored one at a time. Concurrent requests queue on a lock, which
+keeps memory to one batch and costs no throughput on CPU.
+
 Usage:
   pip install fastapi uvicorn sentence-transformers
   python3 app.py
 """
 
 import os
+import threading
 
 
 def _detect_threads() -> int:
@@ -76,6 +80,11 @@ MAX_DOCS = 50
 
 app = FastAPI()
 _model: CrossEncoder | None = None
+# One predict at a time. Measured on m9g.4xlarge: one request takes about 5.5 s,
+# two concurrent requests take about 10 s each (no throughput gain), and three
+# concurrent requests got the pod OOM-killed at its 2Gi limit. Queuing keeps
+# memory to one batch at the same throughput.
+_predict_lock = threading.Lock()
 
 
 class RerankRequest(BaseModel):
@@ -111,7 +120,8 @@ def rerank(req: RerankRequest):
         return {"results": []}
 
     pairs = [(req.query, d) for d in docs]
-    scores = _model.predict(pairs)
+    with _predict_lock:
+        scores = _model.predict(pairs)
 
     ranked = sorted(
         ({"index": i, "score": float(s)} for i, s in enumerate(scores)),
