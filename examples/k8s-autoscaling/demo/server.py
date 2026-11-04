@@ -129,6 +129,10 @@ async def query_endpoint(q: Query):
                 async for event in agent.astream(
                     {"query": q.text, "autopilot": q.autopilot}, stream_mode="custom"):
                     await queue.put(event)
+            except Exception as e:
+                # Without this the stream ends with no answer and nothing in the
+                # log. Log the type and message only, never the query text.
+                print(f"  Query failed: {type(e).__name__}: {e}", flush=True)
             finally:
                 await queue.put(_DONE)
 
