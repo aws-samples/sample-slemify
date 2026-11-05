@@ -27,6 +27,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -286,6 +287,9 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     return _with_retry(post, "embed")
 
 
+_print_lock = threading.Lock()
+
+
 def _with_retry(fn, what: str, attempts: int = 5):
     """Call fn(), retrying a dropped connection (a port-forward restart takes
     4 to 10 s). Waits 2, 4, 8, 16 s between attempts, about 30 s in all, then
@@ -298,7 +302,12 @@ def _with_retry(fn, what: str, attempts: int = 5):
             if isinstance(e, ConnectionTimeout) or i == attempts:
                 raise
             wait = 2 ** i
-            print(f"    {what} failed ({type(e).__name__}); retrying in {wait}s (attempt {i}/{attempts})")
+            # Up to eight workers retry at once. print() writes the text and the
+            # newline separately, so their lines ran together; write each line
+            # whole under a lock.
+            with _print_lock:
+                sys.stdout.write(f"    {what} failed ({type(e).__name__}); retrying in {wait}s (attempt {i}/{attempts})\n")
+                sys.stdout.flush()
             time.sleep(wait)
 
 

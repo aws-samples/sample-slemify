@@ -1,7 +1,9 @@
 """scripts/index-knowledge.py: _with_retry outlasts a dropped port-forward and
 does not retry a timed-out insert."""
+import io
 import sys
 import types
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 from unittest import mock
 
@@ -47,6 +49,20 @@ class WithRetryTest(unittest.TestCase):
             with self.assertRaises(OSConnectionError):
                 index_knowledge._with_retry(flaky([refused] * 5), "index")
         self.assertEqual([c.args[0] for c in sleep.call_args_list], [2, 4, 8, 16])
+
+    def test_concurrent_retry_lines_stay_whole(self):
+        drop = httpx.RemoteProtocolError("Server disconnected without sending a response")
+        out = io.StringIO()
+        with mock.patch.object(index_knowledge.time, "sleep"), \
+                mock.patch.object(index_knowledge.sys, "stdout", out):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(lambda _: index_knowledge._with_retry(flaky([drop] * 3), "embed"),
+                              range(8)))
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 24)
+        for line in lines:
+            self.assertRegex(line, r"^    embed failed \(RemoteProtocolError\); "
+                                   r"retrying in \d+s \(attempt \d/5\)$")
 
 
 if __name__ == "__main__":
