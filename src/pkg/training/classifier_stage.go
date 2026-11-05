@@ -27,6 +27,18 @@ func ClassifierStage(client *k8s.Client, cfg *config.ExpertConfig, ns string, pc
 	return func(ctx context.Context) ([]string, error) {
 		job := ClassifierJobManifest(cfg, ns, pc)
 
+		// The follow-up to a --no-wait submission uses the Job's output when
+		// the Job already succeeded, instead of replacing it and training
+		// again. A running Job is attached to by SubmitJob below, and a failed
+		// or missing one is created again. A lookup error takes that path too,
+		// so SubmitJob reports any real API problem.
+		if pipeline.ResumingSubmission(ctx) {
+			if done, err := client.JobSucceeded(ctx, job.Name); err == nil && done {
+				fmt.Printf("  Job %s already finished; using its output\n", job.Name)
+				return classifierOutput(ctx, client, cfg, job.Name), nil
+			}
+		}
+
 		jobName, err := client.SubmitJob(ctx, job)
 		if err != nil {
 			return nil, fmt.Errorf("submitting classifier training job: %w", err)
@@ -49,17 +61,23 @@ func ClassifierStage(client *k8s.Client, cfg *config.ExpertConfig, ns string, pc
 			return nil, fmt.Errorf("classifier training job failed: %w", err)
 		}
 
-		// Surface the training logs (they include the accuracy line).
-		logs, _ := client.GetJobPodLogs(ctx, jobName)
-		if logs != "" {
-			savedLogsPath := fmt.Sprintf("models/%s/training-logs.txt", cfg.Project.Name)
-			_ = client.UploadToS3(ctx, cfg.Data.Bucket, savedLogsPath, []byte(logs))
-		}
+		return classifierOutput(ctx, client, cfg, jobName), nil
+	}
+}
 
-		return []string{
-			fmt.Sprintf("s3://%s/models/%s/head.json", cfg.Data.Bucket, cfg.Project.Name),
-			fmt.Sprintf("s3://%s/models/%s/encoder.onnx", cfg.Data.Bucket, cfg.Project.Name),
-		}, nil
+// classifierOutput saves a finished training Job's logs to S3 and returns the
+// artifact paths the job uploaded.
+func classifierOutput(ctx context.Context, client *k8s.Client, cfg *config.ExpertConfig, jobName string) []string {
+	// Surface the training logs (they include the accuracy line).
+	logs, _ := client.GetJobPodLogs(ctx, jobName)
+	if logs != "" {
+		savedLogsPath := fmt.Sprintf("models/%s/training-logs.txt", cfg.Project.Name)
+		_ = client.UploadToS3(ctx, cfg.Data.Bucket, savedLogsPath, []byte(logs))
+	}
+
+	return []string{
+		fmt.Sprintf("s3://%s/models/%s/head.json", cfg.Data.Bucket, cfg.Project.Name),
+		fmt.Sprintf("s3://%s/models/%s/encoder.onnx", cfg.Data.Bucket, cfg.Project.Name),
 	}
 }
 

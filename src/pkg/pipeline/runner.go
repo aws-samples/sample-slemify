@@ -8,6 +8,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -158,6 +159,18 @@ func (r *Runner) Run(ctx context.Context, startStage Stage) error {
 			return fmt.Errorf("no executor registered for stage %s", stage)
 		}
 
+		// A plain run that reaches a stage an earlier --no-wait run submitted
+		// tells the stage it is resuming that submission, so the stage can use
+		// a Job that already finished instead of running it again. A forced
+		// stage (explicit --stage) or one after a stage that produced new
+		// artifacts in this run is a fresh run and is not told.
+		stageCtx := ctx
+		if !(explicitStart && i >= startIdx) && !rerunRest {
+			if prev, ok := r.state.Stages[stage]; ok && prev.Status == StatusInProgress && hasSubmission(prev.Artifacts) {
+				stageCtx = withResumingSubmission(ctx)
+			}
+		}
+
 		// Mark in-progress
 		r.state.CurrentStage = stage
 		r.state.Stages[stage] = StageResult{
@@ -169,7 +182,7 @@ func (r *Runner) Run(ctx context.Context, startStage Stage) error {
 		r.onProgress(stage, StatusInProgress, "starting")
 
 		// Execute
-		artifacts, err := fn(ctx)
+		artifacts, err := fn(stageCtx)
 		if err != nil {
 			r.state.Stages[stage] = StageResult{
 				Stage:       stage,
@@ -222,6 +235,31 @@ func (r *Runner) Run(ctx context.Context, startStage Stage) error {
 	}
 
 	return nil
+}
+
+type resumingSubmissionKey struct{}
+
+func withResumingSubmission(ctx context.Context) context.Context {
+	return context.WithValue(ctx, resumingSubmissionKey{}, true)
+}
+
+// ResumingSubmission reports whether the stage runs as the follow-up to an
+// earlier --no-wait submission of the same stage. A stage may then use the
+// output of that submission's Job if the Job already succeeded.
+func ResumingSubmission(ctx context.Context) bool {
+	v, _ := ctx.Value(resumingSubmissionKey{}).(bool)
+	return v
+}
+
+// hasSubmission reports whether the artifacts hold the "job/<name> submitted"
+// note that a --no-wait stage returns.
+func hasSubmission(artifacts []string) bool {
+	for _, a := range artifacts {
+		if strings.HasPrefix(a, "job/") && strings.HasSuffix(a, " submitted") {
+			return true
+		}
+	}
+	return false
 }
 
 // StageIndex returns the position of a stage in StageOrder, or -1 if unknown.

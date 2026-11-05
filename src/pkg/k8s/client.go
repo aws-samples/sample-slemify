@@ -193,6 +193,25 @@ func (c *Client) SubmitJob(ctx context.Context, job *batchv1.Job) (string, error
 	return created.Name, nil
 }
 
+// JobSucceeded reports whether the named Job exists in the client's namespace
+// and has a JobComplete condition with status True. A missing, running or
+// failed Job returns false with a nil error.
+func (c *Client) JobSucceeded(ctx context.Context, name string) (bool, error) {
+	job, err := c.clientset.BatchV1().Jobs(c.namespace).Get(ctx, name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("getting job %s: %w", name, err)
+	}
+	for _, cond := range job.Status.Conditions {
+		if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // WatchJobUntilDone watches a Job until it succeeds, fails, or the context is cancelled.
 // If the watch channel closes (e.g., Spot interruption), it polls the Job status before failing.
 func (c *Client) WatchJobUntilDone(ctx context.Context, jobName string) error {
