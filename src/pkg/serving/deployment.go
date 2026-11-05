@@ -50,6 +50,11 @@ func GenerateInferenceManifests(cfg *config.ExpertConfig, sized config.SizedConf
 // Pinned, multi-arch, and pulled from ECR Public to avoid Docker Hub rate limits.
 const ModelLoaderImage = "public.ecr.aws/aws-cli/aws-cli:2.22.35"
 
+// LlamaCppImage serves the GGUF model. It is llama.cpp release b12063, the
+// build the workshop measured. The digest pins the multi-arch index, which
+// has linux/amd64 and linux/arm64 images, so every node pulls the same build.
+const LlamaCppImage = "ghcr.io/ggml-org/llama.cpp:server-b12063@sha256:10a38e6cc91760ab157f0a0a8546218d35f4a314432a70298abfa3d096829ad7"
+
 func inferenceDeployment(cfg *config.ExpertConfig, sized config.SizedConfig, ns string, labels, selectorLabels map[string]string, pc *pipeline.PipelineContext) *appsv1.Deployment {
 	replicas := int32(1)
 	automountSA := pc.ServiceAccount != ""
@@ -145,10 +150,10 @@ func inferenceDeployment(cfg *config.ExpertConfig, sized config.SizedConfig, ns 
 					Containers: []corev1.Container{
 						{
 							Name:  "llama-cpp",
-							Image: "ghcr.io/ggml-org/llama.cpp:server",
-							// The tag floats with upstream; pull it on every start so a
-							// node's cached image cannot diverge from the flags we pass.
-							ImagePullPolicy: corev1.PullAlways,
+							Image: LlamaCppImage,
+							// A digest pin cannot drift, so a node's cached image is
+							// always the same build and need not be pulled again.
+							ImagePullPolicy: corev1.PullIfNotPresent,
 							Args:            llamaArgs,
 							SecurityContext: &corev1.SecurityContext{
 								AllowPrivilegeEscalation: func() *bool { b := false; return &b }(),

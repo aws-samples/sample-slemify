@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws-samples/sample-slemify/pkg/config"
 	"github.com/aws-samples/sample-slemify/pkg/pipeline"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -101,6 +102,28 @@ func TestDeploymentInitContainer(t *testing.T) {
 	}
 	if !strings.HasPrefix(ic.Image, "public.ecr.aws/") {
 		t.Errorf("init container image %q should come from ECR Public, not Docker Hub", ic.Image)
+	}
+}
+
+// The llama.cpp image is pinned by digest, so upstream changes to the
+// floating :server tag cannot change what the analyst runs.
+func TestDeploymentLlamaCppImagePinned(t *testing.T) {
+	cfg := karpenterConfig()
+	sized := sized7B()
+	m := GenerateInferenceManifests(cfg, sized, "slemify", pc)
+
+	c := m.Deployment.Spec.Template.Spec.Containers[0]
+	if c.Name != "llama-cpp" {
+		t.Fatalf("container name = %q, want llama-cpp", c.Name)
+	}
+	if c.Image != LlamaCppImage {
+		t.Errorf("llama-cpp image = %q, want %q", c.Image, LlamaCppImage)
+	}
+	if !strings.Contains(c.Image, "@sha256:") {
+		t.Errorf("llama-cpp image %q is not pinned by digest", c.Image)
+	}
+	if c.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Errorf("llama-cpp pull policy = %q, want IfNotPresent", c.ImagePullPolicy)
 	}
 }
 
