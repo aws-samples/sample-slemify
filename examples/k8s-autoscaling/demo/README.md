@@ -887,6 +887,12 @@ python3 scripts/index-knowledge.py --append --source=karpenter
 > (768d). Changing the embedding model requires a full reindex (the index
 > mapping dimension changes), not an `--append`.
 
+`SUPERSEDED_SOURCES` in `scripts/index-knowledge.py` lists blog posts that the
+indexer skips, because a newer authoritative doc replaces them. An entry gives the
+exact `BLOG_URLS` string, the reason and the replacement doc, and it qualifies only
+when the post's Karpenter configuration uses a flag, field, value or API that the
+current Karpenter docs renamed or removed.
+
 ## The Story This Tells
 
 1. **Right tool for the right task** — fine-tune where it earns it (retrieval), serve stock where the base is already capable (the generation analyst + RAG, the reranker), use plain code for glue (routing, extraction), and use a capable LLM to check answers (the faithfulness gate) and for the open-ended tail
