@@ -23,9 +23,10 @@ exactly three valid values: `WhenEmpty`, `WhenEmptyOrUnderutilized`, and `Balanc
   disruption to the running pods, scoring each candidate action and acting only when
   the savings are large enough relative to the disruption.
 
-There is no `WhenUnderutilized` value in Karpenter v1 and `WhenEmptyOrUnderutilized`
-did not rename or replace a separate `WhenUnderutilized` policy; the three values
-above are the complete, current set.
+There is no `WhenUnderutilized` value in Karpenter v1. The v1 release renamed the
+v1beta1 policy `WhenUnderutilized` to `WhenEmptyOrUnderutilized`, with the same
+behavior, so a NodePool that still sets `WhenUnderutilized` must change it to
+`WhenEmptyOrUnderutilized`. The three values above are the complete, current set.
 
 ## Karpenter minValues and the min-values policy
 
