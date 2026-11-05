@@ -27,6 +27,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -36,6 +37,7 @@ from botocore.exceptions import ClientError
 import httpx
 from git import Repo
 from opensearchpy import OpenSearch
+from opensearchpy.exceptions import ConnectionError as OSConnectionError, ConnectionTimeout
 
 # --- Configuration ---
 
@@ -277,10 +279,36 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
         with ThreadPoolExecutor(max_workers=BEDROCK_EMBED_CONCURRENCY) as pool:
             return list(pool.map(lambda t: _bedrock_embed_one(br, t), truncated))
     # TEI accepts a batch of inputs and returns one embedding per input.
-    with httpx.Client(timeout=60) as client:
-        resp = client.post(f"{EMBEDDING_URL}/embed", json={"inputs": truncated})
-        resp.raise_for_status()
-        return resp.json()
+    def post():
+        with httpx.Client(timeout=60) as client:
+            resp = client.post(f"{EMBEDDING_URL}/embed", json={"inputs": truncated})
+            resp.raise_for_status()
+            return resp.json()
+    return _with_retry(post, "embed")
+
+
+_print_lock = threading.Lock()
+
+
+def _with_retry(fn, what: str, attempts: int = 5):
+    """Call fn(), retrying a dropped connection (a port-forward restart takes
+    4 to 10 s). Waits 2, 4, 8, 16 s between attempts, about 30 s in all, then
+    re-raises. A timed-out OpenSearch insert is not retried: it may have landed,
+    and a retry would index the chunk twice."""
+    for i in range(1, attempts + 1):
+        try:
+            return fn()
+        except (httpx.TransportError, OSConnectionError) as e:
+            if isinstance(e, ConnectionTimeout) or i == attempts:
+                raise
+            wait = 2 ** i
+            # Up to eight workers retry at once. print() writes the text and the
+            # newline separately, so their lines ran together; write each line
+            # whole under a lock.
+            with _print_lock:
+                sys.stdout.write(f"    {what} failed ({type(e).__name__}); retrying in {wait}s (attempt {i}/{attempts})\n")
+                sys.stdout.flush()
+            time.sleep(wait)
 
 
 def _bedrock_embed_one(br, text: str) -> list[float]:
@@ -344,7 +372,8 @@ def index_chunks(client: OpenSearch, chunks: list[dict]) -> int:
     with ThreadPoolExecutor(max_workers=outer_workers) as pool:
         for batch, embeddings in pool.map(embed_batch, batches):
             for chunk, embedding in zip(batch, embeddings):
-                client.index(index=INDEX_NAME, body={**chunk, "embedding": embedding})
+                _with_retry(lambda: client.index(
+                    index=INDEX_NAME, body={**chunk, "embedding": embedding}), "index")
                 indexed += 1
 
             if indexed % 50 == 0:

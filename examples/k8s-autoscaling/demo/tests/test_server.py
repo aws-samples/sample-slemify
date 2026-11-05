@@ -1,5 +1,7 @@
 """server.py: /query opens with the step configuration and its cost event has
 the query's total time; /config returns the step configuration."""
+import contextlib
+import io
 import json
 import unittest
 from unittest import mock
@@ -16,6 +18,12 @@ class StubAgent:
     async def astream(self, state, stream_mode=None):
         yield {"type": "step_start", "name": "Embedder (hosted, Bedrock)", "note": "embedding query"}
         yield {"type": "step_done", "name": "Embedder (hosted, Bedrock)", "ms": 12, "detail": "x"}
+
+
+class RaisingAgent:
+    async def astream(self, state, stream_mode=None):
+        yield {"type": "step_start", "name": "Embedder (hosted, Bedrock)", "note": "embedding query"}
+        raise RuntimeError("boom")
 
 
 def data_events(body: str) -> list:
@@ -42,6 +50,14 @@ class ServerTest(unittest.TestCase):
         self.assertIsInstance(cost["total_ms"], int)
         (total,) = [e for e in parsed if e["type"] == "total"]
         self.assertEqual(total["ms"], cost["total_ms"])
+
+    def test_query_failure_is_logged(self):
+        out = io.StringIO()
+        with mock.patch.object(server, "agent", RaisingAgent()), contextlib.redirect_stdout(out):
+            r = self.client.post("/query", json={"text": "hi"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(data_events(r.text)[-1], "[DONE]")
+        self.assertIn("Query failed: RuntimeError: boom", out.getvalue())
 
     def test_config_has_steps(self):
         with mock.patch.object(server.toolclient, "apply_enabled", lambda: False):
