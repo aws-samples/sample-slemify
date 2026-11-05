@@ -11,6 +11,9 @@ indexes into OpenSearch k-NN. Two embedders, one index each, same corpus:
 The agent's EMBED step (agent/config.py) picks which index queries hit, so a
 vector dimension is never mixed. Build both to be able to swap the model.
 
+SUPERSEDED_SOURCES lists blog posts that newer Karpenter docs replace; they
+are skipped at index time, so both indexes and the S3 export leave them out.
+
 Usage:
   kubectl port-forward -n slemify svc/opensearch-cluster-master 9200:9200
   kubectl port-forward -n slemify svc/k8s-autoscaling-retriever-inference 8083:8080
@@ -115,6 +118,56 @@ BLOG_URLS = [
     "https://aws.amazon.com/blogs/containers/scalable-and-cost-effective-event-driven-workloads-with-keda-and-karpenter-on-amazon-eks/",
 ]
 
+# Sources that a newer authoritative doc replaces. fetch_blogs() skips each one
+# at index time, so neither index nor the S3 grounding export holds it.
+# BLOG_URLS stays unchanged, so it still records every post that was reviewed.
+#
+# Rule for adding an entry: the post's Karpenter configuration uses a flag,
+# field, value or API that the current Karpenter docs renamed or removed. Each
+# entry gives the exact BLOG_URLS string, the reason, and the current doc that
+# replaces it. Do not add an entry to steer one answer.
+SUPERSEDED_SOURCES = [
+    {
+        "source": "https://aws.amazon.com/blogs/containers/using-amazon-ec2-spot-instances-with-karpenter/",
+        "reason": "Configures the controller flag --interruption-queue-name and a Provisioner. "
+                  "Karpenter v1 names the flag --interruption-queue and has no Provisioner.",
+        "replacement": "karpenter docs concepts/disruption.md (Interruption) and reference/settings.md",
+    },
+    {
+        "source": "https://aws.amazon.com/blogs/compute/applying-spot-to-spot-consolidation-best-practices-with-karpenter/",
+        "reason": "Its NodePool is karpenter.sh/v1beta1 with consolidationPolicy: WhenUnderutilized. "
+                  "Karpenter v1 renamed it WhenEmptyOrUnderutilized.",
+        "replacement": "karpenter docs concepts/disruption.md (Consolidation, Spot consolidation) "
+                       "and concepts/nodepools.md",
+    },
+    {
+        "source": "https://aws.amazon.com/blogs/containers/how-to-upgrade-amazon-eks-worker-nodes-with-karpenter-drift/",
+        "reason": "Its NodePool is karpenter.sh/v1beta1 with consolidationPolicy: WhenUnderutilized.",
+        "replacement": "karpenter docs concepts/disruption.md (Drift)",
+    },
+    {
+        "source": "https://aws.amazon.com/blogs/containers/how-grover-saves-costs-with-80-spot-in-production-using-karpenter-with-amazon-eks/",
+        "reason": "Gives consolidationPolicy: WhenUnderutilized as the setting in use, with a v1beta1 example.",
+        "replacement": "karpenter docs concepts/disruption.md (Consolidation)",
+    },
+    {
+        "source": "https://aws.amazon.com/blogs/containers/optimizing-your-kubernetes-compute-costs-with-karpenter-consolidation/",
+        "reason": "Its examples are karpenter.sh/v1alpha5 Provisioners with consolidation.enabled "
+                  "and ttlSecondsAfterEmpty, all removed in v1.",
+        "replacement": "karpenter docs concepts/disruption.md (Consolidation) and concepts/nodepools.md",
+    },
+    {
+        "source": "https://aws.amazon.com/blogs/containers/manage-scale-to-zero-scenarios-with-karpenter-and-serverless/",
+        "reason": "Configures Karpenter through the Provisioner CRD, removed in v1.",
+        "replacement": "karpenter docs concepts/nodepools.md",
+    },
+]
+
+
+def stale_superseded() -> list[str]:
+    """SUPERSEDED_SOURCES entries whose source is no longer in BLOG_URLS."""
+    return [e["source"] for e in SUPERSEDED_SOURCES if e["source"] not in BLOG_URLS]
+
 # --- Shared clients ---
 
 
@@ -218,12 +271,26 @@ def clone_and_chunk(source: dict, tmpdir: str) -> list[dict]:
 
 
 def fetch_blogs() -> list[dict]:
-    """Fetch AWS blog posts and chunk them."""
+    """Fetch AWS blog posts and chunk them, skipping SUPERSEDED_SOURCES."""
     import requests
     from bs4 import BeautifulSoup
 
+    for stale in stale_superseded():
+        with _print_lock:
+            sys.stdout.write(f"    Warning: SUPERSEDED_SOURCES entry not in BLOG_URLS: {stale}\n")
+            sys.stdout.flush()
+    superseded = {e["source"]: e for e in SUPERSEDED_SOURCES}
+
     chunks = []
+    skipped = 0
     for url in BLOG_URLS:
+        if url in superseded:
+            slug = url.rstrip("/").split("/")[-1]
+            with _print_lock:
+                sys.stdout.write(f"    {slug}: skipped, superseded ({superseded[url]['replacement']})\n")
+                sys.stdout.flush()
+            skipped += 1
+            continue
         try:
             resp = requests.get(url, headers={"User-Agent": "slemify/1.0"}, timeout=15)
             resp.raise_for_status()
@@ -242,6 +309,7 @@ def fetch_blogs() -> list[dict]:
             print(f"    {slug}: {len(blog_chunks)} chunks")
         except Exception as e:
             print(f"    Failed: {url} ({e})")
+    print(f"  {skipped} superseded posts skipped (SUPERSEDED_SOURCES)")
     return chunks
 
 
