@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -53,6 +54,36 @@ func TestSubmitJobReplacesFinishedJob(t *testing.T) {
 	got, _ := cs.BatchV1().Jobs("slemify").Get(context.Background(), "p-training", metav1.GetOptions{})
 	if got.UID == "original" {
 		t.Fatal("finished job was not replaced")
+	}
+}
+
+// JobSucceeded is true only for a Job with JobComplete=True. The plain deploy
+// after a --no-wait training uses it to reuse a finished Job's output.
+func TestJobSucceeded(t *testing.T) {
+	complete := testJob("p-complete")
+	complete.Status.Succeeded = 1
+	complete.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	running := testJob("p-running")
+	running.Status.Active = 1
+	failed := testJob("p-failed")
+	failed.Status.Failed = 3
+	failed.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
+	cs := fake.NewSimpleClientset(complete, running, failed)
+	c := &Client{clientset: cs, namespace: "slemify"}
+
+	for name, want := range map[string]bool{
+		"p-complete": true,
+		"p-running":  false,
+		"p-failed":   false,
+		"p-missing":  false,
+	} {
+		got, err := c.JobSucceeded(context.Background(), name)
+		if err != nil {
+			t.Errorf("%s: unexpected error %v", name, err)
+		}
+		if got != want {
+			t.Errorf("%s: JobSucceeded = %v, want %v", name, got, want)
+		}
 	}
 }
 
