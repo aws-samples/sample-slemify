@@ -56,8 +56,21 @@ class ServerTest(unittest.TestCase):
         with mock.patch.object(server, "agent", RaisingAgent()), contextlib.redirect_stdout(out):
             r = self.client.post("/query", json={"text": "hi"})
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(data_events(r.text)[-1], "[DONE]")
+        events = data_events(r.text)
+        self.assertEqual(events[-1], "[DONE]")
         self.assertIn("Query failed: RuntimeError: boom", out.getvalue())
+        types = [json.loads(e)["type"] for e in events[:-1]]
+        # The error comes after the events the graph sent before it raised,
+        # and the stream still ends with cost and total.
+        self.assertEqual(types, ["steps", "step_start", "error", "cost", "total"])
+        (err,) = [json.loads(e) for e in events[:-1] if json.loads(e)["type"] == "error"]
+        self.assertEqual(err["message"], "RuntimeError: boom")
+
+    def test_query_stream_has_no_error_event(self):
+        with mock.patch.object(server, "agent", StubAgent()):
+            r = self.client.post("/query", json={"text": "hi"})
+        types = [json.loads(e)["type"] for e in data_events(r.text)[:-1]]
+        self.assertEqual(types, ["steps", "step_start", "step_done", "cost", "total"])
 
     def test_config_has_steps(self):
         with mock.patch.object(server.toolclient, "apply_enabled", lambda: False):
