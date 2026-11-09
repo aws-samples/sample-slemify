@@ -115,3 +115,7 @@ src/dist/
 # Local overrides (real model names, credentials, etc.)
 local/
 cpu-bench/
+
+# Local agent task notes and worktrees (never commit)
+.agents/
+.worktrees/
