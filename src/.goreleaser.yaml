@@ -85,6 +85,72 @@ release:
   # so a hard-wrapped block shows as a ragged column instead of flowing prose.
   # Keep one long line per paragraph, separated by a blank line.
   header: |
-    Slemify v0.3.1 is a patch release of the k8s-autoscaling demo that backs the workshop "Build an agentic AI system on Amazon EKS with CPU-only inference". It fixes how the faithfulness gate handles an escalation. In v0.3.0, the orchestrator streamed the frontier model's answer but then gated the analyst's rejected draft a second time, so nearly every escalated question ended in an abstention after 4 Bedrock calls. In v0.3.1, the gate checks the frontier model's answer. When the gate accepts it, that answer goes out after 3 calls, and `/stats` counts it as `llm_pass`. The demo answers with a calibrated abstention only when the frontier answer also fails the gate.
+    Slemify v0.3.0 backs the workshop "Build an agentic AI system on Amazon EKS with CPU-only inference" and its k8s-autoscaling demo. We re-cut the v0.3.0 tag many times as fixes landed, so the first v0.3.0 release (2026-10-08) does not describe what v0.3.0 contains today. These notes are the record of what changed since that first release, in PRs #64 to #75. The main fix in this re-cut is how the faithfulness gate handles an escalation (#75).
 
-    The Slemify CLI has no code changes since v0.3.0. The fix is in the demo orchestrator (`examples/k8s-autoscaling/demo/agent/graph.py`), with new tests in `demo/tests/test_escalation.py`. For the full set of workshop features (CPU-only serving on EKS Auto Mode, the classifier, reranker and analyst models, the faithfulness gate and the per-seat scoreboard), see the v0.3.0 release notes.
+    ## Highlights
+
+    - The gate now checks the frontier model's answer after an escalation (#75). Before #75, the orchestrator streamed the frontier answer and then gated the analyst's rejected draft a second time, so almost every escalated question ended in an abstention after 4 Bedrock calls. With #75, an escalation takes 3 calls. The gate rejects the analyst's draft, the frontier model answers, and the gate checks that answer. When the gate accepts it, the answer goes out and `/stats` counts it as `llm_pass`. The demo abstains only when the frontier answer also fails the gate. After 10 escalated runs on one test event, `/stats` showed `llm_pass 10` and no abstention.
+    - The triage classifier now matches the frontier model's accuracy on the 43 held-out real messages, within one message (#69, #71). The classifier labeled 41 of 43 correctly and the frontier model 42 of 43, measured on a test cluster and on a test event. A later test event had the frontier model at 43 of 43 and the classifier at 41 of 43. The classifier trains on a committed dataset of 785 labeled records (694 generated once, 91 real messages labeled once), so every account trains on the same data. None of the records is one of the 43 held-out messages. The frontier model's triage prompt and the dataset use the same labeling rules from `project.domain`. On a c9g.8xlarge node, the classifier answered at p50 20 ms, about $0.84 per million classifications (one test event).
+    - Port-forwards on the workshop IDE restart on their own (#70). A systemd service keeps one forward per port and binds each to 127.0.0.1. On a test event, a killed forward came back in 10.2 s and a killed supervisor in 5.1 s. A forward that hangs restarts within about 40 s (34.5 to 40.9 s over five trials on a test cluster). Run `make -C demo forward-check` to see the state of each forward.
+    - Demo and pipeline images come from ECR Public, not Docker Hub (#67, #70). This covers the `python:3.12-slim` base of the seven container builds, OpenSearch 3.8.0, busybox 1.37.0 and the aws-cli init container. On a 50-team event, Docker Hub rate limits (HTTP 429) caused 8 of the 10 failed team builds. An image sweep on a later test event found 0 Docker Hub images.
+    - The room scoreboard runs on the Workshop Studio central account. When a team's account is ready, the central stack gives that team a `ScoreboardURL` event output with its own write link. Attendees paste each command's output into the row card by hand, and the page shows where each value comes from. Attendees see their own rows and the room medians. The presenter opens `DashboardURL` and enters a presenter key, which is stored in Secrets Manager in the central account. Display names are optional and show only on the presenter screen. The facilitator guide in the workshop content has the presenter steps. This change is in the workshop content, not in this repository.
+
+    ## Workshop changes
+
+    Some of these changes are in the workshop content on Workshop Studio. The rest are in `examples/k8s-autoscaling` in this repository.
+
+    - Provisioning has more time before it fails. The cluster wait is now 7,800 s (was 4,500 s) and the IDE wait 3,600 s (was 2,400 s), to match the 120-minute provisioning build. On one test event (one team, no load) the stack finished in about 22 minutes.
+    - The IDE no longer installs Amazon Q or the AWS Toolkit, so there is no sign-in prompt. To open the assistant UI, forward port 8000 once in the PORTS view, then use the `AssistantUIURL` output.
+    - The UI map shows only the steps the active configuration runs (#71). It colors Bedrock steps and names the analyst as the CPU model or the frontier model.
+    - `make triage-acc` counts a Bedrock error as an error, not a miss (#71). It tries a throttled or dropped call up to 4 times. A message that still fails prints `[ERR ]` and is left out of the score.
+    - When the re-ranker fails or times out, retrieval keeps the lexical hits (#72). The fallback fuses the vector and keyword lists instead of keeping vector order only. The re-rank timeout defaults to 30 s (was a fixed 10 s) and can be set with `RERANK_TIMEOUT_S`. The re-ranker handles one request at a time. Before, 3 concurrent requests made the pod run out of memory at its 2 GiB limit on a test cluster. With the change, 2 concurrent requests caused no restart on that cluster (the case with 3 was not retested). Before the fix, row 3 failed `consolidation-policy-values` in 1 of 20 runs. After it, row 3 passed that case in 50 of 50 runs (test cluster, over two batches).
+    - Six AWS blog posts are left out of the knowledge index, because their Karpenter settings use an API that Karpenter v1 renamed or removed (#73). The list is `SUPERSEDED_SOURCES` in [`index-knowledge.py`](https://github.com/aws-samples/sample-slemify/blob/v0.3.0/examples/k8s-autoscaling/demo/scripts/index-knowledge.py). The posts are "Using Amazon EC2 Spot Instances with Karpenter", "Applying Spot-to-Spot consolidation best practices with Karpenter", "How to upgrade Amazon EKS worker nodes with Karpenter Drift", "How Grover saves costs with 80% Spot in production using Karpenter with Amazon EKS", "Optimizing your Kubernetes compute costs with Karpenter consolidation" and "Manage scale-to-zero scenarios with Karpenter and Serverless". The index drops from 4,559 to 4,510 chunks. Before, the CPU analyst used the old flag `--interruption-queue-name` in 25 of 25 answers to the Spot interruption question. After, it used it in 0 of 20 on a test cluster and 0 of 12 on a test event. The curated fact on `WhenUnderutilized` now says Karpenter v1 renamed it.
+    - `slemify data` shows one sample per label (#72).
+    - Serving restarts after a re-train, so the retriever loads the new encoder before `make index-tuned` runs (#72).
+    - A plain deploy reuses a finished `--no-wait` training job instead of training again (#74). On a test event the deploy took 28 s instead of about 3 more minutes of training.
+    - The analyst's llama.cpp image is pinned by digest to build b12063, the build behind the workshop's measurements (#74).
+    - Smaller fixes: the tuned index embeds batches in parallel, about 5 minutes instead of about 20 on one event (#65); `make index-tuned` retries a dropped forward (#72); a destroy build cleans up a workshop run in your own account (#71); and the eval no longer joins two messages into one sentence (#64).
+
+    ## CLI changes
+
+    - `slemify deploy` fails when it cannot reach a Kubernetes cluster, unless you pass `--dry-run` (#66). Before, it fell back to a dry run, printed a success message and saved the fake stages as completed in the pipeline state.
+    - `slemify data` shows one sample per label, prints `Instruction:` only when the record has one, shows each record's origin, and counts train records apart from eval records (#72).
+    - Once a stage runs and produces new output, the later stages in that deploy run too (#72). A stage that produces nothing does not force them, so an analyst re-deploy still skips training and serving.
+    - A deploy after a finished `--no-wait` training job reuses that job's output and prints `Job <name> already finished; using its output` (#74). As before, a deploy attaches to a job that is still running.
+    - Configs can list committed labeled JSONL files under `data.synthetic.labeled` (#69). This works only when `task` is `classification` or `scoring`. Each record has `input` and `output`, and the records join the training set as they are. When `labeled` is set, `pairs` can be left out, and the training set is then exactly the committed records. A CLI built before #69 rejects such a config with `unknown field "labeled"`, so the workshop's `expert.yaml` needs a CLI that includes #69.
+    - The model-loader init container pulls `public.ecr.aws/aws-cli/aws-cli:2.22.35` (#70), and the analyst runs `ghcr.io/ggml-org/llama.cpp:server-b12063@sha256:10a38e6cc91760ab157f0a0a8546218d35f4a314432a70298abfa3d096829ad7` with `IfNotPresent` (#74).
+
+    ## Upgrading
+
+    The workshop content uses RepoRef `v0.3.0` and SlemifyVersion `0.3.0`. The v0.3.0 tag moves when fixes land, and each re-cut rebuilds the release binaries. Every re-cut binary reports version 0.3.0, so the version number does not show which build you have. A 0.3.0 binary or a v0.3.0 clone from an earlier re-cut may lack changes listed here. To pick up the current build, download the binary again, or run `git fetch --tags --force` and check out `v0.3.0` again.
+
+    To get a fixed build that does not move, pin a commit SHA. On `main`, 1641ac0 is the first commit with every change in these notes. Check out the SHA and build the CLI from `src` with `go build -o slemify .`. The workshop stack passes RepoRef to `git clone --branch`, which takes a tag or a branch, not a SHA, so pin a SHA in your own clone, not in RepoRef.
+
+    Release tags v0.3.1 to v0.3.5 from September 2026 were deleted; they are older than this build.
+
+    ## Known limitations
+
+    - The escalation example on the gate page does not escalate every time. With the full row 4 setup (`TRIAGE=classifier EMBED=slemify RERANK=on ANALYST=slm GATE=llm`), the question escalated in 29 of 39 runs (74%). On a test cluster it escalated in 18 of 28 runs: 17 of 25 in repeated runs and 1 of 3 with the page's own `curl` command. On one team of a test event it escalated in 11 of 11. The page tells attendees to try up to three times. Without the Module 2 embedder and re-ranker, it escalated in 0 of 5 runs on a test event.
+    - The 41 of 43 triage result is optimistic. The labeling rules were written after reading the classifier's misses on the 43 held-out messages, and the dataset variant was chosen by its score on them, so those 43 messages acted as a development set (#69). A fresh, independently labeled set of real messages is still needed to confirm the gain.
+    - The CPU analyst without the gate (row 3) passed 79 of 80 eval runs (10 per case). The frontier monolith (row 0) passed 39 of 40 (5 per case). Each row missed one case. These sample sizes cannot rule out a gap of a few percent between them.
+    - The hands-on path takes about 99 minutes against the 90-minute slot. That figure comes from one timed run on a one-team test event, with reading modelled at 200 words per minute. At 150 words per minute it rises by about 20 minutes. Module 3 takes about 21 minutes against its 14-minute budget. The writing changes made after that run were not timed.
+
+    ## Thanks
+
+    Oussama Kandakji ([@kandakji](https://github.com/kandakji)) built the committed triage dataset (#69) and the original room scoreboard.
+
+    ## Pull requests
+
+    - [#64](https://github.com/aws-samples/sample-slemify/pull/64) fix(eval): add separator before standalone response text
+    - [#65](https://github.com/aws-samples/sample-slemify/pull/65) fix(index): embed batches concurrently for the slemify (TEI) path
+    - [#66](https://github.com/aws-samples/sample-slemify/pull/66) fix(deploy): treat a k8s connectivity failure as an error, not dry-run
+    - [#67](https://github.com/aws-samples/sample-slemify/pull/67) fix: Pull python:3.12-slim from ECR Public, not Docker Hub
+    - [#69](https://github.com/aws-samples/sample-slemify/pull/69) feat(triage): train the classifier on a committed labeled dataset
+    - [#70](https://github.com/aws-samples/sample-slemify/pull/70) Keep IDE forwards alive and pull demo images from ECR Public
+    - [#71](https://github.com/aws-samples/sample-slemify/pull/71) Batch 2 workshop correctness fixes
+    - [#72](https://github.com/aws-samples/sample-slemify/pull/72) Batch 4: re-rank fallback, data samples, re-serve after re-train
+    - [#73](https://github.com/aws-samples/sample-slemify/pull/73) Batch 5: leave superseded blog posts out of the knowledge index
+    - [#74](https://github.com/aws-samples/sample-slemify/pull/74) Batch 3: reuse a finished training job, pin llama.cpp
+    - [#75](https://github.com/aws-samples/sample-slemify/pull/75) Batch 6: gate the escalated answer, v0.3.1 release notes
+
+    #68 did not merge. #62 and #63 (an int8 classifier encoder, and `GATE=decision`) merged on 2026-10-16 and 2026-10-17, after the first v0.3.0. These notes do not describe them.
