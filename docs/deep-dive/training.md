@@ -171,7 +171,7 @@ Upload model-<quant>.gguf to S3
 
 1. **Download.** The job pulls the base model's weights from HuggingFace to a CPU node.
 2. **Convert.** llama.cpp's converter writes an f16 GGUF.
-3. **Quantize.** `llama-quantize` produces the configured level (default `q4_k_m`; the k8s analyst uses `q8_0`, see below).
+3. **Quantize.** `llama-quantize` produces the configured level (default `q4_k_m`, which the current k8s analyst uses; its original dense 8B needed `q8_0`, see below).
 4. **Upload.** The quantized `model-<quant>.gguf` and conversion logs are uploaded to S3 for the serving stage.
 
 There is no GPU, no adapter, and no checkpoint in this path. The job is a
