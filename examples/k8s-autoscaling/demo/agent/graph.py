@@ -316,8 +316,10 @@ async def n_escalate(state: AgentState) -> dict:
     writer({"type": "answer_reset", "reason": "escalating"})
     writer({"type": "model", "name": "LLM (Bedrock)"})
     writer({"type": "step_start", "name": "LLM API (Bedrock escalation)", "note": "CPU answer not supported \u2014 escalating"})
-    await _stream_answer(writer, "LLM API (Bedrock escalation)", generation.stream_llm(state["query"], context))
-    return {"used_llm": True}
+    # The escalated answer becomes the draft, so the gate's second check reads
+    # the frontier model's answer and not the analyst's rejected draft again.
+    draft = await _stream_answer(writer, "LLM API (Bedrock escalation)", generation.stream_llm(state["query"], context))
+    return {"draft": draft, "used_llm": True}
 
 
 async def n_abstain(state: AgentState) -> dict:
