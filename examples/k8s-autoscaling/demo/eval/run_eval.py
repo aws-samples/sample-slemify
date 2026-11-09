@@ -136,6 +136,10 @@ def fetch_reference(query: str, answer: str) -> str:
 
 # --- Orchestrator I/O ---
 
+class AgentError(Exception):
+    """The orchestrator sent an `error` event: the agent graph raised."""
+
+
 def query_agent(text: str, attempts: int = 3) -> dict:
     """Query the orchestrator, retrying transient transport errors (e.g. a
     dropped port-forward) so infra blips are not scored as model failures."""
@@ -194,6 +198,10 @@ def _query_once(text: str) -> dict:
                     cost = ev
                 elif t == "total":
                     total_ms = ev.get("ms")
+                elif t == "error":
+                    # The agent graph raised. This is not a model answer, so
+                    # run_case scores it as ERR instead of judging it.
+                    raise AgentError(ev.get("message", "agent error"))
     return {"triage": triage, "model": model, "answer": "".join(buf).strip(),
             "usd": cost.get("usd"), "steps": cost.get("steps"), "total_ms": total_ms}
 

@@ -133,6 +133,9 @@ async def query_endpoint(q: Query):
                 # Without this the stream ends with no answer and nothing in the
                 # log. Log the type and message only, never the query text.
                 print(f"  Query failed: {type(e).__name__}: {e}", flush=True)
+                # Tell the client too, so the UI shows an error and the eval
+                # scores the run as ERR, not as an empty answer that FAILs.
+                await queue.put({"type": "error", "message": f"{type(e).__name__}: {e}"})
             finally:
                 await queue.put(_DONE)
 

@@ -27,6 +27,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .msg.user{align-self:flex-end;background:var(--user-bg);color:#fff;white-space:pre-wrap;border-bottom-right-radius:4px}
 .msg.system{align-self:flex-start;background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:4px}
 .msg.status{align-self:center;color:var(--muted);font-size:12px;font-style:italic;padding:2px}
+.msg.error{align-self:flex-start;color:var(--fg);background:rgba(248,81,73,0.12);border:1px solid #f85149;border-bottom-left-radius:4px}
 .badge{align-self:flex-start;font-size:11px;padding:4px 11px;border-radius:20px;font-weight:600;border:1px solid;display:inline-flex;gap:6px;align-items:center}
 .badge.cpu{color:var(--cpu);border-color:var(--cpu);background:var(--cpu-bg)}
 .badge.llm{color:var(--llm);border-color:var(--llm);background:var(--llm-bg)}
@@ -311,7 +312,7 @@ async function send(){
   trace.innerHTML=''; traceTotal.textContent=''; gReset();
   addMsg(esc(text).replace(/\n/g,'<br>'),'user');
 
-  let usedLLM=false;
+  let usedLLM=false, failed=false;
   const auto = document.getElementById('autopilot');
   const resp=await fetch('query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text, autopilot: !!(auto && auto.checked)})});
   const reader=resp.body.getReader(); const dec=new TextDecoder();
@@ -326,7 +327,8 @@ async function send(){
       const data=line.slice(6);
       if(data==='[DONE]'){
         if(responseDiv&&rawText) responseDiv.innerHTML=renderMd(rawText);
-        totalRuns++; if(!usedLLM) cpuRuns++; updateTally();
+        // A failed query is not a run the CPU handled; leave the tally alone.
+        if(!failed){ totalRuns++; if(!usedLLM) cpuRuns++; updateTally(); }
         break;
       }
       try{
@@ -341,6 +343,12 @@ async function send(){
         }
         else if(msg.type==='response'){ addMsg(renderMd(msg.text),'system'); }
         else if(msg.type==='proposal'){ addProposal(msg); }
+        else if(msg.type==='error'){
+          failed=true;
+          const d=addMsg('<strong>The query failed.</strong> '+esc(msg.message||'Unknown error')+'<br>Check the orchestrator log and try again.','error');
+          d.setAttribute('role','alert');
+          traceNote('query failed');
+        }
         else if(msg.type==='answer_reset'){
           if(responseDiv&&rawText) responseDiv.innerHTML=renderMd(rawText);
           responseDiv=null; rawText='';

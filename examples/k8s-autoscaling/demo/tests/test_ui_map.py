@@ -80,9 +80,18 @@ def sse_body(steps, names):
     return ("".join(f"data: {json.dumps(e)}\n\n" for e in ev) + "data: [DONE]\n\n").encode()
 
 
+def error_body(steps):
+    """What server.py sends when the agent graph raises after one step."""
+    ev = [{"type": "steps", "steps": steps},
+          {"type": "step_start", "name": "Analyst SLM (CPU)", "note": ""},
+          {"type": "error", "message": "RuntimeError: boom"},
+          {"type": "cost", "usd": 0.0, "bedrock_calls": 0, "steps": steps, "total_ms": 5},
+          {"type": "total", "ms": 5}]
+    return ("".join(f"data: {json.dumps(e)}\n\n" for e in ev) + "data: [DONE]\n\n").encode()
 class Stub:
     steps = None
     names = None
+    body = None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -104,7 +113,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        self.send(sse_body(Stub.steps, Stub.names), "text/event-stream")
+        self.send(Stub.body or sse_body(Stub.steps, Stub.names), "text/event-stream")
 
 
 @unittest.skipIf(sync_playwright is None, "playwright is not installed")
@@ -183,6 +192,28 @@ class UiMapTest(unittest.TestCase):
 
     def test_gate_decision(self):
         self.check("decision")
+    def test_error_event_shows_message(self):
+        Stub.steps, Stub.names = CONFIGS["row4"][0], []
+        Stub.body = error_body(Stub.steps)
+        page = self.browser.new_page()
+        try:
+            page.route("https://cdn.jsdelivr.net/**",
+                       lambda r: r.fulfill(body="", content_type="application/javascript"))
+            page.goto(self.url)
+            page.fill("#input", QUESTION)
+            page.click("#send")
+            page.wait_for_function("!document.getElementById('send').disabled")
+            alert = page.locator(".msg.error[role=alert]")
+            self.assertEqual(alert.count(), 1)
+            text = alert.inner_text()
+            tally = page.locator("#tallyText").inner_text()
+        finally:
+            page.close()
+            Stub.body = None
+        self.assertIn("The query failed.", text)
+        self.assertIn("RuntimeError: boom", text)
+        # A failed query does not count as a run handled on CPU.
+        self.assertNotIn("/ 1", tally)
 
 
 if __name__ == "__main__":
