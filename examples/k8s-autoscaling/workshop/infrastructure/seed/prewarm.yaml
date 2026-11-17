@@ -60,7 +60,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: pause
-          image: registry.k8s.io/pause:3.10
+          image: public.ecr.aws/eks-distro/kubernetes/pause:3.10@sha256:a6165ebcb21ba53745c5423d93e54d0513a37d275280cd61fc31f54bb6345e8c
           resources:
             requests:
               cpu: "30"
