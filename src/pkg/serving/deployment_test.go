@@ -108,6 +108,7 @@ func TestDeploymentInitContainer(t *testing.T) {
 // The llama.cpp image is pinned by digest, so upstream changes to the
 // floating :server tag cannot change what the analyst runs.
 func TestDeploymentLlamaCppImagePinned(t *testing.T) {
+	t.Setenv("SLEMIFY_MIRROR_REGISTRY", "")
 	cfg := karpenterConfig()
 	sized := sized7B()
 	m := GenerateInferenceManifests(cfg, sized, "slemify", pc)
@@ -116,11 +117,29 @@ func TestDeploymentLlamaCppImagePinned(t *testing.T) {
 	if c.Name != "llama-cpp" {
 		t.Fatalf("container name = %q, want llama-cpp", c.Name)
 	}
-	if c.Image != LlamaCppImage {
-		t.Errorf("llama-cpp image = %q, want %q", c.Image, LlamaCppImage)
+	if c.Image != llamaCppUpstream {
+		t.Errorf("llama-cpp image = %q, want %q", c.Image, llamaCppUpstream)
+	}
+	if !strings.HasPrefix(c.Image, "ghcr.io/ggml-org/llama.cpp:") {
+		t.Errorf("llama-cpp image %q should be the ghcr upstream when no mirror is set", c.Image)
 	}
 	if !strings.Contains(c.Image, "@sha256:") {
 		t.Errorf("llama-cpp image %q is not pinned by digest", c.Image)
+	}
+	if c.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Errorf("llama-cpp pull policy = %q, want IfNotPresent", c.ImagePullPolicy)
+	}
+}
+
+// With a mirror registry set, llama.cpp is pulled from it by the same digest.
+func TestDeploymentLlamaCppImageMirror(t *testing.T) {
+	t.Setenv("SLEMIFY_MIRROR_REGISTRY", "123456789012.dkr.ecr.us-west-2.amazonaws.com/slemify/")
+	m := GenerateInferenceManifests(karpenterConfig(), sized7B(), "slemify", pc)
+
+	c := m.Deployment.Spec.Template.Spec.Containers[0]
+	want := "123456789012.dkr.ecr.us-west-2.amazonaws.com/slemify/llama-cpp@sha256:10a38e6cc91760ab157f0a0a8546218d35f4a314432a70298abfa3d096829ad7"
+	if c.Image != want {
+		t.Errorf("llama-cpp image = %q, want %q", c.Image, want)
 	}
 	if c.ImagePullPolicy != corev1.PullIfNotPresent {
 		t.Errorf("llama-cpp pull policy = %q, want IfNotPresent", c.ImagePullPolicy)

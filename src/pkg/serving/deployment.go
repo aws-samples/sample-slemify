@@ -7,6 +7,7 @@ package serving
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -50,10 +51,26 @@ func GenerateInferenceManifests(cfg *config.ExpertConfig, sized config.SizedConf
 // Pinned, multi-arch, and pulled from ECR Public to avoid Docker Hub rate limits.
 const ModelLoaderImage = "public.ecr.aws/aws-cli/aws-cli:2.22.35"
 
-// LlamaCppImage serves the GGUF model. It is llama.cpp release b12063, the
-// build the workshop measured. The digest pins the multi-arch index, which
-// has linux/amd64 and linux/arm64 images, so every node pulls the same build.
-const LlamaCppImage = "ghcr.io/ggml-org/llama.cpp:server-b12063@sha256:10a38e6cc91760ab157f0a0a8546218d35f4a314432a70298abfa3d096829ad7"
+// llamaCppDigest pins llama.cpp release b12063, the build the workshop
+// measured. The digest is the multi-arch index, which has linux/amd64 and
+// linux/arm64 images, so every node pulls the same build.
+const llamaCppDigest = "sha256:10a38e6cc91760ab157f0a0a8546218d35f4a314432a70298abfa3d096829ad7"
+
+// llamaCppUpstream is the upstream reference for the pinned build.
+const llamaCppUpstream = "ghcr.io/ggml-org/llama.cpp:server-b12063@" + llamaCppDigest
+
+// LlamaCppImage returns the image that serves the GGUF model. When
+// SLEMIFY_MIRROR_REGISTRY is set, the image is pulled from that registry as
+// <registry>/llama-cpp@<digest>. The workshop provisioning copies the image
+// into the account's ECR and the IDE sets the variable. Otherwise it is the
+// upstream reference. Both forms use the same digest.
+func LlamaCppImage() string {
+	mirror := strings.TrimRight(strings.TrimSpace(os.Getenv("SLEMIFY_MIRROR_REGISTRY")), "/")
+	if mirror != "" {
+		return mirror + "/llama-cpp@" + llamaCppDigest
+	}
+	return llamaCppUpstream
+}
 
 func inferenceDeployment(cfg *config.ExpertConfig, sized config.SizedConfig, ns string, labels, selectorLabels map[string]string, pc *pipeline.PipelineContext) *appsv1.Deployment {
 	replicas := int32(1)
@@ -150,7 +167,7 @@ func inferenceDeployment(cfg *config.ExpertConfig, sized config.SizedConfig, ns 
 					Containers: []corev1.Container{
 						{
 							Name:  "llama-cpp",
-							Image: LlamaCppImage,
+							Image: LlamaCppImage(),
 							// A digest pin cannot drift, so a node's cached image is
 							// always the same build and need not be pulled again.
 							ImagePullPolicy: corev1.PullIfNotPresent,
