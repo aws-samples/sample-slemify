@@ -120,8 +120,6 @@ BLOG_URLS = [
     # Cost optimization
     "https://aws.amazon.com/blogs/containers/cost-optimization-for-kubernetes-on-aws/",
     # KEDA
-    "https://aws.amazon.com/blogs/containers/using-keda-with-karpenter-to-scale-from-zero-on-amazon-eks/",
-    "https://aws.amazon.com/blogs/containers/autoscaling-kubernetes-workloads-with-keda-using-amazon-managed-service-for-prometheus-metrics/",
     "https://aws.amazon.com/blogs/mt/autoscaling-kubernetes-workloads-with-keda-using-amazon-managed-service-for-prometheus-metrics/",
     "https://aws.amazon.com/blogs/mt/proactive-autoscaling-of-kubernetes-workloads-with-keda-using-metrics-ingested-into-amazon-cloudwatch/",
     "https://aws.amazon.com/blogs/containers/scalable-and-cost-effective-event-driven-workloads-with-keda-and-karpenter-on-amazon-eks/",

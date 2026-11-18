@@ -22,6 +22,12 @@ jobs:
         with:
           go-version-file: src/go.mod
 
+      # The central prep build exports the knowledge corpus with --strict, so
+      # a dead blog URL fails the prep and every team then waits 90 minutes
+      # for markers that never come. Check the URLs before touching assets.
+      - name: Check the knowledge corpus blog URLs
+        run: python3 examples/k8s-autoscaling/demo/scripts/check-blog-urls.py
+
       # The workshop ships a single moving v0.3.0 tag, so each tag move
       # re-releases onto the same GitHub release. GitHub ties a release to the
       # tag *name*, not the commit, so the release object survives a tag move
