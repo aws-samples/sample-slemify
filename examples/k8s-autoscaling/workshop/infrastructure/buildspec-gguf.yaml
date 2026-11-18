@@ -19,12 +19,17 @@
 #   QUANTIZE         quantization (default q4_k_m)
 #   PROJECT          Slemify project name (default k8s-autoscaling-analyst)
 #   HF_TOKEN         optional, for Hugging Face rate limits
+#   KEY_PREFIX       optional prefix for the upload key, ending in "/"
+#                    (empty writes models/<project>/<gguf> as before)
+#   GGUF_IMAGE_TAG   optional gguf-convert image tag (default latest-amd64)
 
 version: 0.2
 
 env:
   variables:
     BASE_MODEL: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    # Hugging Face commit of BASE_MODEL, so every account converts the same weights.
+    BASE_MODEL_REVISION: "0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe"
     QUANTIZE: "q4_k_m"
     PROJECT: "k8s-autoscaling-analyst"
 
@@ -34,9 +39,10 @@ phases:
       - ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
       - REGISTRY="${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
       - GGUF_FILENAME="model-${QUANTIZE}.gguf"
+      - S3_KEY="${KEY_PREFIX:-}models/${PROJECT}/${GGUF_FILENAME}"
       - |
-        if aws s3api head-object --bucket "${MODEL_BUCKET}" --key "models/${PROJECT}/${GGUF_FILENAME}" >/dev/null 2>&1; then
-          echo "models/${PROJECT}/${GGUF_FILENAME} already in ${MODEL_BUCKET}; nothing to do"
+        if aws s3api head-object --bucket "${MODEL_BUCKET}" --key "${S3_KEY}" >/dev/null 2>&1; then
+          echo "${S3_KEY} already in ${MODEL_BUCKET}; nothing to do"
           echo "SKIP=1" > /tmp/skip.env
         fi
       - aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY}"
@@ -58,6 +64,7 @@ phases:
           docker run --rm \
             -e BASE_MODEL="${BASE_MODEL}" -e QUANTIZE="${QUANTIZE}" \
             -e S3_BUCKET="${MODEL_BUCKET}" -e PROJECT="${PROJECT}" -e GGUF_FILENAME="${GGUF_FILENAME}" \
+            -e S3_KEY="${S3_KEY}" -e BASE_MODEL_REVISION="${BASE_MODEL_REVISION}" \
             -e HF_TOKEN="${HF_TOKEN:-}" \
             -e AWS_REGION="${AWS_REGION}" -e AWS_DEFAULT_REGION="${AWS_REGION}" \
             -e AWS_CONTAINER_CREDENTIALS_RELATIVE_URI="${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}" \
@@ -66,4 +73,4 @@ phases:
         fi
   post_build:
     commands:
-      - aws s3 ls "s3://${MODEL_BUCKET}/models/${PROJECT}/" --human-readable || true
+      - aws s3 ls "s3://${MODEL_BUCKET}/${KEY_PREFIX:-}models/${PROJECT}/" --human-readable || true
