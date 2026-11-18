@@ -5,7 +5,7 @@ import json
 import os
 import unittest
 
-from tests._stubs import INFRA, StubEnv, find_command, load_buildspec
+from tests._stubs import INFRA, StubEnv, find_command, load_buildspec, phase_commands
 
 # docker stub: "docker build" fails for images that contain $FAIL_IMAGE, up to
 # $FAIL_TIMES times (a counter file per run); "docker push" fails when
@@ -124,6 +124,42 @@ class ModeGuardTest(unittest.TestCase):
 
     def test_today_starts_both(self):
         self.assertEqual(len(self.start("today")), 2)
+
+
+class ModeFailureTest(unittest.TestCase):
+    """A bad /slemify/central must fail in the build phase, where post_build
+    still runs and sends FAILURE to the stack, not in install."""
+
+    def setUp(self):
+        from tests._stubs import AWS_FAKE
+        self.s = StubEnv()
+        self.addCleanup(self.s.cleanup)
+        self.s.stub_py("aws", AWS_FAKE)
+        spec = load_buildspec("buildspec.yaml")
+        self.decide = find_command(spec, "install", "decide_mode")
+        self.check = phase_commands(spec, "build")[0]
+        self.env = dict(spec["env"]["variables"])
+        self.env.update(CODEBUILD_SRC_DIR=os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(INFRA)))),
+                        CENTRAL_PARAM="/slemify/central")
+
+    def mode(self):
+        with open(os.path.join(self.s.tmp, "central-mode")) as f:
+            return f.read().strip()
+
+    def test_invalid_parameter_fails_in_build(self):
+        self.s.state("param", json.dumps({"version": 0}))
+        r = self.s.run(self.decide, **self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.mode(), "failed")
+        r = self.s.run(self.check, **self.env)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("/slemify/central", r.stdout)
+
+    def test_today_passes_the_build_check(self):
+        r = self.s.run(self.decide, **self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.mode(), "today")
+        self.assertEqual(self.s.run(self.check, **self.env).returncode, 0)
 
 
 class PrepFailedMarkerTest(unittest.TestCase):

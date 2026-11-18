@@ -76,8 +76,10 @@ phases:
           echo "SLEMIFY_SHA256 is empty: this template predates the pinned slemify download"
           exit 1
         fi
-      # Central mode or today's path; written to /tmp/central-mode.
-      - . "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/central.sh" && decide_mode
+      # Central mode or today's path; written to /tmp/central-mode. A failure
+      # writes "failed" and stops the build at the start of the build phase.
+      # post_build sends FAILURE to the stack only when the build phase ran.
+      - . "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/central.sh" && decide_mode || echo failed > /tmp/central-mode
       # Every download is retried and checked against its pinned sha256.
       - echo "Installing terraform ${TERRAFORM_VERSION}"
       - curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
@@ -141,6 +143,12 @@ phases:
       - terraform init -input=false
   build:
     commands:
+      # The mode decision failed in install (its reason is in the install log).
+      - |
+        if [ "$(cat /tmp/central-mode)" = failed ]; then
+          echo "${CENTRAL_PARAM:-the central parameter} exists but cannot be used; see the install phase log"
+          exit 1
+        fi
       - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/terraform"
       - echo "Applying VPC, then cluster, then the rest"
       - terraform apply -input=false -auto-approve -target=module.vpc
