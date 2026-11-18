@@ -27,7 +27,20 @@ from sklearn.metrics import (accuracy_score, mean_absolute_error,
 
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 PROJECT = os.environ.get("PROJECT", "")
-MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "BAAI/bge-base-en-v1.5")
+# Encoders baked into the image (see the Dockerfile). A name listed here
+# resolves to its local directory when that directory exists.
+BAKED_ENCODERS = {"BAAI/bge-base-en-v1.5": "/opt/encoder/bge-base-en-v1.5"}
+
+
+def resolve_model(name):
+    """Return the baked directory for name when present, else name."""
+    path = BAKED_ENCODERS.get(name)
+    if path and os.path.isdir(path):
+        return path
+    return name
+
+
+MODEL_NAME = resolve_model(os.environ.get("EMBEDDING_MODEL_NAME", "BAAI/bge-base-en-v1.5"))
 HEAD = os.environ.get("HEAD", "logistic")
 # TASK selects classification (label head), scoring (regression head), or
 # embedding (contrastive fine-tune of the encoder).

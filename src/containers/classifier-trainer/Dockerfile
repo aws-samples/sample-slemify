@@ -11,6 +11,15 @@ RUN TORCH_VERSION="$(sed -n 's/^torch==//p' requirements.txt)" \
     && pip install --no-cache-dir "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cpu \
     && pip install --no-cache-dir -r requirements.txt
 
+# Bake the default encoder into the image at a pinned revision, so a training
+# Job needs no Hugging Face access at run time. train.py uses this directory
+# when EMBEDDING_MODEL_NAME is the default.
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('BAAI/bge-base-en-v1.5', revision='a5beb1e3e68b9ab74eb54cfd186867f64f240e1a', local_dir='/opt/encoder/bge-base-en-v1.5')"
+
+# Run offline: the encoder is already present.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+
 COPY extract_common.py .
 COPY train.py .
 
