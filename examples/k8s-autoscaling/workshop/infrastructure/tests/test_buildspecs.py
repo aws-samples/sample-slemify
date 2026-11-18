@@ -4,7 +4,7 @@
 import os
 import unittest
 
-from tests._stubs import StubEnv, find_command, load_buildspec
+from tests._stubs import INFRA, StubEnv, find_command, load_buildspec
 
 # docker stub: "docker build" fails for images that contain $FAIL_IMAGE, up to
 # $FAIL_TIMES times (a counter file per run); "docker push" fails when
@@ -102,6 +102,51 @@ esac
         r = self.s.run(self.cmd, **self.env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(len(self.s.calls("crane index append")), 7)
+
+
+class PinTest(unittest.TestCase):
+    PINNED = ("buildspec.yaml", "buildspec-prep.yaml")
+
+    def specs(self):
+        for name in self.PINNED:
+            if os.path.exists(os.path.join(INFRA, name)):
+                yield name, load_buildspec(name)
+
+    def test_sha256_values(self):
+        seen = 0
+        for name, spec in self.specs():
+            for key, value in spec["env"]["variables"].items():
+                if key.endswith("_SHA256"):
+                    seen += 1
+                    self.assertRegex(value, r"^[0-9a-f]{64}$", "%s %s" % (name, key))
+        self.assertGreaterEqual(seen, 4)
+
+    def test_downloads_retry_and_no_install_script(self):
+        for name, _ in self.specs():
+            with open(os.path.join(INFRA, name)) as f:
+                text = f.read()
+            self.assertNotIn("get-helm-3", text, name)
+            for line in text.splitlines():
+                if "curl " in line and not line.lstrip().startswith("#"):
+                    self.assertIn("--retry", line, "%s: %s" % (name, line.strip()))
+
+
+class ChecksumGateTest(unittest.TestCase):
+    def setUp(self):
+        self.s = StubEnv()
+        self.addCleanup(self.s.cleanup)
+        self.gate = load_buildspec("buildspec.yaml")["phases"]["install"]["commands"][0]
+
+    def test_gate_is_first_and_fails_without_sha(self):
+        self.assertIn("SLEMIFY_SHA256", self.gate)
+        r = self.s.run(self.gate, SLEMIFY_VERSION="0.3.0", SLEMIFY_SHA256="")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("SLEMIFY_SHA256", r.stdout)
+
+    def test_gate_passes(self):
+        self.assertEqual(self.s.run(self.gate, SLEMIFY_VERSION="").returncode, 0)
+        self.assertEqual(self.s.run(self.gate, SLEMIFY_VERSION="0.3.0",
+                                    SLEMIFY_SHA256="a" * 64).returncode, 0)
 
 
 if __name__ == "__main__":

@@ -43,6 +43,7 @@ coverage.xml
 *.tfstate.*
 .terraform/
 .terraform.lock.hcl
+!examples/k8s-autoscaling/workshop/infrastructure/terraform/.terraform.lock.hcl
 *.tfvars
 !terraform.tfvars.example
 crash.log

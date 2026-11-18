@@ -29,8 +29,17 @@ version: 0.2
 env:
   variables:
     TERRAFORM_VERSION: "1.16.3"
+    # From https://releases.hashicorp.com/terraform/1.16.3/terraform_1.16.3_SHA256SUMS (linux_amd64)
+    TERRAFORM_SHA256: "093b6ae9a2228af5029c41606bc96eb583553528aad1bfe7e0b4d62fc91e25d8"
     KUBECTL_VERSION: "v1.36.4"
+    # From https://dl.k8s.io/release/v1.36.4/bin/linux/amd64/kubectl.sha256
+    KUBECTL_SHA256: "8b8f088da2dab964f853b38464033b1be15ede2839eca751482357c45abdd05a"
+    HELM_VERSION: "v3.22.1"
+    # From https://get.helm.sh/helm-v3.22.1-linux-amd64.tar.gz.sha256sum
+    HELM_SHA256: "896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea"
     CRANE_VERSION: "v0.22.1"
+    # From https://github.com/google/go-containerregistry/releases/download/v0.22.1/checksums.txt (Linux_x86_64)
+    CRANE_SHA256: "0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0"
     INFRA_DIR: "examples/k8s-autoscaling/workshop/infrastructure"
     ORCH_REPO: "slemify/k8s-autoscaling-orchestrator"
     RERANK_REPO: "slemify/k8s-autoscaling-reranker"
@@ -40,20 +49,35 @@ env:
 phases:
   install:
     commands:
+      # An older team template sets SLEMIFY_VERSION but no SLEMIFY_SHA256.
+      - |
+        if [ -n "${SLEMIFY_VERSION:-}" ] && [ -z "${SLEMIFY_SHA256:-}" ]; then
+          echo "SLEMIFY_SHA256 is empty: this template predates the pinned slemify download"
+          exit 1
+        fi
+      # Every download is retried and checked against its pinned sha256.
       - echo "Installing terraform ${TERRAFORM_VERSION}"
-      - curl -fsSL -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+      - curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+      - echo "${TERRAFORM_SHA256}  /tmp/terraform.zip" | sha256sum -c -
       - unzip -q -o /tmp/terraform.zip -d /usr/local/bin && rm /tmp/terraform.zip
       - terraform version
       - echo "Installing kubectl, helm, and crane for the seed step"
-      - curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl
-      - curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-      - curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin crane
-      - pip3 install --quiet opensearch-py httpx gitpython requests beautifulsoup4 boto3
+      - curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+      - echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
+      - install -m 0755 /tmp/kubectl /usr/local/bin/kubectl && rm /tmp/kubectl
+      - curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+      - echo "${HELM_SHA256}  /tmp/helm.tgz" | sha256sum -c -
+      - tar -xzf /tmp/helm.tgz -C /tmp linux-amd64/helm && install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm && rm -rf /tmp/helm.tgz /tmp/linux-amd64
+      - curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/crane.tgz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+      - echo "${CRANE_SHA256}  /tmp/crane.tgz" | sha256sum -c -
+      - tar -xzf /tmp/crane.tgz -C /usr/local/bin crane && rm /tmp/crane.tgz
+      - pip3 install --quiet --retries 10 --timeout 60 opensearch-py httpx gitpython requests beautifulsoup4 boto3
       # The seed runs slemify itself (triage data stage, retriever) so the lab
       # starts where the pages say it does. Same release the IDE installs.
       - |
         if [ -n "${SLEMIFY_VERSION:-}" ]; then
-          curl -fsSL -o /tmp/slemify.tgz "https://github.com/aws-samples/sample-slemify/releases/download/v${SLEMIFY_VERSION}/slemify_${SLEMIFY_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/slemify.tgz "https://github.com/aws-samples/sample-slemify/releases/download/v${SLEMIFY_VERSION}/slemify_${SLEMIFY_VERSION}_linux_amd64.tar.gz"
+          echo "${SLEMIFY_SHA256}  /tmp/slemify.tgz" | sha256sum -c - || exit 1
           tar -xzf /tmp/slemify.tgz -C /tmp slemify && install -m 0755 /tmp/slemify /usr/local/bin/slemify && rm -f /tmp/slemify /tmp/slemify.tgz
           slemify --help >/dev/null
         fi
@@ -194,7 +218,7 @@ phases:
         if [ -n "${CFN_RESPONSE_URL:-}" ]; then
           STACK_STATUS=$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo UNKNOWN)
           if [ "${STACK_STATUS}" = "CREATE_IN_PROGRESS" ]; then
-            curl -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"SUCCESS\",\"Reason\":\"Cluster and demo ready; module 3 assets converging\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"Cluster and demo ready\"}" "${CFN_RESPONSE_URL}"
+            curl --retry 5 --retry-all-errors --retry-delay 5 -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"SUCCESS\",\"Reason\":\"Cluster and demo ready; module 3 assets converging\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"Cluster and demo ready\"}" "${CFN_RESPONSE_URL}"
             echo "signalled CloudFormation: event ready"
           else
             echo "stack is ${STACK_STATUS}; not signalling (repair re-run)"
@@ -236,5 +260,5 @@ phases:
       # on the WaitCondition. A failure in the tail leaves the SUCCESS standing.
       - |
         if [ -n "${CFN_RESPONSE_URL:-}" ] && [ ! -f /tmp/cfn-signalled ]; then
-          curl -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"FAILURE\",\"Reason\":\"Provisioning failed\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"See CodeBuild logs: ${CODEBUILD_LOG_PATH}\"}" "${CFN_RESPONSE_URL}"
+          curl --retry 5 --retry-all-errors --retry-delay 5 -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"FAILURE\",\"Reason\":\"Provisioning failed\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"See CodeBuild logs: ${CODEBUILD_LOG_PATH}\"}" "${CFN_RESPONSE_URL}"
         fi
