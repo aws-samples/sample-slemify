@@ -170,7 +170,8 @@ phases:
           aws ecr get-login-password | crane auth login --username AWS --password-stdin "${REGISTRY}"
           for repo in ${IMAGE_REPOS}; do
             crane index append -t "${REGISTRY}/${repo}:latest" \
-              -m "${REGISTRY}/${repo}:latest-amd64" -m "${REGISTRY}/${repo}:latest-arm64"
+              -m "${REGISTRY}/${repo}:latest-amd64" -m "${REGISTRY}/${repo}:latest-arm64" \
+              || { echo "index append failed for ${repo}"; exit 1; }
           done
           export DEMO_IMAGE="${REGISTRY}/${ORCH_REPO}:latest"
           export RERANKER_IMAGE="${REGISTRY}/${RERANK_REPO}:latest"
