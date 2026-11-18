@@ -17,6 +17,8 @@ COPY server.py ui.html bedrock_region.py ./
 # ../triage/expert.yaml as agent/triage_expert.yaml before this COPY. The
 # TRIAGE=llm prompt reads project.domain from it and fails without it.
 COPY agent ./agent
+# The markdown renderer the UI loads (vendor/marked/README.md).
+COPY vendor ./vendor
 
 EXPOSE 8000
 
