@@ -267,3 +267,11 @@ Packages:
   - go.yaml.in/yaml/v3
 License: MIT / Apache License 2.0
 URL: https://github.com/go-yaml/yaml
+
+--------------------------------------------------------------------------------
+
+Name: marked
+Package: marked
+Version: 18.2.1
+License: MIT
+URL: https://github.com/markedjs/marked

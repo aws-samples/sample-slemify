@@ -23,10 +23,19 @@ INIT_IMAGE_TAG="${OPENSEARCH_INIT_IMAGE_TAG:-1.37.0}"
 
 echo "=== Setting up OpenSearch for RAG ==="
 
-# Add OpenSearch Helm repo
+# Add OpenSearch Helm repo. The add fails when the repo already exists, so
+# only the update decides success. Three attempts, 30 s apart.
 echo "Adding OpenSearch Helm repo..."
-helm repo add opensearch https://opensearch-project.github.io/helm-charts/ 2>/dev/null || true
-helm repo update opensearch
+attempt=1
+until { helm repo add opensearch https://opensearch-project.github.io/helm-charts/ >/dev/null 2>&1 || true; helm repo update opensearch; }; do
+  if [ "$attempt" -ge 3 ]; then
+    echo "helm repo update opensearch failed 3 times; check network access to opensearch-project.github.io"
+    exit 1
+  fi
+  echo "helm repo update failed (attempt $attempt of 3), retrying in 30s"
+  attempt=$((attempt + 1))
+  sleep 30
+done
 
 # Deploy OpenSearch (single node, no security for demo)
 echo "Deploying OpenSearch..."

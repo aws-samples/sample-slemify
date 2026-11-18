@@ -23,14 +23,44 @@
 #                          GGUF (buildspec-gguf.yaml); empty to skip
 #   SLEMIFY_VERSION        Slemify release the seed runs (without the v); empty
 #                          skips the Slemify projects in the seed
+#   SLEMIFY_SHA256         sha256 of that release's linux_amd64 tarball; required
+#                          when SLEMIFY_VERSION is set
+#   CENTRAL_PARAM          SSM parameter the central grant writes (/slemify/central);
+#                          empty outside Workshop Studio
+#   RELEASE_TAG            the tag this build was cloned at (RepoRef)
+#   CENTRAL_WAIT_MINUTES, CENTRAL_COPY_MINUTES, CENTRAL_TAIL_MINUTES
+#                          central-mode deadlines from the build start
+#                          (defaults 90, 100 and 140)
+#
+# Central mode: when CENTRAL_PARAM names a parameter that exists, the event's
+# central account has prepared the images, the knowledge corpus and the
+# analyst GGUF once (buildspec-prep.yaml). This build waits for the markers
+# under releases/<RELEASE_TAG>/<commit>/ in the central bucket, copies the
+# images and the corpus before the full apply, and copies the GGUF in the
+# tail. lib/central.sh has the helpers.
+#
+# Today's path: when the parameter does not exist, this build starts its own
+# image and GGUF builds as before. A parameter that exists but is invalid
+# fails the build before the signal.
 
 version: 0.2
 
 env:
+  # lib/central.sh is a bash library.
+  shell: bash
   variables:
     TERRAFORM_VERSION: "1.16.3"
+    # From https://releases.hashicorp.com/terraform/1.16.3/terraform_1.16.3_SHA256SUMS (linux_amd64)
+    TERRAFORM_SHA256: "093b6ae9a2228af5029c41606bc96eb583553528aad1bfe7e0b4d62fc91e25d8"
     KUBECTL_VERSION: "v1.36.4"
+    # From https://dl.k8s.io/release/v1.36.4/bin/linux/amd64/kubectl.sha256
+    KUBECTL_SHA256: "8b8f088da2dab964f853b38464033b1be15ede2839eca751482357c45abdd05a"
+    HELM_VERSION: "v3.22.1"
+    # From https://get.helm.sh/helm-v3.22.1-linux-amd64.tar.gz.sha256sum
+    HELM_SHA256: "896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea"
     CRANE_VERSION: "v0.22.1"
+    # From https://github.com/google/go-containerregistry/releases/download/v0.22.1/checksums.txt (Linux_x86_64)
+    CRANE_SHA256: "0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0"
     INFRA_DIR: "examples/k8s-autoscaling/workshop/infrastructure"
     ORCH_REPO: "slemify/k8s-autoscaling-orchestrator"
     RERANK_REPO: "slemify/k8s-autoscaling-reranker"
@@ -40,28 +70,59 @@ env:
 phases:
   install:
     commands:
+      # An older team template sets SLEMIFY_VERSION but no SLEMIFY_SHA256.
+      - |
+        if [ -n "${SLEMIFY_VERSION:-}" ] && [ -z "${SLEMIFY_SHA256:-}" ]; then
+          echo "SLEMIFY_SHA256 is empty: this template predates the pinned slemify download"
+          exit 1
+        fi
+      # Central mode or today's path; written to /tmp/central-mode. A failure
+      # writes "failed" and stops the build at the start of the build phase.
+      # post_build sends FAILURE to the stack only when the build phase ran.
+      - . "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/central.sh" && decide_mode || echo failed > /tmp/central-mode
+      # Every download is retried and checked against its pinned sha256.
       - echo "Installing terraform ${TERRAFORM_VERSION}"
-      - curl -fsSL -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+      - curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+      - echo "${TERRAFORM_SHA256}  /tmp/terraform.zip" | sha256sum -c -
       - unzip -q -o /tmp/terraform.zip -d /usr/local/bin && rm /tmp/terraform.zip
       - terraform version
       - echo "Installing kubectl, helm, and crane for the seed step"
-      - curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl
-      - curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-      - curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin crane
-      - pip3 install --quiet opensearch-py httpx gitpython requests beautifulsoup4 boto3
+      - curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+      - echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
+      - install -m 0755 /tmp/kubectl /usr/local/bin/kubectl && rm /tmp/kubectl
+      - curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+      - echo "${HELM_SHA256}  /tmp/helm.tgz" | sha256sum -c -
+      - tar -xzf /tmp/helm.tgz -C /tmp linux-amd64/helm && install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm && rm -rf /tmp/helm.tgz /tmp/linux-amd64
+      - curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/crane.tgz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+      - echo "${CRANE_SHA256}  /tmp/crane.tgz" | sha256sum -c -
+      - tar -xzf /tmp/crane.tgz -C /usr/local/bin crane && rm /tmp/crane.tgz
+      - pip3 install --quiet --retries 10 --timeout 60 opensearch-py httpx gitpython requests beautifulsoup4 boto3
       # The seed runs slemify itself (triage data stage, retriever) so the lab
       # starts where the pages say it does. Same release the IDE installs.
       - |
         if [ -n "${SLEMIFY_VERSION:-}" ]; then
-          curl -fsSL -o /tmp/slemify.tgz "https://github.com/aws-samples/sample-slemify/releases/download/v${SLEMIFY_VERSION}/slemify_${SLEMIFY_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/slemify.tgz "https://github.com/aws-samples/sample-slemify/releases/download/v${SLEMIFY_VERSION}/slemify_${SLEMIFY_VERSION}_linux_amd64.tar.gz"
+          echo "${SLEMIFY_SHA256}  /tmp/slemify.tgz" | sha256sum -c - || exit 1
           tar -xzf /tmp/slemify.tgz -C /tmp slemify && install -m 0755 /tmp/slemify /usr/local/bin/slemify && rm -f /tmp/slemify /tmp/slemify.tgz
           slemify --help >/dev/null
+        fi
+      # Last install command: every command above succeeded.
+      - touch /tmp/install-done
+    # A failed install command skips the build and post_build phases, so the
+    # FAILURE signal for the stack is sent here instead.
+    finally:
+      - |
+        if [ ! -f /tmp/install-done ] && [ -n "${CFN_RESPONSE_URL:-}" ]; then
+          curl --retry 5 --retry-all-errors --retry-delay 5 -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"FAILURE\",\"Reason\":\"Provisioning failed in install\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"See CodeBuild logs: ${CODEBUILD_LOG_PATH}\"}" "${CFN_RESPONSE_URL}"
+          touch /tmp/cfn-signalled
+          echo "signalled CloudFormation: install failed"
         fi
   pre_build:
     commands:
       # Kick off the image builds first; they run while Terraform builds the cluster.
+      # Central mode copies the images instead, so nothing starts here.
       - |
-        if [ -z "${DEMO_IMAGE:-}" ] && [ -n "${IMAGE_BUILD_AMD64:-}" ] && [ -n "${IMAGE_BUILD_ARM64:-}" ]; then
+        if [ "$(cat /tmp/central-mode)" = today ] && [ -z "${DEMO_IMAGE:-}" ] && [ -n "${IMAGE_BUILD_AMD64:-}" ] && [ -n "${IMAGE_BUILD_ARM64:-}" ]; then
           AMD_ID=$(aws codebuild start-build --project-name "${IMAGE_BUILD_AMD64}" --query 'build.id' --output text)
           ARM_ID=$(aws codebuild start-build --project-name "${IMAGE_BUILD_ARM64}" --query 'build.id' --output text)
           echo "image builds started: ${AMD_ID} ${ARM_ID}"
@@ -93,6 +154,12 @@ phases:
       - terraform init -input=false
   build:
     commands:
+      # The mode decision failed in install (its reason is in the install log).
+      - |
+        if [ "$(cat /tmp/central-mode)" = failed ]; then
+          echo "${CENTRAL_PARAM:-the central parameter} exists but cannot be used; see the install phase log"
+          exit 1
+        fi
       - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/terraform"
       - echo "Applying VPC, then cluster, then the rest"
       - terraform apply -input=false -auto-approve -target=module.vpc
@@ -136,6 +203,12 @@ phases:
         else
           echo "EKS apply failed:"; tail -n 60 /tmp/eks-apply.log; exit 1
         fi
+      # Central mode: wait for the prep build's images-ready.json, then copy the
+      # eight images and the corpus into this account and write /tmp/images.env.
+      - |
+        if [ "$(cat /tmp/central-mode)" = central ]; then
+          . "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/central.sh" && central_copy_phase || exit 1
+        fi
       # Everything except the Mountpoint S3 CSI addon. The addon takes 8 to 9
       # minutes to report ACTIVE (its pods cannot schedule until the first node
       # exists) and nothing in the seed uses it; only module 3's analyst does,
@@ -170,7 +243,8 @@ phases:
           aws ecr get-login-password | crane auth login --username AWS --password-stdin "${REGISTRY}"
           for repo in ${IMAGE_REPOS}; do
             crane index append -t "${REGISTRY}/${repo}:latest" \
-              -m "${REGISTRY}/${repo}:latest-amd64" -m "${REGISTRY}/${repo}:latest-arm64"
+              -m "${REGISTRY}/${repo}:latest-amd64" -m "${REGISTRY}/${repo}:latest-arm64" \
+              || { echo "index append failed for ${repo}"; exit 1; }
           done
           export DEMO_IMAGE="${REGISTRY}/${ORCH_REPO}:latest"
           export RERANKER_IMAGE="${REGISTRY}/${RERANK_REPO}:latest"
@@ -193,7 +267,7 @@ phases:
         if [ -n "${CFN_RESPONSE_URL:-}" ]; then
           STACK_STATUS=$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo UNKNOWN)
           if [ "${STACK_STATUS}" = "CREATE_IN_PROGRESS" ]; then
-            curl -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"SUCCESS\",\"Reason\":\"Cluster and demo ready; module 3 assets converging\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"Cluster and demo ready\"}" "${CFN_RESPONSE_URL}"
+            curl --retry 5 --retry-all-errors --retry-delay 5 -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"SUCCESS\",\"Reason\":\"Cluster and demo ready; module 3 assets converging\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"Cluster and demo ready\"}" "${CFN_RESPONSE_URL}"
             echo "signalled CloudFormation: event ready"
           else
             echo "stack is ${STACK_STATUS}; not signalling (repair re-run)"
@@ -202,19 +276,21 @@ phases:
         fi
       # --- Tail: module 3 assets. Failures here fail the build, not the event. ---
       - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/terraform"
-      - echo "Applying the Mountpoint S3 CSI addon (module 3)"
       - |
-        max_retry=3
-        counter=1
-        until terraform apply -input=false -auto-approve -var enable_s3_csi_addon=true
-        do
-          [ "$counter" -eq "$max_retry" ] && { echo "S3 CSI addon apply failed after ${max_retry} attempts; repair with: make check-infra"; exit 1; }
-          echo "addon apply failed, retrying in 30s (attempt $counter of $max_retry)"
-          sleep 30
-          counter=$((counter + 1))
-        done
+        if [ "$(cat /tmp/central-mode)" = today ]; then
+          echo "Applying the Mountpoint S3 CSI addon (module 3)"
+          max_retry=3
+          counter=1
+          until terraform apply -input=false -auto-approve -var enable_s3_csi_addon=true
+          do
+            [ "$counter" -eq "$max_retry" ] && { echo "S3 CSI addon apply failed after ${max_retry} attempts; repair with: make check-infra"; exit 1; }
+            echo "addon apply failed, retrying in 30s (attempt $counter of $max_retry)"
+            sleep 30
+            counter=$((counter + 1))
+          done
+        fi
       - |
-        if [ -f /tmp/gguf-build ]; then
+        if [ "$(cat /tmp/central-mode)" = today ] && [ -f /tmp/gguf-build ]; then
           GGUF_ID=$(cat /tmp/gguf-build)
           echo "Waiting for the gguf build ${GGUF_ID}"
           while true; do
@@ -227,6 +303,11 @@ phases:
             esac
           done
         fi
+      # Central mode: copy the GGUF in the background while the addon applies.
+      - |
+        if [ "$(cat /tmp/central-mode)" = central ]; then
+          . "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/central.sh" && central_tail || exit 1
+        fi
   post_build:
     commands:
       - echo "build status ${CODEBUILD_BUILD_SUCCEEDING}"
@@ -235,5 +316,5 @@ phases:
       # on the WaitCondition. A failure in the tail leaves the SUCCESS standing.
       - |
         if [ -n "${CFN_RESPONSE_URL:-}" ] && [ ! -f /tmp/cfn-signalled ]; then
-          curl -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"FAILURE\",\"Reason\":\"Provisioning failed\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"See CodeBuild logs: ${CODEBUILD_LOG_PATH}\"}" "${CFN_RESPONSE_URL}"
+          curl --retry 5 --retry-all-errors --retry-delay 5 -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"FAILURE\",\"Reason\":\"Provisioning failed\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"See CodeBuild logs: ${CODEBUILD_LOG_PATH}\"}" "${CFN_RESPONSE_URL}"
         fi

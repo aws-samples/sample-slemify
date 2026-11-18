@@ -9,7 +9,8 @@ chunking anything, so the two indexes hold exactly the same corpus.
 Usage (port-forwarded, or in-cluster with OPENSEARCH_URL set):
   python3 index-bedrock-from-index.py
 Env: OPENSEARCH_URL, INDEX_NAME (source), BEDROCK_INDEX_NAME (target),
-     BEDROCK_EMBED_MODEL, BEDROCK_EMBED_DIM, AWS_REGION.
+     BEDROCK_EMBED_MODEL, BEDROCK_EMBED_DIM, BEDROCK_REGION,
+     BEDROCK_FALLBACK_REGION.
 Requires: boto3, opensearch-py (both in the orchestrator image).
 """
 import json
@@ -18,8 +19,10 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import boto3
 from opensearchpy import OpenSearch, helpers
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from bedrock_region import bedrock_runtime  # noqa: E402
 
 OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:9200")
 SOURCE_INDEX = os.environ.get("INDEX_NAME", "k8s-autoscaling-knowledge")
@@ -28,7 +31,7 @@ MODEL = os.environ.get("BEDROCK_EMBED_MODEL", "amazon.titan-embed-text-v2:0")
 DIM = int(os.environ.get("BEDROCK_EMBED_DIM", "1024"))
 WORKERS = int(os.environ.get("WORKERS", "8"))
 
-bedrock = boto3.client("bedrock-runtime", region_name=os.environ.get("AWS_REGION", "eu-west-1"))
+bedrock = bedrock_runtime()
 
 
 def embed(text: str) -> list[float]:

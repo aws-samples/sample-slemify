@@ -12,11 +12,13 @@ RUN pip install --no-cache-dir \
     kubernetes==31.0.0 \
     pyyaml==6.0.2
 
-COPY server.py ui.html ./
+COPY server.py ui.html bedrock_region.py ./
 # The image builds (scripts/build-images.sh, buildspec-images.yaml) stage
 # ../triage/expert.yaml as agent/triage_expert.yaml before this COPY. The
 # TRIAGE=llm prompt reads project.domain from it and fails without it.
 COPY agent ./agent
+# The markdown renderer the UI loads (vendor/marked/README.md).
+COPY vendor ./vendor
 
 EXPOSE 8000
 

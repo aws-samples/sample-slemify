@@ -80,6 +80,15 @@ class ServerTest(unittest.TestCase):
         self.assertIs(body["apply_enabled"], False)
         self.assertEqual(set(body["steps"]), STEP_KEYS)
 
+    def test_vendored_marked_is_served(self):
+        r = self.client.get("/vendor/marked/marked.umd.js")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.headers["content-type"].startswith("application/javascript"))
+        self.assertIn(b"marked", r.content)
+        # Relative path: the IDE serves the UI under /ports/8000/.
+        self.assertIn('src="vendor/marked/marked.umd.js"', server.INDEX_HTML)
+        self.assertNotIn("cdn.jsdelivr.net", server.INDEX_HTML)
+
 
 if __name__ == "__main__":
     unittest.main()

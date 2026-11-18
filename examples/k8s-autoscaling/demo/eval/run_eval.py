@@ -33,7 +33,8 @@ Usage:
 Env:
   ORCHESTRATOR_URL  (default http://localhost:8000)
   JUDGE_MODEL       (default: LLM_MODEL, else global.anthropic.claude-sonnet-5)
-  AWS_REGION        (judge runs on Bedrock; uses the default AWS credentials)
+  BEDROCK_REGION    (judge runs on Bedrock in BEDROCK_REGION, us-east-1 as
+                    fallback; uses the default AWS credentials)
 """
 import argparse
 import json
@@ -44,9 +45,12 @@ import time
 from datetime import datetime, timezone
 from itertools import zip_longest
 
-import boto3
 import httpx
 import yaml
+
+# bedrock_region.py sits in the demo dir, or next to this script in-cluster.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from bedrock_region import bedrock_runtime  # noqa: E402
 
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:8000")
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", os.environ.get("LLM_MODEL", "global.anthropic.claude-sonnet-5"))
@@ -70,7 +74,7 @@ BEDROCK_EMBED_DIM = int(os.environ.get("BEDROCK_EMBED_DIM", "1024"))
 HERE = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(HERE, "results")
 
-_bedrock = boto3.client("bedrock-runtime")
+_bedrock = bedrock_runtime()
 
 
 def _converse_text(resp: dict) -> str:

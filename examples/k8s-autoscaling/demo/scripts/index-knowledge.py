@@ -20,6 +20,12 @@ Usage:
   python3 index-knowledge.py                    # Full reindex, tuned encoder
   python3 index-knowledge.py --embedder=bedrock # Full reindex, Titan
   python3 index-knowledge.py --append --source=aws-blog  # Add blogs only
+  python3 index-knowledge.py --from-corpus=s3://bucket/knowledge/corpus.jsonl
+                                                # Index a saved corpus snapshot
+                                                # (s3:// URI or local path) instead
+                                                # of cloning and fetching
+  python3 index-knowledge.py --strict           # Fail on a failed blog fetch, a
+                                                # missing docs path, or 0 chunks
 
 Requires: pip install opensearch-py httpx gitpython requests beautifulsoup4
 """
@@ -41,6 +47,9 @@ import httpx
 from git import Repo
 from opensearchpy import OpenSearch
 from opensearchpy.exceptions import ConnectionError as OSConnectionError, ConnectionTimeout
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from bedrock_region import bedrock_runtime  # noqa: E402
 
 # --- Configuration ---
 
@@ -242,7 +251,53 @@ def chunk_local_docs() -> list[dict]:
     return chunks
 
 
-def clone_and_chunk(source: dict, tmpdir: str) -> list[dict]:
+def load_corpus(spec: str) -> list[dict]:
+    """Read a JSONL corpus snapshot from an s3:// URI or a local path.
+
+    Each non-blank line must be a JSON object with a non-empty string text and
+    string source and section. The first invalid line, or an empty file, prints
+    an error with the line number and exits 1.
+    """
+    if spec.startswith("s3://"):
+        bucket, _, key = spec[len("s3://"):].partition("/")
+        if not bucket or not key:
+            print(f"Error: {spec}: expected s3://bucket/key")
+            sys.exit(1)
+        body = boto3.client("s3").get_object(Bucket=bucket, Key=key)["Body"].read()
+        lines = body.decode("utf-8").split("\n")
+    else:
+        with open(spec, encoding="utf-8") as fh:
+            lines = fh.read().split("\n")
+
+    chunks = []
+    for number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError as e:
+            print(f"Error: {spec}:{number}: not valid JSON ({e})")
+            sys.exit(1)
+        if not isinstance(row, dict):
+            reason = "not a JSON object"
+        elif not isinstance(row.get("text"), str) or not row["text"].strip():
+            reason = "text must be a non-empty string"
+        elif not isinstance(row.get("source"), str):
+            reason = "source must be a string"
+        elif not isinstance(row.get("section"), str):
+            reason = "section must be a string"
+        else:
+            chunks.append({"text": row["text"], "source": row["source"], "section": row["section"]})
+            continue
+        print(f"Error: {spec}:{number}: {reason}")
+        sys.exit(1)
+    if not chunks:
+        print(f"Error: {spec}: the corpus is empty")
+        sys.exit(1)
+    return chunks
+
+
+def clone_and_chunk(source: dict, tmpdir: str, strict: bool = False) -> list[dict]:
     """Shallow clone a repo and chunk all markdown files."""
     dest = os.path.join(tmpdir, source["name"])
     print(f"  Cloning {source['repo']} ({source['branch']})...")
@@ -254,6 +309,8 @@ def clone_and_chunk(source: dict, tmpdir: str) -> list[dict]:
     )
     docs_path = os.path.join(dest, source["path"])
     if not os.path.isdir(docs_path):
+        if strict:
+            raise RuntimeError(f"{source['path']} not found in {source['repo']}")
         print(f"    Warning: {source['path']} not found in repo")
         return []
 
@@ -270,8 +327,9 @@ def clone_and_chunk(source: dict, tmpdir: str) -> list[dict]:
     return chunks
 
 
-def fetch_blogs() -> list[dict]:
-    """Fetch AWS blog posts and chunk them, skipping SUPERSEDED_SOURCES."""
+def fetch_blogs(strict: bool = False) -> list[dict]:
+    """Fetch AWS blog posts and chunk them, skipping SUPERSEDED_SOURCES.
+    With strict, a failed fetch raises instead of being skipped."""
     import requests
     from bs4 import BeautifulSoup
 
@@ -309,6 +367,8 @@ def fetch_blogs() -> list[dict]:
             print(f"    {slug}: {len(blog_chunks)} chunks")
         except Exception as e:
             print(f"    Failed: {url} ({e})")
+            if strict:
+                raise
     print(f"  {skipped} superseded posts skipped (SUPERSEDED_SOURCES)")
     return chunks
 
@@ -329,8 +389,7 @@ def _bedrock_client():
     botocore knows how to retry."""
     global _br_client
     if _br_client is None:
-        _br_client = boto3.client(
-            "bedrock-runtime",
+        _br_client = bedrock_runtime(
             config=Config(retries={"max_attempts": 8, "mode": "adaptive"}, read_timeout=60))
     return _br_client
 
@@ -517,6 +576,11 @@ def main():
     #                running cluster or embedding service.
     export_s3 = "--export-s3" in sys.argv or "--export-only" in sys.argv
     export_only = "--export-only" in sys.argv
+    # --strict: a failed blog fetch, a missing docs path or 0 chunks fails the run.
+    strict = "--strict" in sys.argv
+    # --from-corpus=<s3://bucket/key | path>: index a saved JSONL snapshot
+    # instead of cloning repos and fetching blogs.
+    from_corpus = None
     s3_bucket = S3_GROUNDING_BUCKET
     s3_key = S3_GROUNDING_KEY
     source_filter = None
@@ -535,6 +599,8 @@ def main():
             s3_bucket = arg.split("=", 1)[1]
         elif arg.startswith("--s3-key="):
             s3_key = arg.split("=", 1)[1]
+        elif arg.startswith("--from-corpus="):
+            from_corpus = arg.split("=", 1)[1]
 
     # The index follows the embedder unless overridden explicitly.
     INDEX_NAME = index_override or (BEDROCK_INDEX_NAME if EMBEDDER == "bedrock" else INDEX_NAME)
@@ -544,6 +610,12 @@ def main():
         print(f"  S3 grounding export: s3://{s3_bucket}/{s3_key}")
     if export_only:
         print("  Mode: export-only (skipping OpenSearch indexing)")
+
+    # Read the snapshot before any OpenSearch call, so a bad file fails first.
+    corpus_chunks = None
+    if from_corpus:
+        print(f"  Corpus snapshot: {from_corpus}")
+        corpus_chunks = load_corpus(from_corpus)
 
     client = None
     if not export_only:
@@ -555,7 +627,9 @@ def main():
 
     # Determine which git sources to process
     sources = SOURCES
-    if source_filter:
+    if corpus_chunks is not None:
+        sources = []
+    elif source_filter:
         if source_filter in ("aws-blog", "curated"):
             # Non-git sources handled by their own blocks below.
             sources = []
@@ -566,31 +640,34 @@ def main():
                 print(f"  Available: {[s['name'] for s in SOURCES] + ['aws-blog', 'curated']}")
                 return
 
-    all_chunks = []
+    all_chunks = list(corpus_chunks or [])
     tmpdir = tempfile.mkdtemp()
 
     try:
         for source in sources:
             print(f"\n--- {source['name']} ---")
-            chunks = clone_and_chunk(source, tmpdir)
+            chunks = clone_and_chunk(source, tmpdir, strict=strict)
             print(f"  {len(chunks)} chunks")
             all_chunks.extend(chunks)
 
-        if not source_filter or source_filter == "aws-blog":
+        if corpus_chunks is None and (not source_filter or source_filter == "aws-blog"):
             print("\n--- AWS Blog Posts ---")
-            blog_chunks = fetch_blogs()
+            blog_chunks = fetch_blogs(strict=strict)
             all_chunks.extend(blog_chunks)
             print(f"  {len(blog_chunks)} chunks from blogs")
 
         # Curated authoritative facts (demo/knowledge/). Included in a full index
         # and when explicitly selected with --source=curated.
-        if not source_filter or source_filter == "curated":
+        if corpus_chunks is None and (not source_filter or source_filter == "curated"):
             print("\n--- Curated facts ---")
             curated_chunks = chunk_local_docs()
             all_chunks.extend(curated_chunks)
             print(f"  {len(curated_chunks)} chunks from curated facts")
 
         print(f"\n  Total chunks: {len(all_chunks)}")
+        if strict and not all_chunks:
+            print("  Error: 0 chunks (--strict)")
+            sys.exit(1)
 
         if not export_only:
             print("\n--- Indexing ---")

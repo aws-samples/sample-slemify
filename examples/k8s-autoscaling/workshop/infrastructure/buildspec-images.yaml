@@ -14,8 +14,16 @@
 # while they build, then joins the two tags into a multi-arch manifest before
 # the seed. Native builds on each architecture; no emulation.
 #
+# The central prep build (buildspec-prep.yaml) starts the same two projects
+# with IMAGE_TAG set to the first 12 characters of the commit.
+#
+# Every image must build and push, or the build fails. A failed docker build
+# is retried up to 3 times with a 120 s pause; Hugging Face rate-limit
+# responses asked for waits of 69 to 114 s. A failed push fails at once.
+#
 # Environment variables set by CloudFormation:
-#   ARCH   amd64 or arm64 (the tag suffix)
+#   ARCH        amd64 or arm64 (the tag suffix)
+#   IMAGE_TAG   tag prefix (default latest); tags are <IMAGE_TAG>-<ARCH>
 
 version: 0.2
 
@@ -54,10 +62,20 @@ phases:
           cd "${CODEBUILD_SRC_DIR}/$1"
           for spec in $2; do
             name="${spec%%=*}"; ctx="${spec#*=}"
-            img="${REGISTRY}/slemify/${name}:latest-${ARCH}"
+            img="${REGISTRY}/slemify/${name}:${IMAGE_TAG:-latest}-${ARCH}"
             echo "=== ${name} (${ARCH}) ==="
-            docker build -t "${img}" "${ctx}"
-            docker push "${img}"
+            for attempt in 1 2 3; do
+              if docker build -t "${img}" "${ctx}"; then
+                break
+              fi
+              if [ "${attempt}" -eq 3 ]; then
+                echo "docker build failed 3 times for ${img}"
+                exit 1
+              fi
+              echo "docker build failed for ${img} (attempt ${attempt} of 3), retrying in 120s"
+              sleep 120
+            done
+            docker push "${img}" || { echo "docker push failed for ${img}"; exit 1; }
           done
         }
         # The orchestrator's TRIAGE=llm prompt reads project.domain from the
@@ -67,4 +85,4 @@ phases:
         build_group "${SLEMIFY_SRC}" "${SLEMIFY_IMAGES}"
   post_build:
     commands:
-      - echo "pushed latest-${ARCH} for ${DEMO_IMAGES} ${SLEMIFY_IMAGES}"
+      - echo "pushed ${IMAGE_TAG:-latest}-${ARCH} for ${DEMO_IMAGES} ${SLEMIFY_IMAGES}"

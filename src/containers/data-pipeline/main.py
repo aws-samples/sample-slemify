@@ -22,6 +22,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import boto3
 import yaml
+from botocore.config import Config
+
+from bedrock_region import bedrock_runtime, primary_region
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1340,8 +1343,9 @@ def _check_entity_coverage(records):
 # === Bedrock / OpenAI Backends ===
 
 def _get_bedrock_rpm_quota(model_id):
+    region = primary_region()
     try:
-        client = boto3.client("service-quotas")
+        client = boto3.client("service-quotas", region_name=region)
         paginator = client.get_paginator("list_service_quotas")
         for page in paginator.paginate(ServiceCode="bedrock"):
             for quota in page.get("Quotas", []):
@@ -1352,7 +1356,7 @@ def _get_bedrock_rpm_quota(model_id):
                     if rpm > 0:
                         return rpm
     except Exception as e:
-        logger.debug("Could not query Bedrock quota: %s", e)
+        logger.warning("Could not query Bedrock quota in %s: %s", region, e)
     return 0
 
 
@@ -1395,11 +1399,10 @@ class BedrockBackend:
 
     def __init__(self, model):
         self.model_id = self.ALIASES.get(model, model)
+        self._client = bedrock_runtime(config=Config(
+            read_timeout=300, connect_timeout=10, retries={"max_attempts": 2}))
 
     def generate(self, prompt):
-        from botocore.config import Config
-        config = Config(read_timeout=300, connect_timeout=10, retries={"max_attempts": 2})
-        client = boto3.client("bedrock-runtime", config=config)
         kwargs = {
             "modelId": self.model_id,
             "messages": [{"role": "user", "content": [{"text": prompt}]}],
@@ -1412,7 +1415,7 @@ class BedrockBackend:
         # accept the field, so guard on the model id to keep the backend generic.
         if "claude-sonnet-5" in self.model_id or "claude-opus-5" in self.model_id:
             kwargs["additionalModelRequestFields"] = {"thinking": {"type": "disabled"}}
-        response = client.converse(**kwargs)
+        response = self._client.converse(**kwargs)
         # Sonnet 5 leads with a reasoningContent block (no "text" key), so scan
         # for the first block that carries text rather than assuming index 0.
         for block in response.get("output", {}).get("message", {}).get("content", []) or []:

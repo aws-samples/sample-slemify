@@ -15,7 +15,7 @@ import os
 import time
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -29,6 +29,9 @@ _ready = False
 _HERE = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(_HERE, "ui.html")) as _f:
     INDEX_HTML = _f.read()
+# The markdown renderer the UI loads, shipped in the image (vendor/marked/README.md).
+with open(os.path.join(_HERE, "vendor", "marked", "marked.umd.js"), "rb") as _f:
+    MARKED_JS = _f.read()
 
 
 class Query(BaseModel):
@@ -239,3 +242,8 @@ async def apply_endpoint(req: ApplyRequest):
 @app.get("/")
 async def index():
     return HTMLResponse(INDEX_HTML)
+
+
+@app.get("/vendor/marked/marked.umd.js")
+async def marked_js():
+    return Response(content=MARKED_JS, media_type="application/javascript")

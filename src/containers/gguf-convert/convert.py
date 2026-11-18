@@ -35,6 +35,8 @@ SAFE_PROJECT = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 SAFE_BUCKET = re.compile(r"^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$")
 SAFE_MODEL = re.compile(r"^[A-Za-z0-9._\-/]+$")
 SAFE_FILENAME = re.compile(r"^[A-Za-z0-9._\-]+\.gguf$")
+SAFE_REVISION = re.compile(r"^[0-9a-f]{40}$")
+SAFE_S3_KEY = re.compile(r"^[A-Za-z0-9._/-]{1,512}$")
 
 WORK_DIR = "/tmp/convert"
 MODEL_DIR = os.path.join(WORK_DIR, "base-model")
@@ -79,11 +81,26 @@ def main():
             f"(expected one of: {', '.join(sorted(set(QUANT_PRESETS) | NO_QUANTIZE))})"
         )
 
+    # Optional: a full commit sha pins the download to one model revision.
+    revision = os.environ.get("BASE_MODEL_REVISION", "").strip() or None
+    if revision is not None and not SAFE_REVISION.fullmatch(revision):
+        sys.exit(f"ERROR: BASE_MODEL_REVISION value {revision!r} failed validation "
+                 "(expected a 40-character commit sha)")
+
+    # Optional: the full upload key, so a caller can add a prefix. It must
+    # still end with the GGUF file name the serving stage reads.
+    s3_key_override = os.environ.get("S3_KEY", "").strip()
+    if s3_key_override and (not SAFE_S3_KEY.fullmatch(s3_key_override)
+                            or not s3_key_override.endswith("/" + gguf_filename)):
+        sys.exit(f"ERROR: S3_KEY value {s3_key_override!r} failed validation "
+                 f"(expected a key ending in /{gguf_filename})")
+
     os.makedirs(WORK_DIR, exist_ok=True)
 
     log(f"step 1/4: downloading base model {base_model} from HuggingFace")
     snapshot_download(
         repo_id=base_model,
+        revision=revision,
         local_dir=MODEL_DIR,
         # Weights only: skip the GGUF/other-format files some repos ship so the
         # converter reads the canonical safetensors/PyTorch weights.
@@ -109,7 +126,7 @@ def main():
         run(["llama-quantize", F16_PATH, gguf_path, preset])
 
     size_mb = os.path.getsize(gguf_path) / 1048576
-    s3_key = f"models/{project}/{gguf_filename}"
+    s3_key = s3_key_override or f"models/{project}/{gguf_filename}"
     log(f"step 4/4: uploading {gguf_path} ({size_mb:.1f} MB) to s3://{s3_bucket}/{s3_key}")
     boto3.client("s3").upload_file(gguf_path, s3_bucket, s3_key)
 

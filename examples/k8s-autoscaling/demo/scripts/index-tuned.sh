@@ -52,7 +52,18 @@ else
   sleep 4
 fi
 
+# Use the corpus snapshot in the model bucket when there is one, so this index
+# holds the same passages as the Bedrock index. Otherwise clone and fetch.
+CORPUS_ARGS=()
+if [ -n "${SLEMIFY_BUCKET:-}" ] &&
+  aws s3api head-object --bucket "$SLEMIFY_BUCKET" --key knowledge/corpus.jsonl >/dev/null 2>&1; then
+  CORPUS_ARGS=(--from-corpus="s3://${SLEMIFY_BUCKET}/knowledge/corpus.jsonl")
+  echo "Using the corpus snapshot in the model bucket."
+else
+  echo "No corpus snapshot found. Cloning the docs and fetching the blog posts."
+fi
+
 INDEX_NAME="$INDEX_NAME" EMBEDDING_URL="http://localhost:8083" \
-  python3 "$HERE/index-knowledge.py" --embedder=slemify
+  python3 "$HERE/index-knowledge.py" --embedder=slemify ${CORPUS_ARGS[@]+"${CORPUS_ARGS[@]}"}
 
 echo "Done. 'make recall' and EMBED=slemify now read $INDEX_NAME."

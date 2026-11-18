@@ -1,0 +1,57 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Central prep build. Runs once per release in the event's central account
+# and prepares what every team build copies in central mode: the seven
+# images, the llama.cpp mirror, the knowledge corpus, and the analyst GGUF.
+# lib/prep.sh does the work; see it for the steps and the S3 layout
+# (releases/<tag>/<commit>/ in MODEL_BUCKET, ready.json written last).
+#
+# Environment variables set by the central stack:
+#   RELEASE_TAG            tag the source was cloned at (RepoRef)
+#   MODEL_BUCKET           central artifact bucket
+#   IMAGES_AMD64_PROJECT   image build project, x86_64 (buildspec-images.yaml)
+#   IMAGES_ARM64_PROJECT   image build project, arm64 (buildspec-images.yaml)
+#   GGUF_PROJECT           GGUF conversion project (buildspec-gguf.yaml)
+#   FORCE                  1 rebuilds everything; otherwise existing steps are skipped
+#
+# On failure, post_build writes releases/<tag>/<commit>/failed.json with the
+# failed step and the log link, which waiting team builds print.
+
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    CRANE_VERSION: "v0.22.1"
+    # From https://github.com/google/go-containerregistry/releases/download/v0.22.1/checksums.txt (Linux_x86_64)
+    CRANE_SHA256: "0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0"
+    INFRA_DIR: "examples/k8s-autoscaling/workshop/infrastructure"
+
+phases:
+  # No install phase: a failed install command skips post_build, so no
+  # failed.json. prep.sh installs crane and the Python packages itself, after
+  # it has written the release prefix.
+  build:
+    commands:
+      - bash "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/prep.sh"
+  post_build:
+    commands:
+      - |
+        if [ "${CODEBUILD_BUILD_SUCCEEDING:-1}" = 0 ] && [ -s /tmp/prep-prefix ]; then
+          PREFIX=$(cat /tmp/prep-prefix)
+          STEP=$(cat /tmp/prep-step 2>/dev/null || echo unknown)
+          STEP="${STEP}" PREFIX="${PREFIX}" python3 -c '
+        import json, os
+        print(json.dumps({
+            "version": 1,
+            "tag": os.environ.get("RELEASE_TAG"),
+            "commit": os.environ.get("CODEBUILD_RESOLVED_SOURCE_VERSION"),
+            "step": os.environ["STEP"],
+            "buildId": os.environ.get("CODEBUILD_BUILD_ID"),
+            "logUrl": os.environ.get("CODEBUILD_BUILD_URL"),
+        }))' > /tmp/failed.json
+          . "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/central.sh" \
+            && retry 5 0 aws s3 cp --quiet --content-type application/json /tmp/failed.json "s3://${MODEL_BUCKET}/${PREFIX}failed.json" \
+            && echo "wrote ${PREFIX}failed.json (step ${STEP})"
+        fi
