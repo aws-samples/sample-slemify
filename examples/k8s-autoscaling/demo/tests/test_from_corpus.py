@@ -1,5 +1,5 @@
 """scripts/index-knowledge.py: --from-corpus loads a JSONL snapshot and
---strict makes a failed blog fetch raise."""
+a failed blog fetch is a warning."""
 import io
 import json
 import os
@@ -98,15 +98,46 @@ class FromCorpusTest(unittest.TestCase):
         self.get_client.assert_not_called()
 
 
-class StrictFetchBlogsTest(unittest.TestCase):
-    def test_strict_fetch_failure_raises(self):
-        url = "https://aws.amazon.com/blogs/containers/announcing-karpenter-1-0/"
-        with mock.patch.object(index_knowledge, "BLOG_URLS", [url]), \
-                mock.patch.object(index_knowledge.sys, "stdout", io.StringIO()), \
-                mock.patch("requests.get", side_effect=OSError("network down")):
-            with self.assertRaises(OSError):
-                index_knowledge.fetch_blogs(strict=True)
-            self.assertEqual(index_knowledge.fetch_blogs(), [])
+class FetchBlogsFailureTest(unittest.TestCase):
+    def test_failed_fetch_warns_and_continues(self):
+        dead = "https://aws.amazon.com/blogs/containers/announcing-karpenter-1-0/"
+        live = "https://aws.amazon.com/blogs/containers/cost-optimization-for-kubernetes-on-aws/"
+
+        class Resp:
+            text = "<html><body><main>" + ("Karpenter text. " * 40) + "</main></body></html>"
+
+            def raise_for_status(self):
+                pass
+
+        def get(url, **kw):
+            if url == dead:
+                raise OSError("404 Client Error")
+            return Resp()
+        out = io.StringIO()
+        with mock.patch.object(index_knowledge, "BLOG_URLS", [dead, live]), \
+                mock.patch.object(index_knowledge, "SUPERSEDED_SOURCES", []), \
+                mock.patch.object(index_knowledge.sys, "stdout", out), \
+                mock.patch("requests.get", side_effect=get):
+            chunks = index_knowledge.fetch_blogs()
+        self.assertTrue(chunks)
+        self.assertIn("WARNING: 1 blog posts could not be fetched", out.getvalue())
+        self.assertIn(f"    {dead}\n", out.getvalue())
+
+    def test_strict_empty_corpus_still_fails(self):
+        # The central prep runs --export-only --strict. Dead links are only
+        # warnings, but a corpus with 0 chunks still fails the run.
+        argv = ["index-knowledge.py", "--export-only", "--strict"]
+        with mock.patch.object(index_knowledge.sys, "argv", argv), \
+                mock.patch.object(index_knowledge.sys, "stdout", io.StringIO()) as out, \
+                mock.patch.object(index_knowledge, "clone_and_chunk", return_value=[]), \
+                mock.patch.object(index_knowledge, "chunk_local_docs", return_value=[]), \
+                mock.patch.object(index_knowledge, "BLOG_URLS", ["https://x/blogs/a/"]), \
+                mock.patch.object(index_knowledge, "SUPERSEDED_SOURCES", []), \
+                mock.patch("requests.get", side_effect=OSError("404 Client Error")):
+            with self.assertRaises(SystemExit) as cm:
+                index_knowledge.main()
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("Error: 0 chunks (--strict)", out.getvalue())
 
 
 if __name__ == "__main__":

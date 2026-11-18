@@ -24,8 +24,9 @@ Usage:
                                                 # Index a saved corpus snapshot
                                                 # (s3:// URI or local path) instead
                                                 # of cloning and fetching
-  python3 index-knowledge.py --strict           # Fail on a failed blog fetch, a
-                                                # missing docs path, or 0 chunks
+  python3 index-knowledge.py --strict           # Fail on a missing docs path or
+                                                # 0 chunks. A failed blog fetch
+                                                # is a warning in every mode
 
 Requires: pip install opensearch-py httpx gitpython requests beautifulsoup4
 """
@@ -325,9 +326,11 @@ def clone_and_chunk(source: dict, tmpdir: str, strict: bool = False) -> list[dic
     return chunks
 
 
-def fetch_blogs(strict: bool = False) -> list[dict]:
+def fetch_blogs() -> list[dict]:
     """Fetch AWS blog posts and chunk them, skipping SUPERSEDED_SOURCES.
-    With strict, a failed fetch raises instead of being skipped."""
+    A post that fails to load (for example a 404 after it was removed) is
+    skipped with a warning. It never fails the run, so one dead link cannot
+    stop the central prep; the run fails only when the corpus is empty."""
     import requests
     from bs4 import BeautifulSoup
 
@@ -339,6 +342,7 @@ def fetch_blogs(strict: bool = False) -> list[dict]:
 
     chunks = []
     skipped = 0
+    failed = []
     for url in BLOG_URLS:
         if url in superseded:
             slug = url.rstrip("/").split("/")[-1]
@@ -365,9 +369,13 @@ def fetch_blogs(strict: bool = False) -> list[dict]:
             print(f"    {slug}: {len(blog_chunks)} chunks")
         except Exception as e:
             print(f"    Failed: {url} ({e})")
-            if strict:
-                raise
+            failed.append(url)
     print(f"  {skipped} superseded posts skipped (SUPERSEDED_SOURCES)")
+    if failed:
+        print(f"  WARNING: {len(failed)} blog posts could not be fetched and are not in the corpus. "
+              "Remove or replace them in BLOG_URLS:")
+        for url in failed:
+            print(f"    {url}")
     return chunks
 
 
@@ -574,7 +582,8 @@ def main():
     #                running cluster or embedding service.
     export_s3 = "--export-s3" in sys.argv or "--export-only" in sys.argv
     export_only = "--export-only" in sys.argv
-    # --strict: a failed blog fetch, a missing docs path or 0 chunks fails the run.
+    # --strict: a missing docs path or 0 chunks fails the run. A failed blog
+    # fetch is only a warning (fetch_blogs), so a dead link never fails it.
     strict = "--strict" in sys.argv
     # --from-corpus=<s3://bucket/key | path>: index a saved JSONL snapshot
     # instead of cloning repos and fetching blogs.
@@ -650,7 +659,7 @@ def main():
 
         if corpus_chunks is None and (not source_filter or source_filter == "aws-blog"):
             print("\n--- AWS Blog Posts ---")
-            blog_chunks = fetch_blogs(strict=strict)
+            blog_chunks = fetch_blogs()
             all_chunks.extend(blog_chunks)
             print(f"  {len(blog_chunks)} chunks from blogs")
 
