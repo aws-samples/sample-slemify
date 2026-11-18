@@ -1,6 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 """Run buildspec command blocks with stub docker, aws, crane and sleep."""
+import json
 import os
 import unittest
 
@@ -102,6 +103,51 @@ esac
         r = self.s.run(self.cmd, **self.env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(len(self.s.calls("crane index append")), 7)
+
+
+class ModeGuardTest(unittest.TestCase):
+    def setUp(self):
+        self.s = StubEnv()
+        self.addCleanup(self.s.cleanup)
+        self.s.stub("aws", "echo build:1")
+        self.cmd = find_command(load_buildspec("buildspec.yaml"), "pre_build", "IMAGE_BUILD_AMD64")
+        self.env = {"IMAGE_BUILD_AMD64": "a", "IMAGE_BUILD_ARM64": "b"}
+
+    def start(self, mode):
+        with open(os.path.join(self.s.tmp, "central-mode"), "w") as f:
+            f.write(mode + "\n")
+        self.assertEqual(self.s.run(self.cmd, **self.env).returncode, 0)
+        return self.s.calls("aws codebuild start-build")
+
+    def test_central_mode_starts_no_image_build(self):
+        self.assertEqual(self.start("central"), [])
+
+    def test_today_starts_both(self):
+        self.assertEqual(len(self.start("today")), 2)
+
+
+class PrepFailedMarkerTest(unittest.TestCase):
+    def test_failed_json(self):
+        from tests._stubs import AWS_FAKE
+        s = StubEnv()
+        self.addCleanup(s.cleanup)
+        s.stub_py("aws", AWS_FAKE)
+        with open(os.path.join(s.tmp, "prep-prefix"), "w") as f:
+            f.write("releases/v0.3.0/abc/\n")
+        with open(os.path.join(s.tmp, "prep-step"), "w") as f:
+            f.write("corpus\n")
+        cmd = load_buildspec("buildspec-prep.yaml")["phases"]["post_build"]["commands"][0]
+        r = s.run(cmd, CODEBUILD_BUILD_SUCCEEDING=0, MODEL_BUCKET="central", RELEASE_TAG="v0.3.0",
+                  CODEBUILD_RESOLVED_SOURCE_VERSION="abc", CODEBUILD_BUILD_ID="p:1",
+                  CODEBUILD_BUILD_URL="https://example.com/build")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        failed = json.loads(s.s3_get("central", "releases/v0.3.0/abc/failed.json"))
+        self.assertEqual(failed, {"version": 1, "tag": "v0.3.0", "commit": "abc", "step": "corpus",
+                                  "buildId": "p:1", "logUrl": "https://example.com/build"})
+        # A successful build writes nothing.
+        os.remove(s.path("s3", "central", "releases/v0.3.0/abc/failed.json"))
+        s.run(cmd, CODEBUILD_BUILD_SUCCEEDING=1, MODEL_BUCKET="central")
+        self.assertIsNone(s.s3_get("central", "releases/v0.3.0/abc/failed.json"))
 
 
 class PinTest(unittest.TestCase):

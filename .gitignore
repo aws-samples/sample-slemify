@@ -11,6 +11,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!examples/k8s-autoscaling/workshop/infrastructure/lib/
 lib64/
 parts/
 sdist/

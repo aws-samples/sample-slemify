@@ -23,10 +23,31 @@
 #                          GGUF (buildspec-gguf.yaml); empty to skip
 #   SLEMIFY_VERSION        Slemify release the seed runs (without the v); empty
 #                          skips the Slemify projects in the seed
+#   SLEMIFY_SHA256         sha256 of that release's linux_amd64 tarball; required
+#                          when SLEMIFY_VERSION is set
+#   CENTRAL_PARAM          SSM parameter the central grant writes (/slemify/central);
+#                          empty outside Workshop Studio
+#   RELEASE_TAG            the tag this build was cloned at (RepoRef)
+#   CENTRAL_WAIT_MINUTES, CENTRAL_COPY_MINUTES, CENTRAL_TAIL_MINUTES
+#                          central-mode deadlines from the build start
+#                          (defaults 90, 100 and 140)
+#
+# Central mode: when CENTRAL_PARAM names a parameter that exists, the event's
+# central account has prepared the images, the knowledge corpus and the
+# analyst GGUF once (buildspec-prep.yaml). This build waits for the markers
+# under releases/<RELEASE_TAG>/<commit>/ in the central bucket, copies the
+# images and the corpus before the full apply, and copies the GGUF in the
+# tail. lib/central.sh has the helpers.
+#
+# Today's path: when the parameter does not exist, this build starts its own
+# image and GGUF builds as before. A parameter that exists but is invalid
+# fails the build before the signal.
 
 version: 0.2
 
 env:
+  # lib/central.sh is a bash library.
+  shell: bash
   variables:
     TERRAFORM_VERSION: "1.16.3"
     # From https://releases.hashicorp.com/terraform/1.16.3/terraform_1.16.3_SHA256SUMS (linux_amd64)
@@ -55,6 +76,8 @@ phases:
           echo "SLEMIFY_SHA256 is empty: this template predates the pinned slemify download"
           exit 1
         fi
+      # Central mode or today's path; written to /tmp/central-mode.
+      - . "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/central.sh" && decide_mode
       # Every download is retried and checked against its pinned sha256.
       - echo "Installing terraform ${TERRAFORM_VERSION}"
       - curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
@@ -84,8 +107,9 @@ phases:
   pre_build:
     commands:
       # Kick off the image builds first; they run while Terraform builds the cluster.
+      # Central mode copies the images instead, so nothing starts here.
       - |
-        if [ -z "${DEMO_IMAGE:-}" ] && [ -n "${IMAGE_BUILD_AMD64:-}" ] && [ -n "${IMAGE_BUILD_ARM64:-}" ]; then
+        if [ "$(cat /tmp/central-mode)" = today ] && [ -z "${DEMO_IMAGE:-}" ] && [ -n "${IMAGE_BUILD_AMD64:-}" ] && [ -n "${IMAGE_BUILD_ARM64:-}" ]; then
           AMD_ID=$(aws codebuild start-build --project-name "${IMAGE_BUILD_AMD64}" --query 'build.id' --output text)
           ARM_ID=$(aws codebuild start-build --project-name "${IMAGE_BUILD_ARM64}" --query 'build.id' --output text)
           echo "image builds started: ${AMD_ID} ${ARM_ID}"
@@ -160,6 +184,12 @@ phases:
         else
           echo "EKS apply failed:"; tail -n 60 /tmp/eks-apply.log; exit 1
         fi
+      # Central mode: wait for the prep build's images-ready.json, then copy the
+      # eight images and the corpus into this account and write /tmp/images.env.
+      - |
+        if [ "$(cat /tmp/central-mode)" = central ]; then
+          . "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/central.sh" && central_copy_phase || exit 1
+        fi
       # Everything except the Mountpoint S3 CSI addon. The addon takes 8 to 9
       # minutes to report ACTIVE (its pods cannot schedule until the first node
       # exists) and nothing in the seed uses it; only module 3's analyst does,
@@ -227,19 +257,21 @@ phases:
         fi
       # --- Tail: module 3 assets. Failures here fail the build, not the event. ---
       - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/terraform"
-      - echo "Applying the Mountpoint S3 CSI addon (module 3)"
       - |
-        max_retry=3
-        counter=1
-        until terraform apply -input=false -auto-approve -var enable_s3_csi_addon=true
-        do
-          [ "$counter" -eq "$max_retry" ] && { echo "S3 CSI addon apply failed after ${max_retry} attempts; repair with: make check-infra"; exit 1; }
-          echo "addon apply failed, retrying in 30s (attempt $counter of $max_retry)"
-          sleep 30
-          counter=$((counter + 1))
-        done
+        if [ "$(cat /tmp/central-mode)" = today ]; then
+          echo "Applying the Mountpoint S3 CSI addon (module 3)"
+          max_retry=3
+          counter=1
+          until terraform apply -input=false -auto-approve -var enable_s3_csi_addon=true
+          do
+            [ "$counter" -eq "$max_retry" ] && { echo "S3 CSI addon apply failed after ${max_retry} attempts; repair with: make check-infra"; exit 1; }
+            echo "addon apply failed, retrying in 30s (attempt $counter of $max_retry)"
+            sleep 30
+            counter=$((counter + 1))
+          done
+        fi
       - |
-        if [ -f /tmp/gguf-build ]; then
+        if [ "$(cat /tmp/central-mode)" = today ] && [ -f /tmp/gguf-build ]; then
           GGUF_ID=$(cat /tmp/gguf-build)
           echo "Waiting for the gguf build ${GGUF_ID}"
           while true; do
@@ -251,6 +283,11 @@ phases:
               *) echo "gguf build failed: ${STATUS}; repair with: make check-infra"; exit 1 ;;
             esac
           done
+        fi
+      # Central mode: copy the GGUF in the background while the addon applies.
+      - |
+        if [ "$(cat /tmp/central-mode)" = central ]; then
+          . "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/central.sh" && central_tail || exit 1
         fi
   post_build:
     commands:

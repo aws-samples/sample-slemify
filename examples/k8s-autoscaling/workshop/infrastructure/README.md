@@ -15,6 +15,9 @@ infrastructure/
                          CloudFormation READY, then finish the addon and wait for the conversion
   buildspec-images.yaml  build the six images for one architecture and push to the account's ECR
   buildspec-gguf.yaml    convert the analyst base model to GGUF on the 2XLARGE fleet, upload to the bucket
+  buildspec-prep.yaml    central account: prepare images, corpus and GGUF once for every team
+  lib/central.sh         central-mode helpers (mode, marker wait, copies)
+  lib/prep.sh            the central prep build's steps
   terraform/             VPC, EKS Auto Mode cluster, addons, model bucket, IAM
   seed/
     seed.sh              NodePools, pre-warm, OpenSearch, Titan index, example data, triage data stage,
@@ -106,6 +109,51 @@ The IDE role has `codebuild:StartBuild` on the two projects for this. Without
 the addon, `slemify deploy` falls back to downloading the model into the pod
 (slower start, same answers); without the GGUF, the analyst cannot deploy
 until the repair finishes.
+
+## Central mode
+
+In a Workshop Studio event with the central stack, the central account
+prepares the images, the knowledge corpus and the analyst GGUF once, and each
+team build copies them. `buildspec-prep.yaml` runs `lib/prep.sh` in the
+central account. The team side uses the helpers in `lib/central.sh`.
+
+- The parameter. The central grant function writes `/slemify/central` into
+  each team account: a JSON value with `version`, `account`, `region`,
+  `bucket` and `registry`. `buildspec.yaml` reads it in `install` (the name
+  comes from `CENTRAL_PARAM`) and writes `central` or `today` to
+  `/tmp/central-mode`. A parameter that exists but fails validation, or names
+  a bucket that no longer exists, fails the build before the signal.
+- The markers. The prep build writes everything under
+  `releases/<tag>/<commit>/` in the central bucket, where `<tag>` is
+  `RELEASE_TAG` and `<commit>` is the resolved 40-character commit.
+  `images-ready.json` lists the eight image digests and the corpus size.
+  `ready.json` gives the GGUF size and is written last. `failed.json` names
+  the failed step and the log link. A team accepts a marker only when its
+  tag and commit match the team's own.
+- The deadlines, counted from the start of the team build:
+  `CENTRAL_WAIT_MINUTES` (default 90) for `images-ready.json`,
+  `CENTRAL_COPY_MINUTES` (100) for the image and corpus copies, and
+  `CENTRAL_TAIL_MINUTES` (140) for the GGUF copy after the signal.
+- After the copies, the team build writes `/slemify/mirror` (the team's own
+  `slemify` registry), so module 3 pulls llama.cpp from the account's ECR.
+- Today's path. When `/slemify/central` does not exist, the team build starts
+  its own image and GGUF builds as before, and deletes any `/slemify/mirror`
+  left by an earlier event.
+
+Operator reruns, from the central account:
+
+```bash
+# Same tag and commit: skips every step that already exists.
+aws codebuild start-build --project-name slemify-prep
+
+# Rebuild everything at the same commit.
+aws codebuild start-build --project-name slemify-prep \
+  --environment-variables-override name=FORCE,value=1,type=PLAINTEXT
+
+# Another tag or commit. The output goes to its own releases/<tag>/<commit>/.
+aws codebuild start-build --project-name slemify-prep --source-version <ref> \
+  --environment-variables-override name=RELEASE_TAG,value=<tag>,type=PLAINTEXT
+```
 
 ## IDE port-forwards
 

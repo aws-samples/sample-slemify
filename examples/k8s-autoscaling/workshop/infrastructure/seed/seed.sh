@@ -204,10 +204,16 @@ else
   # Give the port-forward a moment to establish. on_exit kills it if the
   # indexer fails.
   sleep 4
+  # In central mode the build copied the prep corpus snapshot into the model
+  # bucket, so this index and the module 2 tuned index hold the same chunks.
+  INDEX_ARGS=(--embedder=bedrock)
+  if [ -n "${KNOWLEDGE_CORPUS:-}" ]; then
+    INDEX_ARGS+=(--from-corpus="${KNOWLEDGE_CORPUS}")
+  fi
   BEDROCK_REGION="${BEDROCK_REGION}" \
   BEDROCK_EMBED_MODEL="${BEDROCK_EMBED_MODEL}" \
   BEDROCK_INDEX_NAME="${BEDROCK_INDEX_NAME}" \
-    python3 "${DEMO_DIR}/scripts/index-knowledge.py" --embedder=bedrock
+    python3 "${DEMO_DIR}/scripts/index-knowledge.py" "${INDEX_ARGS[@]}"
   kill "${PF_OS_PID}" 2>/dev/null || true
   PF_OS_PID=""
 fi
