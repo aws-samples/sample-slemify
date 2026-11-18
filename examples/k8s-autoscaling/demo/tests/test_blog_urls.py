@@ -1,5 +1,5 @@
 """scripts/check-blog-urls.py: BLOG_URLS has no duplicate slugs, and a dead
-URL fails the check that the release workflow runs."""
+URL fails the strict check and only warns in the release workflow."""
 import io
 import unittest
 import urllib.error
@@ -50,6 +50,24 @@ class BlogUrlTest(unittest.TestCase):
         with mock.patch("sys.stdout", out):
             self.assertEqual(check.main(opener=_opener({dead}), sleep=lambda s: None), 1)
         self.assertIn(f"404 {dead}", out.getvalue())
+
+    def test_dead_url_only_warns_in_warn_only_mode(self):
+        urls, superseded = check.load_lists()
+        dead = next(u for u in urls if u not in superseded)
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            rc = check.main(opener=_opener({dead}), sleep=lambda s: None, warn_only=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("WARNING: blog URL check found problems", out.getvalue())
+        self.assertIn(f"404 {dead}", out.getvalue())
+
+    def test_release_runs_the_check_as_warning_only(self):
+        import os
+        wf = os.path.join(_path.DEMO_DIR, "..", "..", "..", ".github", "workflows", "release.yaml")
+        text = open(wf, encoding="utf-8").read()
+        step = text[text.index("check-blog-urls.py") - 300:text.index("check-blog-urls.py") + 40]
+        self.assertIn("check-blog-urls.py --warn-only", text)
+        self.assertIn("continue-on-error: true", step)
 
     def test_server_error_is_retried(self):
         calls = []

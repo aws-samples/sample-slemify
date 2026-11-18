@@ -188,6 +188,8 @@ CORPUS_KEY="${PREFIX}${CENTRAL_CORPUS_KEY}"
 if skip_allowed && s3_exists "$MODEL_BUCKET" "$CORPUS_KEY"; then
   echo "corpus exists; skipping the export"
 else
+  # --strict fails on a missing docs path or an empty corpus. A blog post that
+  # fails to load is skipped with a WARNING line listing it, and the prep goes on.
   python3 "${CODEBUILD_SRC_DIR}/examples/k8s-autoscaling/demo/scripts/index-knowledge.py" \
     --export-only --strict --s3-bucket="${MODEL_BUCKET}" --s3-key="${CORPUS_KEY}"
 fi

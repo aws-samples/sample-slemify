@@ -1,11 +1,14 @@
 """Check that every blog post the knowledge corpus fetches still loads.
 
-The central prep build exports the corpus with index-knowledge.py --strict,
-so one dead URL in BLOG_URLS fails the prep and every team waits for markers
-that never come. The release workflow runs this before it publishes a tag.
+A dead URL in BLOG_URLS does not fail the corpus export (index-knowledge.py
+skips it with a warning), but its post is then missing from the corpus. The
+release workflow runs this with --warn-only so a dead link shows up in the
+release log without blocking the release.
 
   python3 check-blog-urls.py            exit 1 if a URL does not return 200
                                         or two URLs share a slug
+  python3 check-blog-urls.py --warn-only
+                                        print the same report, always exit 0
 
 Reads BLOG_URLS and SUPERSEDED_SOURCES from index-knowledge.py without
 importing it, so it needs only the standard library. Superseded posts are not
@@ -71,7 +74,7 @@ def status(url, opener=urllib.request.urlopen, sleep=time.sleep):
     return last
 
 
-def main(opener=urllib.request.urlopen, sleep=time.sleep):
+def main(opener=urllib.request.urlopen, sleep=time.sleep, warn_only=False):
     urls, superseded = load_lists()
     bad = []
     for s in duplicate_slugs(urls):
@@ -84,13 +87,14 @@ def main(opener=urllib.request.urlopen, sleep=time.sleep):
         if code != 200:
             bad.append(f"{code} {url}")
     if bad:
-        print("Blog URL check failed. Remove or replace these entries in BLOG_URLS:")
+        label = "WARNING: blog URL check found problems" if warn_only else "Blog URL check failed"
+        print(f"{label}. Remove or replace these entries in BLOG_URLS:")
         for b in bad:
             print(f"  {b}")
-        return 1
+        return 0 if warn_only else 1
     print(f"all {len(urls) - len(superseded & set(urls))} fetched blog URLs return 200")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(warn_only="--warn-only" in sys.argv[1:]))
