@@ -3,6 +3,7 @@
 """Run buildspec command blocks with stub docker, aws, crane and sleep."""
 import json
 import os
+import re
 import unittest
 
 from tests._stubs import INFRA, StubEnv, find_command, load_buildspec, phase_commands
@@ -251,7 +252,9 @@ class PrepFailedMarkerTest(unittest.TestCase):
 
 
 class PinTest(unittest.TestCase):
-    PINNED = ("buildspec.yaml", "buildspec-prep.yaml")
+    PINNED = ("buildspec.yaml", "buildspec-prep.yaml", "buildspec-destroy.yaml")
+    # Shell files outside the buildspecs that download tools.
+    SCRIPTS = ("lib/prep.sh",)
 
     def specs(self):
         for name in self.PINNED:
@@ -267,14 +270,43 @@ class PinTest(unittest.TestCase):
                     self.assertRegex(value, r"^[0-9a-f]{64}$", "%s %s" % (name, key))
         self.assertGreaterEqual(seen, 4)
 
-    def test_downloads_retry_and_no_install_script(self):
-        for name, _ in self.specs():
+    def commands(self):
+        """Each file's non-comment lines, with backslash continuations joined
+        so one command is one line."""
+        for name in self.PINNED + self.SCRIPTS:
             with open(os.path.join(INFRA, name)) as f:
-                text = f.read()
-            self.assertNotIn("get-helm-3", text, name)
-            for line in text.splitlines():
-                if "curl " in line and not line.lstrip().startswith("#"):
+                text = f.read().replace("\\\n", " ")
+            yield name, [l for l in text.splitlines() if not l.lstrip().startswith("#")]
+
+    def test_downloads_retry_and_no_install_script(self):
+        for name, lines in self.commands():
+            self.assertNotIn("get-helm-3", "\n".join(lines), name)
+            for line in lines:
+                if "curl " in line:
                     self.assertIn("--retry", line, "%s: %s" % (name, line.strip()))
+
+    def test_downloads_are_checked(self):
+        # A download writes to a file with -o, and a later sha256sum -c line
+        # names that file. The stack signals (curl -X PUT) are not downloads.
+        downloads = 0
+        for name, lines in self.commands():
+            for line in lines:
+                if "curl " not in line or "-X PUT" in line:
+                    continue
+                m = re.search(r"\s-o\s+(\S+)", line)
+                self.assertIsNotNone(m, "%s: download without -o: %s" % (name, line.strip()))
+                path = m.group(1).strip("\"'")
+                downloads += 1
+                self.assertTrue(any("sha256sum -c" in l and path in l for l in lines),
+                                "%s: no sha256sum -c for %s" % (name, path))
+        # buildspec.yaml 5, buildspec-destroy.yaml 2, lib/prep.sh 1.
+        self.assertGreaterEqual(downloads, 8)
+
+    def test_destroy_pins_match_the_build(self):
+        build = load_buildspec("buildspec.yaml")["env"]["variables"]
+        destroy = load_buildspec("buildspec-destroy.yaml")["env"]["variables"]
+        for key in ("TERRAFORM_VERSION", "TERRAFORM_SHA256", "KUBECTL_VERSION", "KUBECTL_SHA256"):
+            self.assertEqual(destroy[key], build[key], key)
 
 
 class ChecksumGateTest(unittest.TestCase):

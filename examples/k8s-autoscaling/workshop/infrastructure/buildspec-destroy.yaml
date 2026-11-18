@@ -27,20 +27,29 @@
 version: 0.2
 env:
   variables:
+    # Same versions and pins as buildspec.yaml.
     TERRAFORM_VERSION: "1.16.3"
+    # From https://releases.hashicorp.com/terraform/1.16.3/terraform_1.16.3_SHA256SUMS (linux_amd64)
+    TERRAFORM_SHA256: "093b6ae9a2228af5029c41606bc96eb583553528aad1bfe7e0b4d62fc91e25d8"
     KUBECTL_VERSION: "v1.36.4"
+    # From https://dl.k8s.io/release/v1.36.4/bin/linux/amd64/kubectl.sha256
+    KUBECTL_SHA256: "8b8f088da2dab964f853b38464033b1be15ede2839eca751482357c45abdd05a"
     INFRA_DIR: "examples/k8s-autoscaling/workshop/infrastructure"
     # seed/slm-nodepools.yaml and demo/scenarios/*.yaml
     NODEPOOLS: "slemify-slm slemify-slm-previous slemify-slm-fallback demo-payments demo-spot-misconfigured"
 phases:
   install:
     commands:
+      # Every download is retried and checked against its pinned sha256.
       - echo "Installing terraform ${TERRAFORM_VERSION}"
-      - curl -fsSL -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+      - curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+      - echo "${TERRAFORM_SHA256}  /tmp/terraform.zip" | sha256sum -c -
       - unzip -q -o /tmp/terraform.zip -d /usr/local/bin && rm /tmp/terraform.zip
       - terraform version
-      - curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl
-      - pip3 install --quiet boto3
+      - curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+      - echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
+      - install -m 0755 /tmp/kubectl /usr/local/bin/kubectl && rm /tmp/kubectl
+      - pip3 install --quiet --retries 10 --timeout 60 boto3
   pre_build:
     commands:
       - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/terraform"
