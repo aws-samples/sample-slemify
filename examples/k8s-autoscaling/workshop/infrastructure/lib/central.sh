@@ -346,9 +346,13 @@ ensure_repo() {
 
 # copy_object_checked <src uri> <bucket> <key> <bytes> <deadline epoch>
 # Server-side copy under retry, then checks the copy's size.
+# --copy-props metadata-directive: for a multipart copy (over 8 MB) the CLI
+# default also reads the source tags with GetObjectTagging, which the central
+# bucket policy does not grant, so the GGUF copy would be denied.
+# --only-show-errors keeps the S3 error in the log; --quiet hides it.
 copy_object_checked() {
   local size
-  retry 5 "$5" aws s3 cp --quiet "$1" "s3://$2/$3" || return 1
+  retry 5 "$5" aws s3 cp --only-show-errors --copy-props metadata-directive "$1" "s3://$2/$3" || return 1
   size=$(s3_size "$2" "$3" "$5") || return 1
   if [ "$size" != "$4" ]; then
     echo "s3://$2/$3 has ${size} bytes, the marker says $4"

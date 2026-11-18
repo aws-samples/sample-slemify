@@ -114,7 +114,7 @@ if svc == "s3" and op in ("cp", "rm"):
     for a in args[2:]:
         if skip:
             skip = False
-        elif a == "--content-type":
+        elif a in ("--content-type", "--copy-props"):
             skip = True
         elif not a.startswith("--"):
             pos.append(a)
@@ -125,6 +125,13 @@ if svc == "s3" and op in ("cp", "rm"):
     src, dst = pos[0], pos[1]
     if src.startswith("s3://") and dst.startswith("s3://") and read("s3-copy-fail") is not None:
         fail("copy failed", 1)
+    # The real CLI reads the source tags on a multipart copy unless
+    # --copy-props is none or metadata-directive. The central bucket policy
+    # grants s3:GetObject only, so a bucket-to-bucket copy of a large object
+    # is denied. Model that for every bucket-to-bucket copy.
+    if src.startswith("s3://") and dst.startswith("s3://") \
+            and opt("--copy-props") not in ("none", "metadata-directive"):
+        fail("An error occurred (AccessDenied) when calling the GetObjectTagging operation: Access Denied", 1)
     srcp = s3path(src) if src.startswith("s3://") else src
     if not os.path.exists(srcp):
         fail("An error occurred (404) when calling the HeadObject operation: Key not found", 1)

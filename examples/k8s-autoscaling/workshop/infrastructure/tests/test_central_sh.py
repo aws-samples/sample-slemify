@@ -229,6 +229,22 @@ class CentralShTest(unittest.TestCase):
         self.assertEqual(self.s.s3_get("team-models", "models/k8s-autoscaling-analyst/model-q4_k_m.gguf"), "GGUF")
         self.assertEqual(len(self.s.calls("terraform apply")), 1)
 
+    def test_bucket_copies_do_not_read_source_tags(self):
+        # The central bucket policy grants s3:GetObject only. A multipart copy
+        # with the CLI default --copy-props reads the source tags and is
+        # denied (the 18.5 GB GGUF in the test event).
+        self.central_state()
+        self.s.s3_put(PARAM["bucket"], PREFIX + "models/k8s-autoscaling-analyst/model-q4_k_m.gguf", "GGUF")
+        self.s.s3_put(PARAM["bucket"], PREFIX + "ready.json", json.dumps(
+            {"version": 1, "tag": TAG, "commit": COMMIT, "gguf": {"bytes": 4}}))
+        r = self.sh("central_tail")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        copies = [c for c in self.s.calls("aws s3 cp") if c.count("s3://") == 2]
+        self.assertTrue(copies)
+        for c in copies:
+            self.assertIn("--copy-props metadata-directive", c)
+            self.assertNotIn("--quiet", c)
+
     def test_tail_fails_when_addon_fails(self):
         self.central_state()
         self.s.s3_put(PARAM["bucket"], PREFIX + "models/k8s-autoscaling-analyst/model-q4_k_m.gguf", "GGUF")
