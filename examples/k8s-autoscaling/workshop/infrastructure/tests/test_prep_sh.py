@@ -105,6 +105,30 @@ class PrepShTest(unittest.TestCase):
         self.assertEqual(len(start), 1)
         self.assertGreater(start[0], polls[-1])
 
+    def test_gguf_guard_retries_status_reads(self):
+        self.s.state("gguf-builds", "slemify-prep-gguf:old")
+        self.s.state("fail-list-builds-for-project", "2")
+        self.s.state("fail-get-slemify-prep-gguf_old", "1")
+        r = self.prep()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.s.calls("aws codebuild list-builds-for-project")), 3)
+        self.assertEqual(len(self.s.calls("aws codebuild batch-get-builds --ids slemify-prep-gguf:old")), 2)
+        self.assertEqual(len(self.s.calls("aws codebuild start-build --project-name slemify-prep-gguf")), 1)
+
+    def test_gguf_guard_fails_closed_when_status_is_unavailable(self):
+        for name in ("fail-list-builds-for-project", "fail-get-slemify-prep-gguf_old"):
+            with self.subTest(name=name):
+                self.s.state("gguf-builds", "slemify-prep-gguf:old")
+                self.s.state(name, "always")
+                r = self.prep()
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertEqual(self.s.calls("aws codebuild start-build --project-name slemify-prep-gguf"), [])
+                self.assertIsNone(self.s.s3_get(BUCKET, PREFIX + "ready.json"))
+                self.assertIn("status could not be read; not starting another build", r.stdout)
+                with open(os.path.join(self.s.tmp, "prep-step")) as f:
+                    self.assertEqual(f.read().strip(), "wait-gguf")
+                os.remove(self.s.path("state", name))
+
     def test_child_failure_fails_and_writes_no_marker(self):
         self.s.state("status-slemify-prep-images-arm64_1", "FAILED")
         r = self.prep()

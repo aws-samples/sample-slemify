@@ -77,25 +77,39 @@ wait_build() {
   done
 }
 
-# gguf_in_progress: 0 when a recent build of GGUF_PROJECT is IN_PROGRESS.
-gguf_in_progress() {
+# gguf_state: prints "active" when a recent build of GGUF_PROJECT is
+# IN_PROGRESS and "none" when no build is. Returns 1 when the state cannot be
+# read after retries, so the caller never starts a second build on an error.
+gguf_state() {
   local ids statuses
-  ids=$(aws codebuild list-builds-for-project --project-name "$GGUF_PROJECT" --query 'ids[0:5]' --output text 2>/dev/null) || return 1
-  [ -n "$ids" ] && [ "$ids" != None ] || return 1
+  ids=$(retry 5 0 aws codebuild list-builds-for-project --project-name "$GGUF_PROJECT" \
+    --query 'ids[0:5]' --output text) || return 1
+  if [ -z "$ids" ] || [ "$ids" = None ]; then
+    echo none
+    return 0
+  fi
   # shellcheck disable=SC2086
-  statuses=$(aws codebuild batch-get-builds --ids $ids --query 'builds[].buildStatus' --output text 2>/dev/null) || return 1
-  case "$statuses" in *IN_PROGRESS*) return 0 ;; esac
-  return 1
+  statuses=$(retry 5 0 aws codebuild batch-get-builds --ids $ids \
+    --query 'builds[].buildStatus' --output text) || return 1
+  case "$statuses" in
+    *IN_PROGRESS*) echo active ;;
+    *) echo none ;;
+  esac
 }
 
 # gguf_track: one GGUF build at a time, then a size check on the key.
 gguf_track() {
-  local key="${PREFIX}${CENTRAL_GGUF_KEY}" id size
+  local key="${PREFIX}${CENTRAL_GGUF_KEY}" id size state
   if skip_allowed && s3_exists "$MODEL_BUCKET" "$key"; then
     echo "GGUF exists; skipping the conversion"
     return 0
   fi
-  while gguf_in_progress; do
+  while :; do
+    if ! state=$(gguf_state); then
+      echo "the ${GGUF_PROJECT} build status could not be read; not starting another build"
+      return 1
+    fi
+    [ "$state" = active ] || break
     echo "another ${GGUF_PROJECT} build is running; waiting for it"
     sleep 30
   done

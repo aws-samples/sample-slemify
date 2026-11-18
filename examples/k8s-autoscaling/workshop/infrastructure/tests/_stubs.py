@@ -50,6 +50,8 @@ REPOS = ["slemify/k8s-autoscaling-orchestrator", "slemify/k8s-autoscaling-rerank
 #   gguf-builds         ids list-builds-for-project prints
 #   inprogress-<id>     how many more times batch-get-builds reports IN_PROGRESS
 #   status-<id>         final status (default SUCCEEDED)
+#   fail-<op>           how many more times codebuild <op> fails ("always": every time)
+#   fail-get-<id>       the same for a batch-get-builds call that includes <id>
 #   s3-copy-fail        every S3-to-S3 copy fails
 # A start-build that passes KEY_PREFIX (the GGUF build) writes the GGUF object.
 AWS_FAKE = r'''#!/usr/bin/env python3
@@ -130,6 +132,22 @@ if svc == "s3" and op in ("cp", "rm"):
     os.makedirs(os.path.dirname(dstp) or ".", exist_ok=True)
     shutil.copyfile(srcp, dstp)
     sys.exit(0)
+def fail_from(name):
+    left = read(name)
+    if left is None:
+        return
+    if left.strip() != "always":
+        if int(left) <= 0:
+            return
+        with open(os.path.join(st, name), "w") as f:
+            f.write(str(int(left) - 1))
+    fail("An error occurred (ThrottlingException) when calling codebuild " + op)
+if svc == "codebuild":
+    fail_from("fail-" + op)
+    if op == "batch-get-builds":
+        for a in args:
+            if ":" in a and not a.startswith("--"):
+                fail_from("fail-get-" + a.replace(":", "_"))
 if svc == "codebuild" and op == "start-build":
     project = opt("--project-name")
     over = {}
