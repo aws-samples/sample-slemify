@@ -17,6 +17,7 @@
 #   IMAGES_AMD64_PROJECT, IMAGES_ARM64_PROJECT image builds (buildspec-images.yaml)
 #   GGUF_PROJECT                               GGUF conversion (buildspec-gguf.yaml)
 #   FORCE                                      1 to ignore every skip
+#   CRANE_VERSION, CRANE_SHA256                crane release and its sha256 (buildspec-prep.yaml)
 #   CODEBUILD_RESOLVED_SOURCE_VERSION, CODEBUILD_SRC_DIR, CODEBUILD_BUILD_ID, AWS_REGION
 
 set -euo pipefail
@@ -150,6 +151,18 @@ if skip_allowed && s3_exists "$MODEL_BUCKET" "${PREFIX}ready.json"; then
   echo "already prepared: ${PREFIX}ready.json exists (FORCE=1 to rebuild)"
   exit 0
 fi
+
+# Tool setup runs here, after the prefix is known, so a failure still gets a
+# failed.json from post_build. CRANE_VERSION and CRANE_SHA256 come from
+# buildspec-prep.yaml.
+step setup
+curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$CENTRAL_TMP/crane.tgz" \
+  "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+echo "${CRANE_SHA256}  $CENTRAL_TMP/crane.tgz" | sha256sum -c -
+tar -xzf "$CENTRAL_TMP/crane.tgz" -C /usr/local/bin crane
+rm -f "$CENTRAL_TMP/crane.tgz"
+# The corpus export imports these at the top level.
+pip3 install --quiet --retries 10 --timeout 60 opensearch-py httpx gitpython requests beautifulsoup4 boto3
 
 step start-images
 AMD_ID=$(start_images "$IMAGES_AMD64_PROJECT" amd64)

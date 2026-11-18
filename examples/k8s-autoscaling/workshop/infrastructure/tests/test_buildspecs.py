@@ -162,6 +162,64 @@ class ModeFailureTest(unittest.TestCase):
         self.assertEqual(self.s.run(self.check, **self.env).returncode, 0)
 
 
+class InstallFailureSignalTest(unittest.TestCase):
+    """CodeBuild skips build and post_build after a failed install command
+    but still runs install's finally block, which must send FAILURE."""
+
+    URL = "https://example.com/waitcondition"
+
+    def setUp(self):
+        from tests._stubs import AWS_FAKE
+        self.s = StubEnv()
+        self.addCleanup(self.s.cleanup)
+        self.s.stub_py("aws", AWS_FAKE)
+        self.s.stub("curl", "exit 0")
+        self.s.stub("sha256sum", "cat >/dev/null; exit 1")
+        self.spec = load_buildspec("buildspec.yaml")
+        self.env = dict(self.spec["env"]["variables"])
+        self.env.update(CODEBUILD_SRC_DIR=os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(INFRA)))),
+                        CFN_RESPONSE_URL=self.URL, CODEBUILD_BUILD_ID="team:1")
+
+    def run_install(self, **extra):
+        """Run install as CodeBuild does: commands until one fails, then finally."""
+        env = dict(self.env)
+        env.update(extra)
+        install = self.spec["phases"]["install"]
+        failed = False
+        for cmd in install["commands"]:
+            if self.s.run(cmd, **env).returncode != 0:
+                failed = True
+                break
+        for cmd in install["finally"]:
+            self.assertEqual(self.s.run(cmd, **env).returncode, 0)
+        return failed
+
+    def signals(self):
+        return [c for c in self.s.calls("curl") if "-X PUT" in c]
+
+    def test_checksum_mismatch_sends_failure(self):
+        self.assertTrue(self.run_install(SLEMIFY_VERSION=""))
+        [sig] = self.signals()
+        self.assertIn('"Status":"FAILURE"', sig)
+        self.assertIn(self.URL, sig)
+        self.assertTrue(os.path.exists(os.path.join(self.s.tmp, "cfn-signalled")))
+        # post_build, if it ran, would not send a second signal.
+        self.s.run(self.spec["phases"]["post_build"]["commands"][1], **self.env)
+        self.assertEqual(len(self.signals()), 1)
+
+    def test_missing_slemify_sha_sends_failure(self):
+        self.assertTrue(self.run_install(SLEMIFY_VERSION="0.3.0", SLEMIFY_SHA256=""))
+        [sig] = self.signals()
+        self.assertIn('"Status":"FAILURE"', sig)
+
+    def test_completed_install_sends_nothing(self):
+        self.assertEqual(self.spec["phases"]["install"]["commands"][-1], "touch /tmp/install-done")
+        open(os.path.join(self.s.tmp, "install-done"), "w").close()
+        for cmd in self.spec["phases"]["install"]["finally"]:
+            self.assertEqual(self.s.run(cmd, **self.env).returncode, 0)
+        self.assertEqual(self.signals(), [])
+
+
 class PrepFailedMarkerTest(unittest.TestCase):
     def test_failed_json(self):
         from tests._stubs import AWS_FAKE
@@ -172,8 +230,14 @@ class PrepFailedMarkerTest(unittest.TestCase):
             f.write("releases/v0.3.0/abc/\n")
         with open(os.path.join(s.tmp, "prep-step"), "w") as f:
             f.write("corpus\n")
-        cmd = load_buildspec("buildspec-prep.yaml")["phases"]["post_build"]["commands"][0]
+        spec = load_buildspec("buildspec-prep.yaml")
+        # A failed install command would skip post_build; prep.sh does the setup.
+        self.assertNotIn("install", spec["phases"])
+        cmd = spec["phases"]["post_build"]["commands"][0]
+        self.assertIn("retry 5 0 aws s3 cp", cmd)
         r = s.run(cmd, CODEBUILD_BUILD_SUCCEEDING=0, MODEL_BUCKET="central", RELEASE_TAG="v0.3.0",
+                  CODEBUILD_SRC_DIR=os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(INFRA)))),
+                  INFRA_DIR="examples/k8s-autoscaling/workshop/infrastructure",
                   CODEBUILD_RESOLVED_SOURCE_VERSION="abc", CODEBUILD_BUILD_ID="p:1",
                   CODEBUILD_BUILD_URL="https://example.com/build")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

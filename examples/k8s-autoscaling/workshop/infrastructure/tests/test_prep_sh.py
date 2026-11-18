@@ -5,9 +5,10 @@ import json
 import os
 import unittest
 
-from tests._stubs import AWS_FAKE, COMMIT, CRANE_STUB, INFRA, PREFIX, REPOS, TAG, StubEnv
+from tests._stubs import AWS_FAKE, COMMIT, CRANE_STUB, INFRA, PREFIX, REPOS, TAG, StubEnv, load_buildspec
 
 PREP = os.path.join(INFRA, "lib", "prep.sh")
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(INFRA))))
 BUCKET = "central-prep-artifacts"
 GGUF_KEY = PREFIX + "models/k8s-autoscaling-analyst/model-q4_k_m.gguf"
 
@@ -32,6 +33,11 @@ class PrepShTest(unittest.TestCase):
         self.addCleanup(self.s.cleanup)
         self.s.stub_py("aws", AWS_FAKE)
         self.s.stub("crane", CRANE_STUB)
+        # Tool setup: curl fails when $CURL_FAIL is 1, pip3 when $PIP_FAIL is 1.
+        self.s.stub("curl", '[ "${CURL_FAIL:-0}" = 1 ] && exit 22; exit 0')
+        self.s.stub("sha256sum", "cat >/dev/null; exit 0")
+        self.s.stub("tar", "exit 0")
+        self.s.stub("pip3", '[ "${PIP_FAIL:-0}" = 1 ] && exit 1; exit 0')
         src = self.s.path("src")
         scripts = os.path.join(src, "examples/k8s-autoscaling/demo/scripts")
         os.makedirs(scripts)
@@ -43,6 +49,8 @@ class PrepShTest(unittest.TestCase):
             "MODEL_BUCKET": BUCKET, "IMAGES_AMD64_PROJECT": "slemify-prep-images-amd64",
             "IMAGES_ARM64_PROJECT": "slemify-prep-images-arm64", "GGUF_PROJECT": "slemify-prep-gguf",
         }
+        prep_vars = load_buildspec("buildspec-prep.yaml")["env"]["variables"]
+        self.env.update({k: prep_vars[k] for k in ("CRANE_VERSION", "CRANE_SHA256")})
 
     def prep(self, **extra):
         env = dict(self.env)
@@ -104,6 +112,27 @@ class PrepShTest(unittest.TestCase):
         self.assertIsNone(self.s.s3_get(BUCKET, PREFIX + "images-ready.json"))
         with open(os.path.join(self.s.tmp, "prep-step")) as f:
             self.assertEqual(f.read().strip(), "wait-arm64")
+
+    def assert_setup_failure_marker(self, **fail):
+        r = self.prep(**fail)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.s.calls("aws codebuild start-build"), [])
+        # post_build runs after a failed build phase and writes failed.json.
+        cmd = load_buildspec("buildspec-prep.yaml")["phases"]["post_build"]["commands"][0]
+        env = dict(self.env, CODEBUILD_BUILD_SUCCEEDING=0, CODEBUILD_BUILD_URL="https://example.com/build",
+                   CODEBUILD_SRC_DIR=REPO, INFRA_DIR="examples/k8s-autoscaling/workshop/infrastructure")
+        r = self.s.run(cmd, **env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        failed = json.loads(self.s.s3_get(BUCKET, PREFIX + "failed.json"))
+        self.assertEqual(failed["step"], "setup")
+        self.assertEqual(failed["logUrl"], "https://example.com/build")
+
+    def test_crane_setup_failure_writes_failed_json(self):
+        self.assert_setup_failure_marker(CURL_FAIL=1)
+        self.assertEqual(self.s.calls("pip3"), [])
+
+    def test_pip_setup_failure_writes_failed_json(self):
+        self.assert_setup_failure_marker(PIP_FAIL=1)
 
     def test_invalid_tag(self):
         r = self.prep(RELEASE_TAG="bad/tag")

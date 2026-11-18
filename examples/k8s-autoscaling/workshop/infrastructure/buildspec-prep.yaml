@@ -29,13 +29,9 @@ env:
     INFRA_DIR: "examples/k8s-autoscaling/workshop/infrastructure"
 
 phases:
-  install:
-    commands:
-      - curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/crane.tgz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
-      - echo "${CRANE_SHA256}  /tmp/crane.tgz" | sha256sum -c -
-      - tar -xzf /tmp/crane.tgz -C /usr/local/bin crane && rm /tmp/crane.tgz
-      # The corpus export imports these at the top level.
-      - pip3 install --quiet --retries 10 --timeout 60 opensearch-py httpx gitpython requests beautifulsoup4 boto3
+  # No install phase: a failed install command skips post_build, so no
+  # failed.json. prep.sh installs crane and the Python packages itself, after
+  # it has written the release prefix.
   build:
     commands:
       - bash "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/prep.sh"
@@ -55,6 +51,7 @@ phases:
             "buildId": os.environ.get("CODEBUILD_BUILD_ID"),
             "logUrl": os.environ.get("CODEBUILD_BUILD_URL"),
         }))' > /tmp/failed.json
-          aws s3 cp --quiet --content-type application/json /tmp/failed.json "s3://${MODEL_BUCKET}/${PREFIX}failed.json" \
+          . "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/central.sh" \
+            && retry 5 0 aws s3 cp --quiet --content-type application/json /tmp/failed.json "s3://${MODEL_BUCKET}/${PREFIX}failed.json" \
             && echo "wrote ${PREFIX}failed.json (step ${STEP})"
         fi
