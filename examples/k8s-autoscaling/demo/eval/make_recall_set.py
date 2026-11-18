@@ -26,12 +26,12 @@ import random
 import sys
 import time
 
-import boto3
 from opensearchpy import OpenSearch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 from agent import config  # noqa: E402
+from bedrock_region import bedrock_runtime  # noqa: E402
 
 OUT = os.path.join(HERE, "recall-set.jsonl")
 SOURCES = ["karpenter", "keda", "eks-best-practices"]
@@ -119,7 +119,7 @@ def main():
     rng = random.Random(args.seed)
     sample = rng.sample(chunks, min(args.n, len(chunks)))
 
-    br = boto3.client("bedrock-runtime")
+    br = bedrock_runtime()
     rows = []
     for i, c in enumerate(sample, 1):
         q = ask(br, args.model, c)

@@ -204,7 +204,7 @@ else
   # Give the port-forward a moment to establish. on_exit kills it if the
   # indexer fails.
   sleep 4
-  AWS_REGION="${BEDROCK_REGION}" \
+  BEDROCK_REGION="${BEDROCK_REGION}" \
   BEDROCK_EMBED_MODEL="${BEDROCK_EMBED_MODEL}" \
   BEDROCK_INDEX_NAME="${BEDROCK_INDEX_NAME}" \
     python3 "${DEMO_DIR}/scripts/index-knowledge.py" --embedder=bedrock
@@ -271,12 +271,14 @@ kubectl scale deployment/k8s-autoscaling-decision -n "${NAMESPACE}" --replicas=0
 kubectl set env deployment/k8s-autoscaling-orchestrator -n "${NAMESPACE}" \
   AWS_REGION="${BEDROCK_REGION}" \
   AWS_DEFAULT_REGION="${BEDROCK_REGION}" \
+  BEDROCK_REGION="${BEDROCK_REGION}" \
   LLM_MODEL="${LLM_MODEL}" \
   ANALYST_URL="http://k8s-autoscaling-analyst-inference.slemify:8080" \
   TRIAGE="off" EMBED="bedrock" RERANK="off" ANALYST="llm" GATE="off"
 
 kubectl set env deployment/k8s-autoscaling-tools -n "${NAMESPACE}" \
-  AWS_REGION="${BEDROCK_REGION}" AWS_DEFAULT_REGION="${BEDROCK_REGION}"
+  AWS_REGION="${BEDROCK_REGION}" AWS_DEFAULT_REGION="${BEDROCK_REGION}" \
+  BEDROCK_REGION="${BEDROCK_REGION}"
 
 log "Waiting for the orchestrator"
 kubectl rollout status deployment/k8s-autoscaling-orchestrator -n "${NAMESPACE}" --timeout=180s

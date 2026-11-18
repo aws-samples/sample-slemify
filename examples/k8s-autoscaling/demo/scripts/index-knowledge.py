@@ -42,6 +42,9 @@ from git import Repo
 from opensearchpy import OpenSearch
 from opensearchpy.exceptions import ConnectionError as OSConnectionError, ConnectionTimeout
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from bedrock_region import bedrock_runtime  # noqa: E402
+
 # --- Configuration ---
 
 OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:9200")
@@ -329,8 +332,7 @@ def _bedrock_client():
     botocore knows how to retry."""
     global _br_client
     if _br_client is None:
-        _br_client = boto3.client(
-            "bedrock-runtime",
+        _br_client = bedrock_runtime(
             config=Config(retries={"max_attempts": 8, "mode": "adaptive"}, read_timeout=60))
     return _br_client
 

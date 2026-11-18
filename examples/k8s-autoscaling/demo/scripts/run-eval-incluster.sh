@@ -58,6 +58,7 @@ echo "=== Eval Job: $JOB_NAME (image: $IMAGE) ==="
 kubectl create configmap k8s-autoscaling-eval-src -n "$NAMESPACE" \
   --from-file=run_eval.py="$EVAL_DIR/run_eval.py" \
   --from-file=cases.yaml="$EVAL_DIR/cases.yaml" \
+  --from-file=bedrock_region.py="$EVAL_DIR/../bedrock_region.py" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl apply -f - <<EOF
@@ -102,6 +103,8 @@ spec:
             - name: AWS_REGION
               value: "$BEDROCK_REGION"
             - name: AWS_DEFAULT_REGION
+              value: "$BEDROCK_REGION"
+            - name: BEDROCK_REGION
               value: "$BEDROCK_REGION"
             - name: JUDGE_MODEL
               value: "$JUDGE_MODEL"

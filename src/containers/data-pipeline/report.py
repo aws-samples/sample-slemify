@@ -42,6 +42,8 @@ from datetime import datetime, timezone
 import boto3
 from botocore.config import Config
 
+from bedrock_region import bedrock_runtime
+
 BUCKET = os.environ.get("BUCKET", "")
 PROJECT = os.environ.get("PROJECT", "")
 TASK = os.environ.get("TASK", "generation").strip().lower()
@@ -113,7 +115,7 @@ def http_json(path, body=None, timeout=300):
 def bedrock():
     global _bedrock
     if _bedrock is None:
-        _bedrock = boto3.client("bedrock-runtime", config=Config(read_timeout=120, retries={"max_attempts": 6, "mode": "adaptive"}))
+        _bedrock = bedrock_runtime(config=Config(read_timeout=120, retries={"max_attempts": 6, "mode": "adaptive"}))
     return _bedrock
 
 

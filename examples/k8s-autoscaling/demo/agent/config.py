@@ -5,9 +5,10 @@ live here so the rest of the package imports them from one place.
 """
 import os
 
-import boto3
 from botocore.config import Config
 from opensearchpy import OpenSearch
+
+from bedrock_region import bedrock_runtime
 
 # --- Steps: which model fills each role ---
 # Every model-backed step in the agent is a "step". Each step can be filled by
@@ -178,7 +179,7 @@ DEBUG_CONTEXT = bool(os.environ.get("DEBUG_CONTEXT"))
 # SO_KEEPALIVE; the pod sets net.ipv4.tcp_keepalive_time=60 so the probes keep
 # the NAT mapping alive. The timeouts are the backstop if a connection dies
 # anyway: normal Bedrock latency is 1.7 s p50, 3.3 s p99.
-bedrock = boto3.client("bedrock-runtime", config=Config(
+bedrock = bedrock_runtime(config=Config(
     connect_timeout=5,
     read_timeout=15,
     retries={"max_attempts": 3, "mode": "standard"},
