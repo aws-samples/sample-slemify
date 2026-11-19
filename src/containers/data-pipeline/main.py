@@ -34,6 +34,11 @@ logger = logging.getLogger("slemify.data-pipeline")
 
 BATCH_SIZE = 5
 
+# Seed for the chunk sample that picks which documents get questions written
+# for them. A fixed value, so every run on the same corpus mines the same
+# documents and two accounts can compare their retrieval numbers.
+CHUNK_SAMPLE_SEED = 20261119
+
 GENERATION_PROMPT = """You are generating synthetic training data for a Small Language Model.
 
 DOMAIN CONTEXT:
@@ -603,30 +608,39 @@ def _generate_pairs(raw_content, model, endpoint, target_pairs, domain, queries_
 
     # Only process as many chunks as needed to hit the target pair count.
     needed_chunks = min(len(chunks), (target_pairs + queries_per_chunk - 1) // queries_per_chunk)
-    selected = random.sample(chunks, needed_chunks)
+    # Fixed seed, so the same corpus always yields the same chunks in the same
+    # order. Two accounts running this pipeline then mine the same documents
+    # and hold out the same slice of pairs, which is what makes their recall
+    # numbers comparable. The questions themselves still come from a model
+    # call per chunk and are not reproducible.
+    selected = random.Random(CHUNK_SAMPLE_SEED).sample(chunks, needed_chunks)
 
-    pairs = []
+    # Results are collected by selection order, not by completion order, so the
+    # pair order (and with it the train/eval split below) does not depend on
+    # which thread finishes first.
+    per_chunk = [[] for _ in selected]
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = {
             pool.submit(_generate_queries_for_chunk, backend, domain,
-                        c["text"], queries_per_chunk): c
-            for c in selected
+                        c["text"], queries_per_chunk): i
+            for i, c in enumerate(selected)
         }
         done = 0
         for future in as_completed(futures):
-            chunk = futures[future]
+            index = futures[future]
             done += 1
             try:
                 queries = future.result()
             except Exception as e:
                 logger.warning("Query generation failed: %s", e)
                 continue
-            for q in queries:
-                pairs.append({"query": q, "positive": chunk["text"],
-                              "source": chunk.get("source", "")})
+            per_chunk[index] = queries
             if done % 25 == 0:
                 logger.info("  %d/%d chunks processed, %d pairs so far",
-                            done, len(selected), len(pairs))
+                            done, len(selected), sum(len(q) for q in per_chunk))
+
+    pairs = [{"query": q, "positive": chunk["text"], "source": chunk.get("source", "")}
+             for chunk, queries in zip(selected, per_chunk) for q in queries]
 
     # Return both the pairs and the full chunk corpus (used as the retrieval
     # index for eval recall@k).
