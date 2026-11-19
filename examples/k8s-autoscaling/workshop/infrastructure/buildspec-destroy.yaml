@@ -114,29 +114,34 @@ phases:
 
         # 7: the data-pipeline roles. Each carries a Pod Identity trust policy
         # and an inline slemify-data-pipeline policy, so both have to go before
-        # the role does. A role that was never created, or is already gone, is
-        # not an error: a run that stopped before module 1 has none of them.
+        # the role does. Only NoSuchEntity is skipped: a run that stopped
+        # before module 1 created none of these roles. Any other IAM failure,
+        # an expired session or a denied call among them, fails the build, so
+        # the role is not left behind without anyone being told.
         for role in ${DATA_ROLES}; do
-          if ! aws iam get-role --role-name "${role}" >/dev/null 2>&1; then
-            echo "role ${role} not found; nothing to delete"
-            continue
+          if ! err=$(aws iam get-role --role-name "${role}" 2>&1 >/dev/null); then
+            if printf '%s' "${err}" | grep -q 'NoSuchEntity'; then
+              echo "role ${role} not found; nothing to delete"
+              continue
+            fi
+            echo "could not read role ${role}: ${err}" >&2
+            exit 1
           fi
-          for arn in $(aws iam list-attached-role-policies --role-name "${role}" \
-              --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || true); do
-            if [ -n "${arn}" ] && [ "${arn}" != "None" ]; then
-              aws iam detach-role-policy --role-name "${role}" --policy-arn "${arn}" || true
+          attached=$(aws iam list-attached-role-policies --role-name "${role}" \
+            --query 'AttachedPolicies[].PolicyArn' --output text)
+          for arn in ${attached}; do
+            if [ "${arn}" != "None" ]; then
+              aws iam detach-role-policy --role-name "${role}" --policy-arn "${arn}"
             fi
           done
-          for name in $(aws iam list-role-policies --role-name "${role}" \
-              --query 'PolicyNames[]' --output text 2>/dev/null || true); do
-            if [ -n "${name}" ] && [ "${name}" != "None" ]; then
-              aws iam delete-role-policy --role-name "${role}" --policy-name "${name}" || true
+          inline=$(aws iam list-role-policies --role-name "${role}" \
+            --query 'PolicyNames[]' --output text)
+          for name in ${inline}; do
+            if [ "${name}" != "None" ]; then
+              aws iam delete-role-policy --role-name "${role}" --policy-name "${name}"
             fi
           done
-          if aws iam delete-role --role-name "${role}"; then
-            echo "deleted role ${role}"
-          else
-            echo "could not delete role ${role}; delete it by hand"
-          fi
+          aws iam delete-role --role-name "${role}"
+          echo "deleted role ${role}"
         done
         echo "destroy complete; delete the CloudFormation stack next"

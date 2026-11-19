@@ -329,6 +329,27 @@ case "$1 $2" in
 esac
 exit 0
 '''
+# get-role fails for a reason other than a missing role: an expired session.
+# The role may well be there, so this must not be read as "nothing to delete".
+AWS_IAM_EXPIRED = r'''
+case "$1 $2" in
+  "iam get-role")
+    echo "An error occurred (ExpiredTokenException) when calling the GetRole operation" >&2
+    exit 254 ;;
+esac
+exit 0
+'''
+# The role is there and its policies come off, but the role itself does not.
+AWS_IAM_DELETE_DENIED = r'''
+case "$1 $2" in
+  "iam list-attached-role-policies") echo "arn:aws:iam::aws:policy/ReadOnlyAccess" ;;
+  "iam list-role-policies") echo "slemify-data-pipeline" ;;
+  "iam delete-role")
+    echo "An error occurred (AccessDenied) when calling the DeleteRole operation" >&2
+    exit 254 ;;
+esac
+exit 0
+'''
 
 
 class DestroyIamTest(unittest.TestCase):
@@ -383,6 +404,19 @@ class DestroyIamTest(unittest.TestCase):
         for role in self.roles:
             self.assertIn("role %s not found" % role, r.stdout)
         self.assertEqual([c for c in self.s.calls("aws iam") if "delete-role" in c], [])
+
+    def test_an_iam_error_that_is_not_a_missing_role_fails_the_build(self):
+        r = self.run_block(AWS_IAM_EXPIRED)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("destroy complete", r.stdout)
+        self.assertNotIn("not found", r.stdout)
+        self.assertIn("could not read role", r.stdout + r.stderr)
+
+    def test_a_role_that_cannot_be_deleted_fails_the_build(self):
+        r = self.run_block(AWS_IAM_DELETE_DENIED)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("destroy complete", r.stdout)
+        self.assertNotIn("deleted role", r.stdout)
 
     def test_the_roles_go_after_terraform_destroy(self):
         # The cluster's Pod Identity associations reference these roles.
