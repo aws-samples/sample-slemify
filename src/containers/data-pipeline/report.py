@@ -441,17 +441,19 @@ def serving_profile():
     # whole file, so one figure is both ends of the estimate. A
     # mixture-of-experts model reads its active set, so the whole file is a
     # floor (it assumes every byte is read) and the active set is a ceiling (it
-    # assumes the model never reads anything else). The measured rate belongs
-    # between the two, because the model reads the shared weights every token
-    # and changes experts as it goes.
+    # assumes the model never reads anything else). Both ends count bytes
+    # against a bandwidth share, so where a measurement falls between them is
+    # not evidence of which weights were read.
     fraction = active_parameter_fraction(BASE_MODEL)
     active_bytes = round(size * fraction) if size and fraction else None
     floor = round(gbps * 1e9 / size, 1) if gbps and size else None
     ceiling = round(gbps * 1e9 / active_bytes, 1) if gbps and active_bytes else floor
     if active_bytes:
         assumption = (f"bytes per token = the active set, {active_bytes / 1e9:.2f} GB of the {size / 1e9:.2f} GB file, read from "
-                      "the active parameter count in the configured base model id. The floor is the other end of the estimate: "
-                      "it assumes every byte of the file is read per token, which is what a dense model does.")
+                      "the active parameter count in the configured base model id, which may already cover the weights every "
+                      "token reads. The floor is the other end of the estimate: it assumes every byte of the file is read per "
+                      "token, which is what a dense model does. Both ends assume the pod draws its vCPU share of the socket's "
+                      "bandwidth and that decode waits on memory alone.")
     else:
         assumption = ("bytes per token = the whole model file (dense). A mixture-of-experts model reads only its active "
                       "experts per token, so its real ceiling is higher by total/active parameters.")
@@ -468,9 +470,10 @@ def serving_profile():
         frac = round(measured / ceiling, 3)
         profile["ceiling"]["measured_fraction"] = frac
         if floor and ceiling > floor and floor <= measured <= ceiling:
-            profile["ceiling"]["reading"] = ("Measured decode is inside the estimated range. A mixture-of-experts model reads its "
-                                             "active experts and the shared weights per token: more than the active set alone, far "
-                                             "less than the whole file. This is where the number belongs.")
+            profile["ceiling"]["reading"] = ("Measured decode is inside the estimated range, which is as much as a bandwidth "
+                                             "estimate can tell you. It does not show how many bytes the model read per token: "
+                                             "compute time, cache behavior and the assumed bandwidth share move the measured "
+                                             "rate inside the range as well.")
         elif frac > 1:
             profile["ceiling"]["reading"] = ("Measured decode is above the proportional-share estimate. Bandwidth is not "
                                              "partitioned per vCPU: a small pod on an otherwise idle socket draws more than "

@@ -68,6 +68,17 @@ class CeilingTest(unittest.TestCase):
         self.assertIn("inside the estimated range", ceil["reading"])
         self.assertNotIn("well below", ceil["reading"])
 
+    def test_the_range_does_not_say_which_weights_were_read(self):
+        # A rate between two bandwidth figures bounds the rate. It is not
+        # evidence of how many bytes a token read.
+        ceil = profile("Qwen/Qwen3-30B-A3B-Instruct-2507")["ceiling"]
+        for claim in ("active experts and the shared weights", "shared weights per token",
+                      "where the number belongs"):
+            self.assertNotIn(claim, ceil["reading"])
+        self.assertIn("bandwidth", ceil["reading"])
+        # The assumptions the two ends rest on are stated instead.
+        self.assertIn("share", ceil["assumption"])
+
     def test_a_dense_model_keeps_one_figure(self):
         ceil = profile("meta-llama/Llama-3.1-8B-Instruct")["ceiling"]
         self.assertEqual(ceil["bytes_per_token_assumed"], MODEL_BYTES)

@@ -218,7 +218,8 @@ func printGeneration(s *Summary) {
 			// A model that reads only its active set per token has two ends:
 			// the whole file (a floor) and the active set (a ceiling). Print
 			// both, so the measured rate can be read against the range rather
-			// than against a figure for a model this one is not.
+			// than against a figure for a model this one is not. The range
+			// bounds the rate; it does not explain it.
 			fl, hasFloor := num(ceil, "tokens_per_second_floor")
 			band := hasFloor && fl < c
 			if band {
@@ -233,7 +234,7 @@ func printGeneration(s *Summary) {
 				measured := f * c
 				switch {
 				case band && f <= 1 && measured >= fl:
-					fmt.Printf("               measured decode is %.1f tokens/s, inside that range: the model reads its active set and the shared weights per token\n", measured)
+					fmt.Printf("               measured decode is %.1f tokens/s, inside that range; the range counts bytes against a bandwidth share, so it does not show how many bytes each token read\n", measured)
 				case f > 1:
 					fmt.Printf("               measured decode is %.0f%% of the estimate: the estimate is a floor for a pod this size\n", f*100)
 				case f < 0.6:
