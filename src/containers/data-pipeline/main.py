@@ -609,10 +609,10 @@ def _generate_pairs(raw_content, model, endpoint, target_pairs, domain, queries_
     # Only process as many chunks as needed to hit the target pair count.
     needed_chunks = min(len(chunks), (target_pairs + queries_per_chunk - 1) // queries_per_chunk)
     # Fixed seed, so the same corpus always yields the same chunks in the same
-    # order. Two accounts running this pipeline then mine the same documents
-    # and hold out the same slice of pairs, which is what makes their recall
-    # numbers comparable. The questions themselves still come from a model
-    # call per chunk and are not reproducible.
+    # order. Two accounts running this pipeline then mine the same documents in
+    # the same order, which is what makes their recall numbers comparable. The
+    # questions still come from a model call per chunk, so how many pairs each
+    # chunk yields varies, and with it where the train/eval split lands.
     selected = random.Random(CHUNK_SAMPLE_SEED).sample(chunks, needed_chunks)
 
     # Results are collected by selection order, not by completion order, so the
@@ -645,6 +645,24 @@ def _generate_pairs(raw_content, model, endpoint, target_pairs, domain, queries_
     # Return both the pairs and the full chunk corpus (used as the retrieval
     # index for eval recall@k).
     return pairs[:target_pairs], chunks
+
+
+def _chunk_split_index(pairs, index):
+    """Move a train/eval split point back to a chunk boundary.
+
+    The pairs arrive grouped by the chunk their queries were written for, and
+    one chunk yields as many queries as the model returned for it. Splitting
+    between chunks keeps every query for a chunk on the same side of the line.
+    A chunk on both sides would put a training document in the test set, and
+    the recall measured on it would read high for the wrong reason.
+    """
+    if index <= 0 or index >= len(pairs):
+        return index
+    start = index
+    while index > 0 and pairs[index]["positive"] == pairs[index - 1]["positive"]:
+        index -= 1
+    # A corpus that produced a single chunk has no boundary to split on.
+    return index if index > 0 else start
 
 
 def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, synthetic_cfg):
@@ -690,7 +708,7 @@ def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, 
         train_pairs = pairs
     else:
         split_ratio = data_cfg.get("split_ratio", 0.9)
-        split_idx = int(len(pairs) * split_ratio)
+        split_idx = _chunk_split_index(pairs, int(len(pairs) * split_ratio))
         train_pairs = pairs[:split_idx]
         eval_pairs = pairs[split_idx:]
 
