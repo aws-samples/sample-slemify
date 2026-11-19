@@ -672,6 +672,11 @@ def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, 
       <project>/processed/train.jsonl  — {query, positive} pairs for training
       <project>/processed/eval.jsonl   — {query, positive, source} held-out pairs
       <project>/processed/corpus.jsonl — {text, source} all chunks (eval index)
+
+    The held-out set comes from data.evaluation. With labeled set and pairs at
+    0 it is the committed pairs and nothing else, which is what makes recall
+    comparable between accounts: the questions are read from the repository
+    instead of written by a model call per account.
     """
     if not synthetic_cfg.get("model") or not synthetic_cfg.get("pairs", 0):
         logger.error("synthetic.model and synthetic.pairs are required")
@@ -696,10 +701,21 @@ def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, 
         sys.exit(1)
     logger.info("Generated %d pairs from %d chunks", len(pairs), len(chunks))
 
-    # Independent eval: prefer a separate eval source/model when configured,
-    # otherwise hold out a slice of the generated pairs.
+    # Independent eval: committed pairs when evaluation.labeled is set and
+    # evaluation.pairs is 0, then a separate eval source/model when configured,
+    # otherwise a held-out slice of the generated pairs.
     eval_cfg = data_cfg.get("evaluation") or {}
-    if eval_cfg.get("model") and eval_cfg.get("pairs", 0):
+    labeled = read_labeled_records(bucket, data_cfg["path"], eval_cfg.get("labeled") or [])
+    labeled = [r for r in labeled if r.get("query") and r.get("positive")]
+    if labeled and not eval_cfg.get("pairs", 0):
+        # Committed pairs only. Recall is then measured on the same questions
+        # against the same documents in every account, because nothing in the
+        # held-out set came from a model call. The training pairs are still
+        # written per account, so the tuned encoder differs between accounts
+        # even though the measurement does not.
+        logger.info("evaluation.pairs is 0: holding out the %d committed pairs only", len(labeled))
+        train_pairs, eval_pairs = pairs, []
+    elif eval_cfg.get("model") and eval_cfg.get("pairs", 0):
         eval_sources = eval_cfg.get("sources", data_cfg.get("sources", []))
         eval_raw = read_raw_sources(bucket, data_cfg["path"], eval_sources) or raw_content
         eval_pairs, _ = _generate_pairs(
@@ -712,15 +728,14 @@ def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, 
         train_pairs = pairs[:split_idx]
         eval_pairs = pairs[split_idx:]
 
-    if not eval_pairs:
+    if not eval_pairs and not labeled:
         # Guarantee a non-empty eval set even for tiny corpora.
         eval_pairs = train_pairs[-max(1, len(train_pairs) // 10):]
     for pr in eval_pairs:
         pr.setdefault("origin", "synthetic")
-    labeled = read_labeled_records(bucket, data_cfg["path"], eval_cfg.get("labeled") or [])
-    labeled = [r for r in labeled if r.get("query") and r.get("positive")]
     if labeled:
-        logger.info("Appending %d human-labeled eval pairs (origin=real)", len(labeled))
+        logger.info("Holding out %d committed eval pairs (origin=real) with %d generated ones",
+                    len(labeled), len(eval_pairs))
         eval_pairs = eval_pairs + labeled
 
     logger.info("Writing %d train / %d eval pairs and %d-chunk corpus to s3://%s/",

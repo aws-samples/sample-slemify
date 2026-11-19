@@ -29,6 +29,17 @@ data:
       type: raw
   synthetic:
     pairs: 1000
+  # The held-out set recall@k is measured on. It is generated here, so each
+  # account writes its own questions and its recall numbers are its own. To
+  # measure every account on the same questions instead, commit one
+  # (query, positive) set, point labeled at it and set pairs to 0:
+  #   evaluation:
+  #     pairs: 0
+  #     labeled:
+  #       - path: eval-labeled/retriever-heldout.jsonl
+  # The positive of each committed pair must be the exact text of a chunk, as
+  # the trainer locates it in the corpus by exact match. This is the same
+  # arrangement the triage expert uses for its training records.
   evaluation:
     pairs: 150
     sources:
