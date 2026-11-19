@@ -6,6 +6,8 @@ import os
 import re
 import unittest
 
+import yaml
+
 from tests._stubs import INFRA, StubEnv, find_command, load_buildspec, phase_commands
 
 # docker stub: "docker build" fails for images that contain $FAIL_IMAGE, up to
@@ -307,6 +309,85 @@ class PinTest(unittest.TestCase):
         destroy = load_buildspec("buildspec-destroy.yaml")["env"]["variables"]
         for key in ("TERRAFORM_VERSION", "TERRAFORM_SHA256", "KUBECTL_VERSION", "KUBECTL_SHA256"):
             self.assertEqual(destroy[key], build[key], key)
+
+
+# An aws stub for the destroy build. Every role exists, carries one attached
+# policy and one inline policy, and every other call succeeds.
+AWS_IAM_PRESENT = r'''
+case "$1 $2" in
+  "iam list-attached-role-policies") echo "arn:aws:iam::aws:policy/ReadOnlyAccess" ;;
+  "iam list-role-policies") echo "slemify-data-pipeline" ;;
+esac
+exit 0
+'''
+# The same, with no role in the account: a run that stopped before module 1.
+AWS_IAM_MISSING = r'''
+case "$1 $2" in
+  "iam get-role")
+    echo "An error occurred (NoSuchEntity) when calling the GetRole operation" >&2
+    exit 254 ;;
+esac
+exit 0
+'''
+
+
+class DestroyIamTest(unittest.TestCase):
+    """buildspec-destroy.yaml deletes the data-pipeline roles. Terraform never
+    created them, so terraform destroy leaves them in the account."""
+
+    REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(INFRA))))
+    INFRA_DIR = "examples/k8s-autoscaling/workshop/infrastructure"
+
+    def setUp(self):
+        self.s = StubEnv()
+        self.addCleanup(self.s.cleanup)
+        spec = load_buildspec("buildspec-destroy.yaml")
+        self.roles = spec["env"]["variables"]["DATA_ROLES"].split()
+        self.cmd = find_command(spec, "build", "terraform destroy")
+        self.s.stub("terraform", 'case "$1" in output) echo team-models ;; esac\nexit 0')
+        self.s.stub("kubectl", "exit 0")
+        # Emptying the versioned buckets needs boto3 and real credentials.
+        self.s.stub("python3", "exit 0")
+
+    def run_block(self, aws_body):
+        self.s.stub("aws", aws_body)
+        return self.s.run(self.cmd, CODEBUILD_SRC_DIR=self.REPO, INFRA_DIR=self.INFRA_DIR,
+                          NODEPOOLS="slemify-slm", DATA_ROLES=" ".join(self.roles),
+                          EKS_CLUSTER_NAME="workshop-cluster", TF_STATE_BUCKET="state-bucket",
+                          STACK_NAME="workshop-stack", AWS_REGION="us-west-2")
+
+    def test_role_names_match_the_example_configs(self):
+        examples = os.path.dirname(os.path.dirname(INFRA))
+        expected = []
+        for project in ("analyst", "retriever", "triage"):
+            with open(os.path.join(examples, project, "expert.yaml")) as f:
+                expected.append("slemify-%s-data" % yaml.safe_load(f)["project"]["name"])
+        self.assertEqual(sorted(self.roles), sorted(expected))
+
+    def test_each_role_is_detached_and_deleted(self):
+        r = self.run_block(AWS_IAM_PRESENT)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("destroy complete", r.stdout)
+        calls = self.s.calls("aws iam")
+        for role in self.roles:
+            self.assertIn("aws iam detach-role-policy --role-name %s "
+                          "--policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess" % role, calls)
+            self.assertIn("aws iam delete-role-policy --role-name %s "
+                          "--policy-name slemify-data-pipeline" % role, calls)
+            self.assertIn("aws iam delete-role --role-name %s" % role, calls)
+
+    def test_a_missing_role_does_not_fail_the_build(self):
+        r = self.run_block(AWS_IAM_MISSING)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("destroy complete", r.stdout)
+        for role in self.roles:
+            self.assertIn("role %s not found" % role, r.stdout)
+        self.assertEqual([c for c in self.s.calls("aws iam") if "delete-role" in c], [])
+
+    def test_the_roles_go_after_terraform_destroy(self):
+        # The cluster's Pod Identity associations reference these roles.
+        block = self.cmd
+        self.assertLess(block.index("terraform destroy"), block.index("${DATA_ROLES}"))
 
 
 class ChecksumGateTest(unittest.TestCase):

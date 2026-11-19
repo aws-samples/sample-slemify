@@ -16,9 +16,10 @@
 #
 # Steps: delete the slemify namespace and the NodePools the seed and the demo
 # scenarios create (so load balancers, volumes and nodes release), empty the
-# versioned model bucket, terraform destroy, then delete the state file so the
-# stack can delete its state bucket. This build never signals the stack's wait
-# condition, so it ignores CFN_RESPONSE_URL.
+# versioned model bucket, terraform destroy, delete the state file so the stack
+# can delete its state bucket, and delete the IAM roles the data pipelines
+# created. This build never signals the stack's wait condition, so it ignores
+# CFN_RESPONSE_URL.
 #
 # Environment variables (set on the provisioning project by CloudFormation):
 #   TF_STATE_BUCKET, STACK_NAME, AWS_REGION, EKS_CLUSTER_NAME,
@@ -37,6 +38,10 @@ env:
     INFRA_DIR: "examples/k8s-autoscaling/workshop/infrastructure"
     # seed/slm-nodepools.yaml and demo/scenarios/*.yaml
     NODEPOOLS: "slemify-slm slemify-slm-previous slemify-slm-fallback demo-payments demo-spot-misconfigured"
+    # One role per slemify deploy, named slemify-<project>-data by
+    # pkg/k8s/identity.go. Terraform never created them, so terraform destroy
+    # leaves them behind.
+    DATA_ROLES: "slemify-k8s-autoscaling-analyst-data slemify-k8s-autoscaling-retriever-data slemify-k8s-autoscaling-triage-data"
 phases:
   install:
     commands:
@@ -106,4 +111,32 @@ phases:
         # the state file, or the stack cannot delete the bucket.
         python3 -c "import boto3,sys; boto3.resource('s3').Bucket(sys.argv[1]).object_versions.filter(Prefix=sys.argv[2]).delete()" \
           "${TF_STATE_BUCKET}" "${STACK_NAME}/terraform.tfstate"
+
+        # 7: the data-pipeline roles. Each carries a Pod Identity trust policy
+        # and an inline slemify-data-pipeline policy, so both have to go before
+        # the role does. A role that was never created, or is already gone, is
+        # not an error: a run that stopped before module 1 has none of them.
+        for role in ${DATA_ROLES}; do
+          if ! aws iam get-role --role-name "${role}" >/dev/null 2>&1; then
+            echo "role ${role} not found; nothing to delete"
+            continue
+          fi
+          for arn in $(aws iam list-attached-role-policies --role-name "${role}" \
+              --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || true); do
+            if [ -n "${arn}" ] && [ "${arn}" != "None" ]; then
+              aws iam detach-role-policy --role-name "${role}" --policy-arn "${arn}" || true
+            fi
+          done
+          for name in $(aws iam list-role-policies --role-name "${role}" \
+              --query 'PolicyNames[]' --output text 2>/dev/null || true); do
+            if [ -n "${name}" ] && [ "${name}" != "None" ]; then
+              aws iam delete-role-policy --role-name "${role}" --policy-name "${name}" || true
+            fi
+          done
+          if aws iam delete-role --role-name "${role}"; then
+            echo "deleted role ${role}"
+          else
+            echo "could not delete role ${role}; delete it by hand"
+          fi
+        done
         echo "destroy complete; delete the CloudFormation stack next"
