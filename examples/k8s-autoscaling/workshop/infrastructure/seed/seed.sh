@@ -260,13 +260,39 @@ sed -e "s|REPLACE_WITH_ECR_IMAGE|${DEMO_IMAGE}|g" \
     -e "s|REPLACE_WITH_RERANKER_IMAGE|${RERANKER_IMAGE}|g" \
     -e "s|REPLACE_WITH_DECISION_IMAGE|${DECISION_IMAGE}|g" \
     "${DEMO_DIR}/k8s-manifest.yaml" > "${manifest}"
+# The manifest ships the re-ranker (10 CPU) and decision model (4 CPU) at one
+# replica, and the demo scripts rely on that. Applied as is, both pods preempt
+# the 30 CPU slm-prewarm pod, and the replacement prewarm pod then makes Auto
+# Mode launch a second SLM node that consolidation removes minutes later. Set
+# both Deployments to 0 in the applied copy so they never start. Only the two
+# Deployment documents change (the Services carry the same names).
+python3 - "${manifest}" k8s-autoscaling-reranker k8s-autoscaling-decision <<'PY'
+import re
+import sys
+path, names = sys.argv[1], sys.argv[2:]
+with open(path) as f:
+    docs = re.split(r"(?m)^(?=---[ \t]*$)", f.read())
+for name in names:
+    hits = [i for i, d in enumerate(docs)
+            if re.search(r"(?m)^kind: Deployment[ \t]*$", d)
+            and re.search(r"(?m)^  name: %s[ \t]*$" % re.escape(name), d)]
+    if len(hits) != 1:
+        sys.exit("expected one Deployment %s, found %d" % (name, len(hits)))
+    docs[hits[0]], n = re.subn(r"(?m)^  replicas: \d+[ \t]*$", "  replicas: 0",
+                               docs[hits[0]], count=1)
+    if n != 1:
+        sys.exit("no spec.replicas in Deployment %s" % name)
+with open(path, "w") as f:
+    f.write("".join(docs))
+PY
 kubectl apply -f "${manifest}"
 rm -f "${manifest}"
 
 # The re-ranker arrives in module 2, where the attendee scales it up from zero.
-# The manifest ships it at one replica, so scale it down now to match the
-# module's "a new model comes online" narrative and keep the starting state
-# minimal (orchestrator, tools, OpenSearch, and the prewarm pause pod).
+# It is already at zero in the applied manifest; the scale calls guard against
+# the rewrite above missing. This matches the module's "a new model comes
+# online" narrative and keeps the starting state minimal (orchestrator, tools,
+# OpenSearch, and the prewarm pause pod).
 kubectl scale deployment/k8s-autoscaling-reranker -n "${NAMESPACE}" --replicas=0
 # The decision model is module 4's optional gate; same pattern, scaled up there.
 kubectl scale deployment/k8s-autoscaling-decision -n "${NAMESPACE}" --replicas=0
