@@ -165,7 +165,7 @@ def _query_once(text: str) -> dict:
     answer is scored.
     """
     triage, model, buf = "", "", []
-    cost, total_ms = {}, None
+    cost, total_ms, analyst_ttft_ms = {}, None, None
     autopilot = os.environ.get("EVAL_AUTOPILOT", "false").lower() in ("1", "true", "yes")
     with httpx.Client(timeout=300) as c:
         with c.stream("POST", f"{ORCHESTRATOR_URL}/query",
@@ -198,6 +198,14 @@ def _query_once(text: str) -> dict:
                     buf = []
                 elif t == "step_done" and "Triage" in ev.get("name", ""):
                     triage = ev.get("detail", "")
+                elif (t == "step_done" and "Analyst" in ev.get("name", "")
+                      and ev.get("detail") == "time to first token"):
+                    # The analyst's first token: prefill of the question plus
+                    # the retrieved chunks, on the real eval prompt. Keep the
+                    # first one, so a retry or an escalation later in the same
+                    # query does not overwrite it.
+                    if analyst_ttft_ms is None:
+                        analyst_ttft_ms = ev.get("ms")
                 elif t == "cost":
                     cost = ev
                 elif t == "total":
@@ -207,7 +215,8 @@ def _query_once(text: str) -> dict:
                     # run_case scores it as ERR instead of judging it.
                     raise AgentError(ev.get("message", "agent error"))
     return {"triage": triage, "model": model, "answer": "".join(buf).strip(),
-            "usd": cost.get("usd"), "steps": cost.get("steps"), "total_ms": total_ms}
+            "usd": cost.get("usd"), "steps": cost.get("steps"), "total_ms": total_ms,
+            "analyst_ttft_ms": analyst_ttft_ms}
 
 
 # --- Judge ---
@@ -403,6 +412,7 @@ def run_case(case: dict, repeat: int) -> dict:
     (tmp/lessons-learned.md section 19). Never discard them."""
     runs, judges, secs, answers, models = [], [], [], [], []
     usds, totals, steps = [], [], None
+    ttfts = []
     last = {}
     for _ in range(repeat):
         t0 = time.perf_counter()
@@ -414,6 +424,8 @@ def run_case(case: dict, repeat: int) -> dict:
                 usds.append(result["usd"])
             if result.get("total_ms") is not None:
                 totals.append(result["total_ms"])
+            if result.get("analyst_ttft_ms") is not None:
+                ttfts.append(result["analyst_ttft_ms"])
             steps = result.get("steps") or steps
             sc = score_case(case, result)
         except Exception as e:
@@ -438,6 +450,7 @@ def run_case(case: dict, repeat: int) -> dict:
             "judge": judges[-1], "judges": judges, "seconds": round(sum(secs), 1),
             "usd_per_query": round(sum(usds) / len(usds), 6) if usds else None,
             "total_ms_p50": sorted(totals)[len(totals) // 2] if totals else None,
+            "analyst_ttft_ms_p50": sorted(ttfts)[len(ttfts) // 2] if ttfts else None,
             "steps": steps,
             "model": last_model, "answer": last_answer, "answers": answers}
 
@@ -493,12 +506,14 @@ def main():
     # only (CPU pods are hourly capacity, see /stats cpu_pool_usd_per_hour).
     usds = [r["usd_per_query"] for r in rows if r.get("usd_per_query") is not None]
     p50s = [r["total_ms_p50"] for r in rows if r.get("total_ms_p50") is not None]
+    ttfts = [r["analyst_ttft_ms_p50"] for r in rows if r.get("analyst_ttft_ms_p50") is not None]
     steps = next((r["steps"] for r in rows if r.get("steps")), None)
     scoreboard = {
         "steps": steps,
         "quality": f"{counts['pass']}/{n}",
         "frontier_usd_per_query": round(sum(usds) / len(usds), 5) if usds else None,
         "latency_p50_ms": sorted(p50s)[len(p50s) // 2] if p50s else None,
+        "analyst_ttft_p50_ms": sorted(ttfts)[len(ttfts) // 2] if ttfts else None,
     }
     if steps:
         step_str = " ".join(f"{k}={v}" for k, v in steps.items())
@@ -506,6 +521,12 @@ def main():
         lat_str = f"{scoreboard['latency_p50_ms'] / 1000:.1f}s" if p50s else "n/a"
         print(f"=== Scoreboard [{step_str}]: quality {scoreboard['quality']}  "
               f"frontier {usd_str}/query  latency p50 {lat_str} ===")
+    # The analyst's time to first token, on its own line: it is prefill of the
+    # question plus the retrieved chunks, which is the number the module pages
+    # discuss. It stays off the Scoreboard line, which the room form parses.
+    if ttfts:
+        print(f"=== Analyst time to first token: p50 {scoreboard['analyst_ttft_p50_ms'] / 1000:.1f} s "
+              f"over {len(ttfts)} cases ===")
 
     scorecard = {"timestamp": datetime.now(timezone.utc).isoformat(),
                  "orchestrator": ORCHESTRATOR_URL, "repeat": args.repeat,

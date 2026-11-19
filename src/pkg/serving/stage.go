@@ -259,6 +259,11 @@ func ReportJobManifest(cfg *config.ExpertConfig, ns, inferenceEndpoint string, p
 								{Name: "INSTANCE_TYPE", Value: env.InstanceType},
 								{Name: "INSTANCE_VCPUS", Value: fmt.Sprintf("%d", env.VCPUs)},
 								{Name: "INSTANCE_HOURLY_USD", Value: fmt.Sprintf("%.4f", env.HourlyUSD)},
+								// The base model id carries the active parameter
+								// count for a mixture-of-experts model, which the
+								// bandwidth estimate needs: the served file holds
+								// every expert, decode reads one set of them.
+								{Name: "BASE_MODEL", Value: cfg.Model.Base},
 							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
