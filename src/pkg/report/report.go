@@ -235,6 +235,11 @@ func printGeneration(s *Summary) {
 				switch {
 				case band && f <= 1 && measured >= fl:
 					fmt.Printf("               measured decode is %.1f tokens/s, inside that range; the range counts bytes against a bandwidth share, so it does not show how many bytes each token read\n", measured)
+				case band && f > 1:
+					// The range already names an upper end, so a measurement
+					// above it is not a floor: it means an assumption the
+					// range rests on does not hold.
+					fmt.Printf("               measured decode is %.1f tokens/s, above that range; the range assumes the pod gets its vCPU share of the socket's bandwidth and reads every byte from memory, and at least one of those does not hold here\n", measured)
 				case f > 1:
 					fmt.Printf("               measured decode is %.0f%% of the estimate: the estimate is a floor for a pod this size\n", f*100)
 				case f < 0.6:

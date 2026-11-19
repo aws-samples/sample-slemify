@@ -90,6 +90,19 @@ class CeilingTest(unittest.TestCase):
         ceil = profile("Qwen/Qwen3-30B-A3B-Instruct-2507", decode_tok_s=5.0)["ceiling"]
         self.assertIn("well below", ceil["reading"])
 
+    def test_a_measurement_above_the_range_is_not_called_a_floor(self):
+        # The range names an upper end, and the report prints that end as the
+        # ceiling. A measurement above it means an assumption the range rests
+        # on does not hold, so the text names those assumptions instead of
+        # turning the ceiling into a floor.
+        ceil = profile("Qwen/Qwen3-30B-A3B-Instruct-2507", decode_tok_s=90.0)["ceiling"]
+        self.assertGreater(ceil["measured_fraction"], 1)
+        self.assertIn("above the estimated range", ceil["reading"])
+        self.assertIn("share of the socket's bandwidth", ceil["reading"])
+        self.assertIn("cache", ceil["reading"])
+        for claim in ("as a floor", "not a ceiling", "inside the estimated range"):
+            self.assertNotIn(claim, ceil["reading"])
+
 
 class ColdFindingTest(unittest.TestCase):
     def finding(self):

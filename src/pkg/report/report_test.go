@@ -114,6 +114,35 @@ func TestPrintGenerationShowsTheRangeForAnActiveSetModel(t *testing.T) {
 	}
 }
 
+// The same model measured above the upper end of its range. The line used to
+// fall through to the dense branch and call the range a floor, one line under
+// a printed range whose upper end is a ceiling.
+func TestPrintGenerationReportsAMeasurementAboveTheRange(t *testing.T) {
+	s, err := ParseSummary(`{"project":"g","task":"generation","profile":{"model_path":"m.gguf","model_size_bytes":18550000000,
+"warm":{"ttft_ms":51,"decode_tok_s":80},
+"ceiling":{"tokens_per_second_ceiling":71.7,"tokens_per_second_floor":7.2,"bandwidth_gb_s":133,
+"bytes_per_token_assumed":1855000000,"bytes_per_token_whole_file":18550000000,"measured_fraction":1.116}},
+"serving":{},"guidance":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := capture(t, s)
+	for _, want := range []string{
+		"Estimate:    7 to 72 tokens/s from bandwidth",
+		"measured decode is 80.0 tokens/s, above that range",
+		"vCPU share of the socket's bandwidth",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"is a floor", "% of the estimate", "inside that range"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("still prints %q in:\n%s", unwanted, out)
+		}
+	}
+}
+
 func TestPrintGenerationKeepsOneEstimateForADenseModel(t *testing.T) {
 	s, err := ParseSummary(`{"project":"g","task":"generation","profile":{"model_size_bytes":1929902912,
 "warm":{"ttft_ms":50,"decode_tok_s":20.5},

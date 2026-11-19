@@ -469,11 +469,21 @@ def serving_profile():
     if ceiling and measured:
         frac = round(measured / ceiling, 3)
         profile["ceiling"]["measured_fraction"] = frac
-        if floor and ceiling > floor and floor <= measured <= ceiling:
+        # A model with an active set has a range, so a measurement outside it
+        # is read against the range. Calling that range a floor would say the
+        # opposite of the ceiling row printed next to it.
+        banded = bool(floor and ceiling > floor)
+        if banded and floor <= measured <= ceiling:
             profile["ceiling"]["reading"] = ("Measured decode is inside the estimated range, which is as much as a bandwidth "
                                              "estimate can tell you. It does not show how many bytes the model read per token: "
                                              "compute time, cache behavior and the assumed bandwidth share move the measured "
                                              "rate inside the range as well.")
+        elif banded and measured > ceiling:
+            profile["ceiling"]["reading"] = ("Measured decode is above the estimated range. Both ends of the range assume the "
+                                             "pod draws its vCPU share of the socket's bandwidth and that decode waits on "
+                                             "memory alone, and at least one of those does not hold here: a small pod on an "
+                                             "otherwise idle socket draws more than its share, and weights served from cache "
+                                             "are not read from memory at all.")
         elif frac > 1:
             profile["ceiling"]["reading"] = ("Measured decode is above the proportional-share estimate. Bandwidth is not "
                                              "partitioned per vCPU: a small pod on an otherwise idle socket draws more than "
