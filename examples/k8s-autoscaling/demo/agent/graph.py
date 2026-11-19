@@ -259,8 +259,13 @@ async def n_critic(state: AgentState) -> dict:
     can_retry = attempts <= config.MAX_CRITIC_RETRIES
     # A flagged answer about live state, on a query we haven't yet inspected the
     # cluster for, calls for real evidence rather than escalation/speculation.
+    # The query has to ask about the user's own resources for that to be true:
+    # is_operational matches a substring ("scal") and so fired on nearly every
+    # autoscaling question, which sent documentation questions to propose with
+    # no cluster evidence to propose from. A flagged documentation question
+    # escalates instead.
     needs_evidence = (escalate and not used_llm and not fix_issues and toolclient.available()
-                      and extract.is_operational(state["query"]) and not state.get("tool_results"))
+                      and extract.wants_cluster_action(state["query"]) and not state.get("tool_results"))
 
     if passed:
         verdict = "accepted"

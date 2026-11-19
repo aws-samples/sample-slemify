@@ -153,6 +153,11 @@ def manifest_fields(text: str) -> list[str]:
 
 
 def is_operational(text: str) -> bool:
+    """A runtime-symptom or cost word appears in the text. The signals are
+    substrings, so "scal" matches "autoscaling" and "scale to zero": nearly
+    every question in this domain is operational by this test. Use it to pick
+    between tools once the live path is chosen, never to decide that a question
+    is about the user's live cluster. For that, use wants_cluster_action."""
     low = text.lower()
     return any(sig in low for sig in _OPERATIONAL_SIGNALS)
 
@@ -161,8 +166,9 @@ def is_operational(text: str) -> bool:
 # about a config or a concept. Deliberately stricter than is_operational (which
 # matches "scal" and so fires on nearly every autoscaling question): it needs an
 # inspect-style verb AND a reference to their own cluster or resources. This is
-# the plain-code intent router used when the classifier runs the triage step;
-# the LLM step asks the model the same question in prose (classify.py).
+# the plain-code intent router used when the classifier runs the triage step
+# (the LLM step asks the model the same question in prose, classify.py), and the
+# test the faithfulness gate applies before it gathers live evidence (graph.py).
 _ACTION_VERBS = re.compile(
     r"\b(check|inspect|look at|look into|describe|diagnose|investigate|verify|"
     r"validate|debug|show me|list|what'?s wrong with|why (?:is|are|does|isn'?t|aren'?t))\b")
