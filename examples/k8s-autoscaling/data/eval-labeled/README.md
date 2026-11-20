@@ -17,5 +17,10 @@ than generated per run, so every account measures the same thing.
 `positive` holds the exact text of a document chunk. The trainer locates a
 pair's document in the retrieval corpus by that text, so editing a document in
 `data/eval-queries/` breaks the pairs that point at it. The data pipeline
-counts the pairs it cannot match and fails the stage above 5 per cent of them,
-so regenerate the file when those documents change.
+counts the pairs it cannot match and fails the stage above 5 per cent of them.
+
+The count is in pairs. Each of the 14 documents answers three of the 42 pairs,
+so editing one document leaves 3 pairs unmatched, which is 7.1 per cent and
+fails the stage. Regenerate `retriever-heldout.jsonl` when you edit those
+documents. A smaller share, one or two pairs, is reported as a warning and the
+run goes on.

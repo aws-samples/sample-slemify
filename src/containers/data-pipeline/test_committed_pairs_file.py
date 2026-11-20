@@ -7,6 +7,7 @@ that point at it. The pipeline catches that at run time; this test catches it
 before anyone deploys. Run from this directory:
 python3 -m unittest test_committed_pairs_file -v
 """
+import collections
 import json
 import os
 import sys
@@ -51,6 +52,18 @@ class CommittedPairsFileTest(unittest.TestCase):
     def test_no_question_is_asked_twice(self):
         queries = [p["query"] for p in self.pairs]
         self.assertEqual(len(queries), len(set(queries)))
+
+    def test_one_edited_document_is_above_the_drift_limit(self):
+        # The pipeline's drift limit is a share of the pairs. This ties that
+        # share to the shape of the shipped file: every document answers the
+        # same number of pairs, and that number is above the limit, so one
+        # edited document fails the data stage instead of warning. The README
+        # and expert.yaml state it that way.
+        per_document = collections.Counter(p["positive"] for p in self.pairs)
+        self.assertEqual(len(set(per_document.values())), 1,
+                         "the documents no longer answer the same number of pairs")
+        share = max(per_document.values()) / len(self.pairs)
+        self.assertGreater(share, main.COMMITTED_PAIR_DRIFT_LIMIT)
 
 
 if __name__ == "__main__":
