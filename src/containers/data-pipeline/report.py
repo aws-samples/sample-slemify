@@ -28,7 +28,7 @@ one of them is low, the order in which to look for the cause.
 Environment (set by the Slemify CLI on the Job):
   BUCKET, PROJECT, TASK, INFERENCE_ENDPOINT, BEDROCK_MODEL, MAX_SAMPLES,
   TOOL_DESC, LABELS, LLM_BASELINE, CASES_KEY, REPEAT,
-  INSTANCE_TYPE, INSTANCE_VCPUS, INSTANCE_HOURLY_USD
+  INSTANCE_TYPE, INSTANCE_VCPUS, INSTANCE_HOURLY_USD, BASE_MODEL
 """
 import json
 import os
@@ -58,6 +58,7 @@ REPEAT = max(1, int(os.environ.get("REPEAT", "2") or "2"))
 INSTANCE_TYPE = os.environ.get("INSTANCE_TYPE", "")
 INSTANCE_VCPUS = int(os.environ.get("INSTANCE_VCPUS", "0") or "0")
 INSTANCE_HOURLY_USD = float(os.environ.get("INSTANCE_HOURLY_USD", "0") or "0")
+BASE_MODEL = os.environ.get("BASE_MODEL", "")
 LATENCY_SAMPLES = 30
 # Bedrock calls from the report are rate limited so the report can never be
 # the thing that trips an account limit.
@@ -360,6 +361,24 @@ def bandwidth_estimate(instance_type, vcpus):
     return round(per_socket * share, 1), f"{note}; {vcpus} of {socket_vcpus} vCPUs, so about {share * 100:.0f}% of a socket"
 
 
+# A mixture-of-experts id of the form <total>B-A<active>B names how many
+# parameters the model reads per token. Same form the CLI parses in
+# pkg/config/autosizer.go.
+_MOE_NAME = re.compile(r"(\d+)b-a(\d+(?:\.\d+)?)b")
+
+
+def active_parameter_fraction(model_id):
+    """Active parameters over total, from a mixture-of-experts model id, or
+    None when the id does not name one (a dense model reads every weight)."""
+    m = _MOE_NAME.search((model_id or "").lower())
+    if not m:
+        return None
+    total, active = float(m.group(1)), float(m.group(2))
+    if total <= 0 or active <= 0 or active > total:
+        return None
+    return active / total
+
+
 def _chat(prompt, max_tokens=160, timeout=900):
     body = {"model": "model", "max_tokens": max_tokens, "temperature": 0,
             "messages": [{"role": "user", "content": prompt}]}
@@ -418,20 +437,54 @@ def serving_profile():
 
     gbps, note = bandwidth_estimate(INSTANCE_TYPE, INSTANCE_VCPUS)
     size = profile.get("model_size_bytes")
-    ceiling = None
-    if gbps and size:
-        ceiling = round(gbps * 1e9 / size, 1)
+    # Decode reads the weights it needs once per token. A dense model reads the
+    # whole file, so one figure is both ends of the estimate. A
+    # mixture-of-experts model reads its active set, so the whole file is a
+    # floor (it assumes every byte is read) and the active set is a ceiling (it
+    # assumes the model never reads anything else). Both ends count bytes
+    # against a bandwidth share, so where a measurement falls between them is
+    # not evidence of which weights were read.
+    fraction = active_parameter_fraction(BASE_MODEL)
+    active_bytes = round(size * fraction) if size and fraction else None
+    floor = round(gbps * 1e9 / size, 1) if gbps and size else None
+    ceiling = round(gbps * 1e9 / active_bytes, 1) if gbps and active_bytes else floor
+    if active_bytes:
+        assumption = (f"bytes per token = the active set, {active_bytes / 1e9:.2f} GB of the {size / 1e9:.2f} GB file, read from "
+                      "the active parameter count in the configured base model id, which may already cover the weights every "
+                      "token reads. The floor is the other end of the estimate: it assumes every byte of the file is read per "
+                      "token, which is what a dense model does. Both ends assume the pod draws its vCPU share of the socket's "
+                      "bandwidth and that decode waits on memory alone.")
+    else:
+        assumption = ("bytes per token = the whole model file (dense). A mixture-of-experts model reads only its active "
+                      "experts per token, so its real ceiling is higher by total/active parameters.")
     profile["ceiling"] = {
         "bandwidth_gb_s": gbps, "bandwidth_note": note,
-        "bytes_per_token_assumed": size,
+        "bytes_per_token_assumed": active_bytes or size,
+        "bytes_per_token_whole_file": size,
+        "tokens_per_second_floor": floor,
         "tokens_per_second_ceiling": ceiling,
-        "assumption": ("bytes per token = the whole model file (dense). A mixture-of-experts model reads only its active "
-                       "experts per token, so its real ceiling is higher by total/active parameters."),
+        "assumption": assumption,
     }
-    if ceiling and profile.get("warm", {}).get("decode_tok_s"):
-        frac = round(profile["warm"]["decode_tok_s"] / ceiling, 3)
+    measured = (profile.get("warm") or {}).get("decode_tok_s")
+    if ceiling and measured:
+        frac = round(measured / ceiling, 3)
         profile["ceiling"]["measured_fraction"] = frac
-        if frac > 1:
+        # A model with an active set has a range, so a measurement outside it
+        # is read against the range. Calling that range a floor would say the
+        # opposite of the ceiling row printed next to it.
+        banded = bool(floor and ceiling > floor)
+        if banded and floor <= measured <= ceiling:
+            profile["ceiling"]["reading"] = ("Measured decode is inside the estimated range, which is as much as a bandwidth "
+                                             "estimate can tell you. It does not show how many bytes the model read per token: "
+                                             "compute time, cache behavior and the assumed bandwidth share move the measured "
+                                             "rate inside the range as well.")
+        elif banded and measured > ceiling:
+            profile["ceiling"]["reading"] = ("Measured decode is above the estimated range. Both ends of the range assume the "
+                                             "pod draws its vCPU share of the socket's bandwidth and that decode waits on "
+                                             "memory alone, and at least one of those does not hold here: a small pod on an "
+                                             "otherwise idle socket draws more than its share, and weights served from cache "
+                                             "are not read from memory at all.")
+        elif frac > 1:
             profile["ceiling"]["reading"] = ("Measured decode is above the proportional-share estimate. Bandwidth is not "
                                              "partitioned per vCPU: a small pod on an otherwise idle socket draws more than "
                                              "its share, and a model this small also sits partly in cache. Treat the estimate "
@@ -506,8 +559,10 @@ def generation_report():
     cold = profile.get("cold") or {}
     if cold.get("ttft_ms") and cold["ttft_ms"] > 2000:
         findings.append(f"Cold time to first token is {cold['ttft_ms'] / 1000:.1f} s for a {cold.get('prompt_tokens', '?')}-token "
-                        "prompt. That is prompt processing: keep retrieved context tight, warm common prefixes at start, and "
-                        "stream the answer. If it still misses the budget, that is the case for an accelerator.")
+                        "prompt with no cached prefix, measured once on this report's own prompt. That is prompt processing, and "
+                        "a long first prompt on a CPU node costs this much. Keep retrieved context tight, warm common prefixes at "
+                        "start, and stream the answer. The warm figure above is what the same prompt costs once its prefix is "
+                        "cached.")
     if ev and ev["pass_rate"] < 1:
         failed = [r["id"] for r in ev["results"] if r["passed"] < r["repeat"]]
         findings.append(f"{len(failed)} of {ev['cases']} grounded cases did not pass every run ({', '.join(failed[:5])}). "
@@ -761,8 +816,16 @@ def render_generation(rep):
             ["bandwidth available (estimate)", f"{ceil.get('bandwidth_gb_s') or 'n/a'} GB/s"],
             ["basis", esc(ceil.get("bandwidth_note") or "")],
             ["bytes read per token (assumed)", f"{ceil['bytes_per_token_assumed'] / 1e9:.2f} GB" if ceil.get("bytes_per_token_assumed") else "n/a"],
-            ["ceiling", f"{ceil['tokens_per_second_ceiling']:.0f} tokens/s" if ceil.get("tokens_per_second_ceiling") else "n/a"],
-            ["measured warm decode as a fraction of the ceiling", fmt(ceil.get("measured_fraction"))]]
+            ["ceiling", f"{ceil['tokens_per_second_ceiling']:.0f} tokens/s" if ceil.get("tokens_per_second_ceiling") else "n/a"]]
+    # A model that reads only part of its file per token has two ends: show the
+    # floor next to the ceiling so the measured number can be placed between
+    # them instead of read against one of them.
+    if ceil.get("tokens_per_second_floor") and ceil.get("tokens_per_second_ceiling") \
+            and ceil["tokens_per_second_floor"] < ceil["tokens_per_second_ceiling"]:
+        rows.append(["bytes read per token if every byte is read",
+                     f"{ceil['bytes_per_token_whole_file'] / 1e9:.2f} GB" if ceil.get("bytes_per_token_whole_file") else "n/a"])
+        rows.append(["floor (every byte read per token)", f"{ceil['tokens_per_second_floor']:.0f} tokens/s"])
+    rows.append(["measured warm decode as a fraction of the ceiling", fmt(ceil.get("measured_fraction"))])
     parts.append(table(["", ""], rows))
     if ceil.get("reading"):
         parts.append(f"<p>{esc(ceil['reading'])}</p>")

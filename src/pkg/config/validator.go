@@ -85,6 +85,17 @@ func Validate(cfg *ExpertConfig) []ValidationError {
 			})
 		}
 	}
+	// An evaluation block needs a held-out set: generated pairs, or committed
+	// records (pairs: 0 then means "hold out only those", which is how two
+	// accounts measure on the same questions).
+	if e := cfg.Data.Evaluation; e != nil {
+		if e.Pairs == 0 && len(e.Labeled) == 0 {
+			errs = append(errs, ValidationError{
+				Field:   "data.evaluation.pairs",
+				Message: "set data.evaluation.pairs (>= 10) or data.evaluation.labeled",
+			})
+		}
+	}
 	if cfg.Project.IsEncoderHead() {
 		// Encoder-head families generate synthetic training data (the head is fit
 		// on synthesized examples), so synthetic generation is required here.

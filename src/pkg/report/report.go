@@ -215,10 +215,31 @@ func printGeneration(s *Summary) {
 	}
 	if ceil := sub(pr, "ceiling"); ceil != nil {
 		if c, ok := num(ceil, "tokens_per_second_ceiling"); ok {
-			fmt.Printf("  Estimate:    about %.0f tokens/s from bandwidth (%.0f GB/s share / %.2f GB per token)\n",
-				c, floatOr(ceil, "bandwidth_gb_s"), floatOr(ceil, "bytes_per_token_assumed")/1e9)
+			// A model that reads only its active set per token has two ends:
+			// the whole file (a floor) and the active set (a ceiling). Print
+			// both, so the measured rate can be read against the range rather
+			// than against a figure for a model this one is not. The range
+			// bounds the rate; it does not explain it.
+			fl, hasFloor := num(ceil, "tokens_per_second_floor")
+			band := hasFloor && fl < c
+			if band {
+				fmt.Printf("  Estimate:    %.0f to %.0f tokens/s from bandwidth (%.0f GB/s share, %.2f GB per token for the whole file, %.2f GB for the active set)\n",
+					fl, c, floatOr(ceil, "bandwidth_gb_s"),
+					floatOr(ceil, "bytes_per_token_whole_file")/1e9, floatOr(ceil, "bytes_per_token_assumed")/1e9)
+			} else {
+				fmt.Printf("  Estimate:    about %.0f tokens/s from bandwidth (%.0f GB/s share / %.2f GB per token)\n",
+					c, floatOr(ceil, "bandwidth_gb_s"), floatOr(ceil, "bytes_per_token_assumed")/1e9)
+			}
 			if f, ok := num(ceil, "measured_fraction"); ok {
+				measured := f * c
 				switch {
+				case band && f <= 1 && measured >= fl:
+					fmt.Printf("               measured decode is %.1f tokens/s, inside that range; the range counts bytes against a bandwidth share, so it does not show how many bytes each token read\n", measured)
+				case band && f > 1:
+					// The range already names an upper end, so a measurement
+					// above it is not a floor: it means an assumption the
+					// range rests on does not hold.
+					fmt.Printf("               measured decode is %.1f tokens/s, above that range; the range assumes the pod gets its vCPU share of the socket's bandwidth and reads every byte from memory, and at least one of those does not hold here\n", measured)
 				case f > 1:
 					fmt.Printf("               measured decode is %.0f%% of the estimate: the estimate is a floor for a pod this size\n", f*100)
 				case f < 0.6:

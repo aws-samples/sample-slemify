@@ -34,6 +34,11 @@ logger = logging.getLogger("slemify.data-pipeline")
 
 BATCH_SIZE = 5
 
+# Seed for the chunk sample that picks which documents get questions written
+# for them. A fixed value, so every run on the same corpus mines the same
+# documents and two accounts can compare their retrieval numbers.
+CHUNK_SAMPLE_SEED = 20261119
+
 GENERATION_PROMPT = """You are generating synthetic training data for a Small Language Model.
 
 DOMAIN CONTEXT:
@@ -603,34 +608,103 @@ def _generate_pairs(raw_content, model, endpoint, target_pairs, domain, queries_
 
     # Only process as many chunks as needed to hit the target pair count.
     needed_chunks = min(len(chunks), (target_pairs + queries_per_chunk - 1) // queries_per_chunk)
-    selected = random.sample(chunks, needed_chunks)
+    # Fixed seed, so the same corpus always yields the same chunks in the same
+    # order. Two accounts running this pipeline then mine the same documents in
+    # the same order, which is what makes their recall numbers comparable. The
+    # questions still come from a model call per chunk, so how many pairs each
+    # chunk yields varies, and with it where the train/eval split lands.
+    selected = random.Random(CHUNK_SAMPLE_SEED).sample(chunks, needed_chunks)
 
-    pairs = []
+    # Results are collected by selection order, not by completion order, so the
+    # pair order (and with it the train/eval split below) does not depend on
+    # which thread finishes first.
+    per_chunk = [[] for _ in selected]
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = {
             pool.submit(_generate_queries_for_chunk, backend, domain,
-                        c["text"], queries_per_chunk): c
-            for c in selected
+                        c["text"], queries_per_chunk): i
+            for i, c in enumerate(selected)
         }
         done = 0
         for future in as_completed(futures):
-            chunk = futures[future]
+            index = futures[future]
             done += 1
             try:
                 queries = future.result()
             except Exception as e:
                 logger.warning("Query generation failed: %s", e)
                 continue
-            for q in queries:
-                pairs.append({"query": q, "positive": chunk["text"],
-                              "source": chunk.get("source", "")})
+            per_chunk[index] = queries
             if done % 25 == 0:
                 logger.info("  %d/%d chunks processed, %d pairs so far",
-                            done, len(selected), len(pairs))
+                            done, len(selected), sum(len(q) for q in per_chunk))
+
+    pairs = [{"query": q, "positive": chunk["text"], "source": chunk.get("source", "")}
+             for chunk, queries in zip(selected, per_chunk) for q in queries]
 
     # Return both the pairs and the full chunk corpus (used as the retrieval
     # index for eval recall@k).
     return pairs[:target_pairs], chunks
+
+
+def _chunk_split_index(pairs, index):
+    """Move a train/eval split point back to a chunk boundary.
+
+    The pairs arrive grouped by the chunk their queries were written for, and
+    one chunk yields as many queries as the model returned for it. Splitting
+    between chunks keeps every query for a chunk on the same side of the line.
+    A chunk on both sides would put a training document in the test set, and
+    the recall measured on it would read high for the wrong reason.
+    """
+    if index <= 0 or index >= len(pairs):
+        return index
+    start = index
+    while index > 0 and pairs[index]["positive"] == pairs[index - 1]["positive"]:
+        index -= 1
+    # A corpus that produced a single chunk has no boundary to split on.
+    return index if index > 0 else start
+
+
+# The trainer locates a held-out pair's answer document by exact chunk text
+# (there is no chunk id), and it appends an answer it cannot find to the
+# retrieval index. A committed pair whose document was edited since the pair
+# was written would therefore still be scored, against text no source holds
+# any more, and recall would drift without a word. So the pipeline counts the
+# committed pairs it cannot match and fails above this share of them.
+#
+# The unit is pairs, not documents. For the shipped retriever set, 42 pairs
+# over 14 documents, each document answers three pairs, so one edited document
+# is 7.1 per cent and fails the stage. That is the intended reading: once a
+# document has changed, recall measured on the pairs that point at it cannot
+# be compared with another account's run. A share below the limit means a pair
+# or two lost their text to a small edit, which is reported and allowed.
+COMMITTED_PAIR_DRIFT_LIMIT = 0.05
+
+
+def _check_committed_positives(labeled, chunks, bucket, data_cfg, eval_cfg):
+    """Fail when too many committed pairs no longer match a chunk of the
+    configured sources. The answer documents of a committed set usually come
+    from data.evaluation.sources, which the committed path does not otherwise
+    read, so those documents are chunked here as well."""
+    known = {c["text"] for c in chunks}
+    eval_sources = eval_cfg.get("sources") or []
+    if eval_sources:
+        known |= {c["text"] for c in
+                  _chunk_documents(read_raw_sources(bucket, data_cfg["path"], eval_sources))}
+    missing = sum(1 for r in labeled if r["positive"] not in known)
+    if not missing:
+        logger.info("All %d committed eval pairs match a chunk of the current corpus", len(labeled))
+        return
+    share = missing / len(labeled)
+    where = "data.sources" + (" or data.evaluation.sources" if eval_sources else "")
+    msg = (f"{missing} of {len(labeled)} committed eval pairs ({share:.1%}) have no matching chunk "
+           f"under {where}: those documents changed since the pairs were written")
+    if share > COMMITTED_PAIR_DRIFT_LIMIT:
+        logger.error("%s. Regenerate the committed pairs or restore the documents; recall measured "
+                     "now would not be comparable with any other run.", msg)
+        sys.exit(1)
+    logger.warning("%s. Their recall is measured against the committed text, not against any "
+                   "current document.", msg)
 
 
 def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, synthetic_cfg):
@@ -640,6 +714,11 @@ def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, 
       <project>/processed/train.jsonl  — {query, positive} pairs for training
       <project>/processed/eval.jsonl   — {query, positive, source} held-out pairs
       <project>/processed/corpus.jsonl — {text, source} all chunks (eval index)
+
+    The held-out set comes from data.evaluation. With labeled set and pairs at
+    0 it is the committed pairs and nothing else, which is what makes recall
+    comparable between accounts: the questions are read from the repository
+    instead of written by a model call per account.
     """
     if not synthetic_cfg.get("model") or not synthetic_cfg.get("pairs", 0):
         logger.error("synthetic.model and synthetic.pairs are required")
@@ -664,10 +743,23 @@ def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, 
         sys.exit(1)
     logger.info("Generated %d pairs from %d chunks", len(pairs), len(chunks))
 
-    # Independent eval: prefer a separate eval source/model when configured,
-    # otherwise hold out a slice of the generated pairs.
+    # Independent eval: committed pairs when evaluation.labeled is set and
+    # evaluation.pairs is 0, then a separate eval source/model when configured,
+    # otherwise a held-out slice of the generated pairs.
     eval_cfg = data_cfg.get("evaluation") or {}
-    if eval_cfg.get("model") and eval_cfg.get("pairs", 0):
+    labeled = read_labeled_records(bucket, data_cfg["path"], eval_cfg.get("labeled") or [])
+    labeled = [r for r in labeled if r.get("query") and r.get("positive")]
+    if labeled:
+        _check_committed_positives(labeled, chunks, bucket, data_cfg, eval_cfg)
+    if labeled and not eval_cfg.get("pairs", 0):
+        # Committed pairs only. Recall is then measured on the same questions
+        # against the same documents in every account, because nothing in the
+        # held-out set came from a model call. The training pairs are still
+        # written per account, so the tuned encoder differs between accounts
+        # even though the measurement does not.
+        logger.info("evaluation.pairs is 0: holding out the %d committed pairs only", len(labeled))
+        train_pairs, eval_pairs = pairs, []
+    elif eval_cfg.get("model") and eval_cfg.get("pairs", 0):
         eval_sources = eval_cfg.get("sources", data_cfg.get("sources", []))
         eval_raw = read_raw_sources(bucket, data_cfg["path"], eval_sources) or raw_content
         eval_pairs, _ = _generate_pairs(
@@ -676,19 +768,24 @@ def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, 
         train_pairs = pairs
     else:
         split_ratio = data_cfg.get("split_ratio", 0.9)
-        split_idx = int(len(pairs) * split_ratio)
+        split_idx = _chunk_split_index(pairs, int(len(pairs) * split_ratio))
         train_pairs = pairs[:split_idx]
         eval_pairs = pairs[split_idx:]
 
-    if not eval_pairs:
+    if not eval_pairs and not labeled:
         # Guarantee a non-empty eval set even for tiny corpora.
         eval_pairs = train_pairs[-max(1, len(train_pairs) // 10):]
     for pr in eval_pairs:
         pr.setdefault("origin", "synthetic")
-    labeled = read_labeled_records(bucket, data_cfg["path"], eval_cfg.get("labeled") or [])
-    labeled = [r for r in labeled if r.get("query") and r.get("positive")]
     if labeled:
-        logger.info("Appending %d human-labeled eval pairs (origin=real)", len(labeled))
+        # The origin comes from the records, not from this line. A committed
+        # retriever pair keeps "synthetic", because a model wrote the question,
+        # and a hand-labeled set keeps "real". The report scores the two
+        # origins separately, so a log that named one of them would misreport
+        # what was held out.
+        origins = ", ".join(sorted({r.get("origin", "") for r in labeled if r.get("origin")}))
+        logger.info("Holding out %d committed eval pairs (origin=%s) with %d generated ones",
+                    len(labeled), origins or "unset", len(eval_pairs))
         eval_pairs = eval_pairs + labeled
 
     logger.info("Writing %d train / %d eval pairs and %d-chunk corpus to s3://%s/",
@@ -739,7 +836,11 @@ def read_labeled_records(bucket: str, path: str, sources: list[dict],
                 continue
             if not isinstance(obj, dict):
                 continue
-            obj["origin"] = origin
+            # A record that states its own origin keeps it. The committed
+            # retriever pairs were written by a model, so they stay
+            # "synthetic": the report compares the two origins, and calling
+            # model-written questions "real" would make that comparison lie.
+            obj.setdefault("origin", origin)
             records.append(obj)
     return records
 

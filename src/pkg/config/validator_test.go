@@ -383,6 +383,28 @@ func TestValidateSyntheticNeedsPairsOrLabeled(t *testing.T) {
 	}
 }
 
+func TestValidateEvaluationCommittedOnly(t *testing.T) {
+	// pairs: 0 with committed records holds out only those records, so every
+	// account measures recall on the same questions.
+	cfg := validConfig()
+	cfg.Data.Evaluation = &EvalDataConfig{
+		Model:   "a-frontier-model",
+		Pairs:   0,
+		Labeled: []SourceConfig{{Path: "eval-labeled/retriever-heldout.jsonl"}},
+	}
+	if errs := Validate(cfg); len(errs) > 0 {
+		t.Fatalf("expected committed-only evaluation config to be valid, got: %v", errs)
+	}
+}
+
+func TestValidateEvaluationNeedsPairsOrLabeled(t *testing.T) {
+	cfg := validConfig()
+	cfg.Data.Evaluation = &EvalDataConfig{Model: "a-frontier-model"}
+	if errs := Validate(cfg); !hasFieldError(errs, "data.evaluation.pairs") {
+		t.Errorf("expected pairs-or-labeled error, got: %v", errs)
+	}
+}
+
 func TestValidateLabeledRejectedForGeneration(t *testing.T) {
 	cfg := validConfig() // task=generation
 	cfg.Data.Synthetic.Labeled = []SourceConfig{{Path: "train-labeled/a.jsonl"}}

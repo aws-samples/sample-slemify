@@ -477,8 +477,11 @@ def _retrieval_metrics(model, eval_pairs, corpus_texts, ks=(1, 2, 5, 10), ranks_
     # Cosine similarity (vectors are already L2-normalized) -> [n_queries, n_docs].
     sims = q_vecs @ doc_vecs.T
     max_k = max(ks)
-    # Top-k doc indices per query, best first.
-    topk = np.argsort(-sims, axis=1)[:, :max_k]
+    # Top-k doc indices per query, best first. A stable sort breaks a tie by
+    # corpus position, so two documents with the same similarity always rank in
+    # the order the corpus holds them. With the corpus order fixed
+    # (_effective_corpus), recall@k at a tie is then the same in every run.
+    topk = np.argsort(-sims, axis=1, kind="stable")[:, :max_k]
     ranks = []
     for i, g in enumerate(gold):
         row = topk[i].tolist()
@@ -500,6 +503,27 @@ def _retrieval_metrics(model, eval_pairs, corpus_texts, ks=(1, 2, 5, 10), ranks_
         metrics["by_origin"] = {o: summarize([i for i, oo in enumerate(origins) if oo == o])
                                 for o in groups}
     return metrics
+
+
+def _effective_corpus(corpus_texts, eval_rows):
+    """The document list recall@k is scored over: the training chunks plus any
+    held-out answer document they do not already hold.
+
+    Held-out positives are appended in eval_rows order, and each text is added
+    once. The order matters: a tie in similarity is broken by corpus position,
+    so a corpus built by iterating a Python set would rank tied documents
+    differently from one process to the next and move recall@k at the boundary.
+    Reading the rows in order makes the list the same in every run, and the
+    same in every account when the held-out rows come from a committed file.
+    """
+    texts = list(corpus_texts)
+    seen = set(texts)
+    for row in eval_rows:
+        text = row.get("positive", "")
+        if text and text not in seen:
+            texts.append(text)
+            seen.add(text)
+    return texts
 
 
 def train_embedding(model, train_rows, eval_rows):
@@ -529,13 +553,11 @@ def train_embedding(model, train_rows, eval_rows):
     if not corpus_texts:
         seen = {r.get("positive", "") for r in train_rows + eval_rows if r.get("positive")}
         corpus_texts = sorted(t for t in seen if t)
-    # Eval pairs are generated from an independent source, so their gold
+    # Eval pairs are held out from an independent source, so their gold
     # documents may not be in the training corpus. Add them so each eval query
     # has its positive present; the training chunks act as distractors. This
     # keeps recall@k honest (gold among a realistic candidate set).
-    eval_positives = {r.get("positive", "") for r in eval_rows if r.get("positive")}
-    corpus_set = set(corpus_texts)
-    corpus_texts = corpus_texts + [t for t in eval_positives if t and t not in corpus_set]
+    corpus_texts = _effective_corpus(corpus_texts, eval_rows)
     log(f"Retrieval corpus: {len(corpus_texts)} documents")
 
     # Baseline retrieval metrics (stock encoder) for a before/after comparison.

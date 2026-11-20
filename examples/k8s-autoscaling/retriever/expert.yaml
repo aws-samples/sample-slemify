@@ -29,8 +29,23 @@ data:
       type: raw
   synthetic:
     pairs: 1000
+  # The held-out set recall@k is measured on is committed, not generated per
+  # run: every deploy measures the same 42 questions against the same 14
+  # held-out documents, so stock recall@2 is the same number in every account.
+  # The questions were written once by the frontier model from the documents in
+  # eval-queries/ (see data/eval-labeled/README.md) and each pair keeps its own
+  # origin, "synthetic", because a model wrote it.
+  # sources stays: the pipeline re-chunks those documents to check that every
+  # committed pair still matches one. The trainer finds a pair's document by
+  # exact chunk text, so an edited document would otherwise shift recall with
+  # nothing said. Each document answers 3 of the 42 pairs, and the stage fails
+  # above 5 per cent of the pairs, so editing one document fails the stage
+  # until the pairs are regenerated.
+  # To generate instead, set pairs (e.g. 150) and drop labeled.
   evaluation:
-    pairs: 150
+    pairs: 0
+    labeled:
+      - path: eval-labeled/retriever-heldout.jsonl
     sources:
       - path: eval-queries/
         type: raw

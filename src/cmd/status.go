@@ -168,7 +168,7 @@ by passing the project name directly as an argument.`,
 		fmt.Println("Pipeline stages:")
 		for i, sr := range result.Stages {
 			prefix := fmt.Sprintf("  %d. %-10s", i+1, sr.Name)
-			icon := statusIcon(sr.Status)
+			icon := statusIcon(sr.Status, pipeline.Stage(sr.Name))
 			fmt.Printf("%s — %s %s%s\n", prefix, icon, sr.Status, fmtDetail(sr.Detail))
 
 			if sr.Status == "running" && sr.FailedAttempts > 0 {
@@ -237,12 +237,20 @@ func getDeploymentStatusStructured(ctx context.Context, client *k8s.Client, depN
 	return "starting", fmt.Sprintf("%d/%d ready", ready, total)
 }
 
-func statusIcon(status string) string {
+// statusIcon maps a stage status to its marker. A Job in state running is work
+// in progress and gets a progress marker: a check mark next to a training Job
+// that is still training reads as finished work. The serving Deployment
+// reports running once every replica is ready, which is its end state, so it
+// keeps the check mark.
+func statusIcon(status string, stage pipeline.Stage) string {
 	switch status {
 	case "completed":
 		return "✅"
 	case "running":
-		return "✅"
+		if stage == pipeline.StageServing {
+			return "✅"
+		}
+		return "🔄"
 	case "failed":
 		return "❌"
 	case "starting":

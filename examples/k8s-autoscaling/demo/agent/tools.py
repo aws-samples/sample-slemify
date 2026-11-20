@@ -260,7 +260,17 @@ def investigate_cluster(args: dict) -> str:
             event = _latest_warning_event(v1, p.metadata.namespace, p.metadata.name)
             if event:
                 lines.append(f"    event: {event}")
-        return nodepool_section + "PROBLEM PODS:\n" + "\n".join(lines)
+        # A pod that picks its node by label can only be explained with the
+        # pools that could provision for it: no pool may carry the label, or
+        # the pool that does may be capped (spec.limits.cpu "0" provisions
+        # nothing). Without the pool summaries the answer has the label and the
+        # taint and nothing about the cap, which is what happened to the
+        # live-evidence question. The no-problems path below already adds them;
+        # add them here too, unless the query named a pool and got that one.
+        pools = ""
+        if not nodepool_section and any(p.spec.node_selector for p in problems):
+            pools = "\n\nNODEPOOLS:\n" + _nodepool_summaries()
+        return nodepool_section + "PROBLEM PODS:\n" + "\n".join(lines) + pools
 
     # No unhealthy pods. Say so explicitly so the answer can state the reported
     # symptom isn't present rather than invent a cause for it.
