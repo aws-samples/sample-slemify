@@ -283,14 +283,17 @@ func (s SyntheticConfig) IsZero() bool {
 // that are independent from the training set.
 type EvalDataConfig struct {
 	Model   string         `json:"model" yaml:"model" validate:"required"`
-	Pairs   int            `json:"pairs" yaml:"pairs" validate:"required,min=10"`
+	Pairs   int            `json:"pairs" yaml:"pairs" validate:"omitempty,min=10"`
 	Sources []SourceConfig `json:"sources,omitempty" yaml:"sources,omitempty"`
-	// Labeled points at JSONL files of human-labeled held-out records under
+	// Labeled points at JSONL files of committed held-out records under
 	// data.path (classification and scoring: {"input", "output"}; embedding:
-	// {"query", "positive"}). They are appended to the generated eval set with
-	// source "real"; generated records carry source "synthetic". The report
-	// scores both groups separately, so a gap between them shows how far the
-	// synthetic distribution has drifted from what users actually write.
+	// {"query", "positive"}). They are appended to the generated eval set and
+	// carry origin "real" unless the record sets its own origin; generated
+	// records carry "synthetic". The report scores the groups separately, so a
+	// gap between them shows how far the synthetic distribution has drifted
+	// from what users actually write. With pairs at 0 nothing is generated and
+	// the committed records are the whole held-out set, which is what makes a
+	// measurement comparable between accounts.
 	Labeled []SourceConfig `json:"labeled,omitempty" yaml:"labeled,omitempty"`
 }
 

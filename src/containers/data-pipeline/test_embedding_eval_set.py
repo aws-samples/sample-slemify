@@ -27,16 +27,29 @@ QUERIES = [{"source": f"{PATH}queries/doc-{i}.txt",
 EVAL_DOCS = [{"source": f"{PATH}eval-queries/eval-{i}.txt",
               "content": f"Held-out document {i}. " + ("other words " * 40)}
              for i in range(4)]
-# Three committed held-out pairs. Each positive is the text of a chunk the
-# corpus already holds, so the retrieval index can rank it.
-COMMITTED = [{"query": "why do pods stay Pending when a NodePool has no capacity",
-              "positive": QUERIES[0]["content"].strip()},
-             {"query": "how do I stop consolidation from replacing nodes every minute",
-              "positive": QUERIES[5]["content"].strip()},
-             {"query": "which field caps the CPU a NodePool may provision",
-              "positive": QUERIES[9]["content"].strip()}]
-COMMITTED_FILE = {"source": f"{PATH}eval-labeled/retriever-heldout.jsonl",
-                  "content": "\n".join(json.dumps(r) for r in COMMITTED)}
+# The text of a document no source holds, for the drift cases below.
+GONE = "A document that was edited away. " + ("other words " * 40)
+
+
+def committed(missing=0):
+    """Forty committed held-out pairs. Each positive is the text of a chunk one
+    of the sources holds, half of them from the held-out documents, so the
+    retrieval index can rank it. With missing set, that many positives are
+    replaced by text no source holds, as an edited document would leave."""
+    docs = [d["content"].strip() for d in QUERIES] + [d["content"].strip() for d in EVAL_DOCS]
+    pairs = [{"query": f"committed question {i} about autoscaling",
+              "positive": docs[i % len(docs)]} for i in range(40)]
+    for i in range(missing):
+        pairs[i]["positive"] = GONE
+    return pairs
+
+
+COMMITTED = committed()
+
+
+def committed_file(missing=0):
+    return {"source": f"{PATH}eval-labeled/retriever-heldout.jsonl",
+            "content": "\n".join(json.dumps(r) for r in committed(missing))}
 
 
 def data_cfg(eval_pairs, labeled):
@@ -49,7 +62,7 @@ def data_cfg(eval_pairs, labeled):
     return cfg
 
 
-def run(account, eval_pairs=0, labeled=True):
+def run(account, eval_pairs=0, labeled=True, missing=0):
     """Run the embedding pipeline for one account. The questions a model call
     returns differ per account, in wording and in how many come back, which is
     the behavior a seeded chunk sample does not change."""
@@ -60,7 +73,7 @@ def run(account, eval_pairs=0, labeled=True):
         for source in sources:
             prefix = source.get("path", "")
             if prefix.startswith("eval-labeled/"):
-                out.append(COMMITTED_FILE)
+                out.append(committed_file(missing))
             elif prefix.startswith("eval-queries/"):
                 out.extend(EVAL_DOCS)
             else:
@@ -108,6 +121,39 @@ class CommittedHeldOutSetTest(unittest.TestCase):
         second = [r["query"] for r in self.second["proj/processed/train.jsonl"]]
         self.assertNotEqual(first, second)
         self.assertTrue(all(q.startswith("account-one") for q in first))
+
+
+class CorpusDriftTest(unittest.TestCase):
+    """A committed pair names its answer document by text, and the trainer adds
+    an answer it cannot find to the index rather than dropping it. So an edited
+    document has to be reported here, where both the pairs and the fresh chunks
+    are in hand."""
+
+    def test_pairs_that_still_match_are_reported_as_matching(self):
+        with self.assertLogs(main.logger, level="INFO") as logs:
+            run("account-one")
+        self.assertTrue(any("All 40 committed eval pairs match" in m for m in logs.output))
+
+    def test_a_few_edited_documents_warn_and_the_run_goes_on(self):
+        # 1 of 40 is 2.5%, under the 5% limit.
+        with self.assertLogs(main.logger, level="WARNING") as logs:
+            written = run("account-one", missing=1)
+        self.assertTrue(any("1 of 40 committed eval pairs (2.5%)" in m for m in logs.output))
+        self.assertTrue(any("no matching chunk" in m for m in logs.output))
+        self.assertEqual(len(written["proj/processed/eval.jsonl"]), 40)
+
+    def test_many_edited_documents_fail_the_stage(self):
+        # 4 of 40 is 10%, above the limit, so the run stops before training
+        # spends time measuring recall that cannot be compared with anything.
+        with self.assertLogs(main.logger, level="ERROR") as logs:
+            with self.assertRaises(SystemExit) as exit_code:
+                run("account-one", missing=4)
+        self.assertEqual(exit_code.exception.code, 1)
+        self.assertTrue(any("4 of 40 committed eval pairs (10.0%)" in m for m in logs.output))
+        self.assertTrue(any("Regenerate the committed pairs" in m for m in logs.output))
+
+    def test_the_limit_is_the_documented_one(self):
+        self.assertEqual(main.COMMITTED_PAIR_DRIFT_LIMIT, 0.05)
 
 
 class GeneratedHeldOutSetTest(unittest.TestCase):

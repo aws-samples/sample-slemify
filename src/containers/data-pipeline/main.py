@@ -665,6 +665,43 @@ def _chunk_split_index(pairs, index):
     return index if index > 0 else start
 
 
+# The trainer locates a held-out pair's answer document by exact chunk text
+# (there is no chunk id), and it appends an answer it cannot find to the
+# retrieval index. A committed pair whose document was edited since the pair
+# was written would therefore still be scored, against text no source holds
+# any more, and recall would drift without a word. So the pipeline counts the
+# committed pairs it cannot match and fails above this share of them. Five per
+# cent is above one edited document in a corpus of this size and below a
+# corpus that has really moved on.
+COMMITTED_PAIR_DRIFT_LIMIT = 0.05
+
+
+def _check_committed_positives(labeled, chunks, bucket, data_cfg, eval_cfg):
+    """Fail when too many committed pairs no longer match a chunk of the
+    configured sources. The answer documents of a committed set usually come
+    from data.evaluation.sources, which the committed path does not otherwise
+    read, so those documents are chunked here as well."""
+    known = {c["text"] for c in chunks}
+    eval_sources = eval_cfg.get("sources") or []
+    if eval_sources:
+        known |= {c["text"] for c in
+                  _chunk_documents(read_raw_sources(bucket, data_cfg["path"], eval_sources))}
+    missing = sum(1 for r in labeled if r["positive"] not in known)
+    if not missing:
+        logger.info("All %d committed eval pairs match a chunk of the current corpus", len(labeled))
+        return
+    share = missing / len(labeled)
+    where = "data.sources" + (" or data.evaluation.sources" if eval_sources else "")
+    msg = (f"{missing} of {len(labeled)} committed eval pairs ({share:.1%}) have no matching chunk "
+           f"under {where}: those documents changed since the pairs were written")
+    if share > COMMITTED_PAIR_DRIFT_LIMIT:
+        logger.error("%s. Regenerate the committed pairs or restore the documents; recall measured "
+                     "now would not be comparable with any other run.", msg)
+        sys.exit(1)
+    logger.warning("%s. Their recall is measured against the committed text, not against any "
+                   "current document.", msg)
+
+
 def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, synthetic_cfg):
     """Generate contrastive (query, positive) pairs and a retrieval corpus.
 
@@ -707,6 +744,8 @@ def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, 
     eval_cfg = data_cfg.get("evaluation") or {}
     labeled = read_labeled_records(bucket, data_cfg["path"], eval_cfg.get("labeled") or [])
     labeled = [r for r in labeled if r.get("query") and r.get("positive")]
+    if labeled:
+        _check_committed_positives(labeled, chunks, bucket, data_cfg, eval_cfg)
     if labeled and not eval_cfg.get("pairs", 0):
         # Committed pairs only. Recall is then measured on the same questions
         # against the same documents in every account, because nothing in the
@@ -786,7 +825,11 @@ def read_labeled_records(bucket: str, path: str, sources: list[dict],
                 continue
             if not isinstance(obj, dict):
                 continue
-            obj["origin"] = origin
+            # A record that states its own origin keeps it. The committed
+            # retriever pairs were written by a model, so they stay
+            # "synthetic": the report compares the two origins, and calling
+            # model-written questions "real" would make that comparison lie.
+            obj.setdefault("origin", origin)
             records.append(obj)
     return records
 
