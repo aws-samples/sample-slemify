@@ -12,8 +12,8 @@ k8s-autoscaling/
 ├── retriever/        # Retriever config (embedding, domain-tuned RAG vectors)
 ├── data/
 │   ├── queries/      # 91 training seed queries (real-world K8s configs)
-│   ├── eval-queries/ # 14 held-out seed queries for the generated eval set
-│   └── eval-labeled/ # 43 human-labeled held-out queries (JSONL) the report scores as "real"
+│   ├── eval-queries/ # 14 held-out documents the retriever's committed pairs point at
+│   └── eval-labeled/ # committed held-out sets (JSONL): 43 labeled triage messages, 42 retriever pairs
 ├── demo/             # Agentic demo application (orchestrator + one model per step)
 │   ├── agent/        # LangGraph agent package (triage, retrieval, faithfulness gate, generation, tools, remediation)
 │   ├── server.py     # FastAPI entrypoint (serves the agent graph + chat UI)

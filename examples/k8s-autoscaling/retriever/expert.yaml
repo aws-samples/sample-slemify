@@ -29,19 +29,21 @@ data:
       type: raw
   synthetic:
     pairs: 1000
-  # The held-out set recall@k is measured on. It is generated here, so each
-  # account writes its own questions and its recall numbers are its own. To
-  # measure every account on the same questions instead, commit one
-  # (query, positive) set, point labeled at it and set pairs to 0:
-  #   evaluation:
-  #     pairs: 0
-  #     labeled:
-  #       - path: eval-labeled/retriever-heldout.jsonl
-  # The positive of each committed pair must be the exact text of a chunk, as
-  # the trainer locates it in the corpus by exact match. This is the same
-  # arrangement the triage expert uses for its training records.
+  # The held-out set recall@k is measured on is committed, not generated per
+  # run: every deploy measures the same 42 questions against the same 14
+  # held-out documents, so stock recall@2 is the same number in every account.
+  # The questions were written once by the frontier model from the documents in
+  # eval-queries/ (see data/eval-labeled/README.md) and each pair keeps its own
+  # origin, "synthetic", because a model wrote it.
+  # sources stays: the pipeline re-chunks those documents to check that every
+  # committed pair still matches one, and fails if too many no longer do. The
+  # trainer finds a pair's document by exact chunk text, so an edited document
+  # would otherwise shift recall with nothing said.
+  # To generate instead, set pairs (e.g. 150) and drop labeled.
   evaluation:
-    pairs: 150
+    pairs: 0
+    labeled:
+      - path: eval-labeled/retriever-heldout.jsonl
     sources:
       - path: eval-queries/
         type: raw
