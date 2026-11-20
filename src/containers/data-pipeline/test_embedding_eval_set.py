@@ -31,14 +31,22 @@ EVAL_DOCS = [{"source": f"{PATH}eval-queries/eval-{i}.txt",
 GONE = "A document that was edited away. " + ("other words " * 40)
 
 
+# The shipped file has the same shape: 14 answer documents, three questions
+# each, 42 pairs in all, grouped by document. Each record states its own
+# origin, and that origin is "synthetic", because a model wrote the questions.
+DOCS = ([d["content"].strip() for d in QUERIES] + [d["content"].strip() for d in EVAL_DOCS])[:14]
+PAIRS_PER_DOC = 3
+
+
 def committed(missing=0):
-    """Forty committed held-out pairs. Each positive is the text of a chunk one
-    of the sources holds, half of them from the held-out documents, so the
-    retrieval index can rank it. With missing set, that many positives are
-    replaced by text no source holds, as an edited document would leave."""
-    docs = [d["content"].strip() for d in QUERIES] + [d["content"].strip() for d in EVAL_DOCS]
-    pairs = [{"query": f"committed question {i} about autoscaling",
-              "positive": docs[i % len(docs)]} for i in range(40)]
+    """The committed held-out pairs. Each positive is the text of a chunk one
+    of the sources holds, so the retrieval index can rank it. With missing set,
+    the first that many positives are replaced by text no source holds, as an
+    edited document would leave. The pairs are grouped by document, so missing
+    at PAIRS_PER_DOC is one edited document."""
+    pairs = [{"query": f"committed question {q} about document {d}",
+              "positive": doc, "origin": "synthetic"}
+             for d, doc in enumerate(DOCS) for q in range(PAIRS_PER_DOC)]
     for i in range(missing):
         pairs[i]["positive"] = GONE
     return pairs
@@ -108,7 +116,19 @@ class CommittedHeldOutSetTest(unittest.TestCase):
         held_out = self.first["proj/processed/eval.jsonl"]
         self.assertEqual([r["query"] for r in held_out], [r["query"] for r in COMMITTED])
         self.assertEqual([r["positive"] for r in held_out], [r["positive"] for r in COMMITTED])
-        self.assertEqual({r["origin"] for r in held_out}, {"real"})
+
+    def test_the_origin_each_record_states_is_the_one_that_is_written(self):
+        # The shipped pairs declare "synthetic", because a model wrote the
+        # questions. The pipeline must not restamp them "real": the report
+        # scores the two origins separately.
+        held_out = self.first["proj/processed/eval.jsonl"]
+        self.assertEqual({r["origin"] for r in held_out}, {"synthetic"})
+
+    def test_the_log_names_the_origin_the_records_carry(self):
+        with self.assertLogs(main.logger, level="INFO") as logs:
+            run("account-one")
+        self.assertTrue(any("committed eval pairs (origin=synthetic)" in m for m in logs.output),
+                        f"the log did not name the shipped origin: {logs.output}")
 
     def test_two_accounts_write_the_same_retrieval_corpus(self):
         self.assertEqual(self.first["proj/processed/corpus.jsonl"],
@@ -125,35 +145,46 @@ class CommittedHeldOutSetTest(unittest.TestCase):
 
 class CorpusDriftTest(unittest.TestCase):
     """A committed pair names its answer document by text, and the trainer adds
-    an answer it cannot find to the index rather than dropping it. So an edited
-    document has to be reported here, where both the pairs and the fresh chunks
-    are in hand."""
+    an answer it cannot find to the index rather than dropping it. So a pair
+    whose document changed has to be reported here, where both the pairs and
+    the fresh chunks are in hand.
+
+    The limit counts pairs, not documents: it is a share of the committed
+    pairs. Because each document answers three of them, one edited document
+    takes three pairs past the limit and fails the stage."""
 
     def test_pairs_that_still_match_are_reported_as_matching(self):
         with self.assertLogs(main.logger, level="INFO") as logs:
             run("account-one")
-        self.assertTrue(any("All 40 committed eval pairs match" in m for m in logs.output))
+        self.assertTrue(any("All 42 committed eval pairs match" in m for m in logs.output))
 
-    def test_a_few_edited_documents_warn_and_the_run_goes_on(self):
-        # 1 of 40 is 2.5%, under the 5% limit.
+    def test_one_unmatched_pair_warns_and_the_run_goes_on(self):
+        # 1 of 42 is 2.4%, under the 5% limit. A single pair can lose its
+        # document to a reworded heading, which is worth a loud count and no
+        # more.
         with self.assertLogs(main.logger, level="WARNING") as logs:
             written = run("account-one", missing=1)
-        self.assertTrue(any("1 of 40 committed eval pairs (2.5%)" in m for m in logs.output))
+        self.assertTrue(any("1 of 42 committed eval pairs (2.4%)" in m for m in logs.output))
         self.assertTrue(any("no matching chunk" in m for m in logs.output))
-        self.assertEqual(len(written["proj/processed/eval.jsonl"]), 40)
+        self.assertEqual(len(written["proj/processed/eval.jsonl"]), 42)
 
-    def test_many_edited_documents_fail_the_stage(self):
-        # 4 of 40 is 10%, above the limit, so the run stops before training
-        # spends time measuring recall that cannot be compared with anything.
+    def test_one_edited_document_takes_its_three_pairs_and_fails_the_stage(self):
+        # The pairs are grouped by document, so the first three are the three
+        # questions one document answers. 3 of 42 is 7.1%, above the limit, so
+        # the run stops before training measures recall that cannot be compared
+        # with any other run.
         with self.assertLogs(main.logger, level="ERROR") as logs:
             with self.assertRaises(SystemExit) as exit_code:
-                run("account-one", missing=4)
+                run("account-one", missing=PAIRS_PER_DOC)
         self.assertEqual(exit_code.exception.code, 1)
-        self.assertTrue(any("4 of 40 committed eval pairs (10.0%)" in m for m in logs.output))
+        self.assertTrue(any("3 of 42 committed eval pairs (7.1%)" in m for m in logs.output))
         self.assertTrue(any("Regenerate the committed pairs" in m for m in logs.output))
 
-    def test_the_limit_is_the_documented_one(self):
+    def test_the_limit_is_a_share_of_the_pairs(self):
         self.assertEqual(main.COMMITTED_PAIR_DRIFT_LIMIT, 0.05)
+        # One document's pairs are above that share for the shipped set, which
+        # is why one edited document fails rather than warns.
+        self.assertGreater(PAIRS_PER_DOC / len(COMMITTED), main.COMMITTED_PAIR_DRIFT_LIMIT)
 
 
 class GeneratedHeldOutSetTest(unittest.TestCase):
@@ -167,11 +198,14 @@ class GeneratedHeldOutSetTest(unittest.TestCase):
                             [r["query"] for r in second["proj/processed/eval.jsonl"]])
 
     def test_committed_pairs_are_appended_when_generation_stays_on(self):
-        # Today's retriever config: a generated held-out set with committed
+        # The other arrangement: a generated held-out set with the committed
         # pairs added to it. The committed part is comparable, the rest is not.
         held_out = run("account-one", eval_pairs=12)["proj/processed/eval.jsonl"]
-        self.assertEqual({r["origin"] for r in held_out}, {"synthetic", "real"})
         self.assertGreater(len(held_out), len(COMMITTED))
+        self.assertEqual([r["query"] for r in held_out[-len(COMMITTED):]],
+                         [r["query"] for r in COMMITTED])
+        # Both parts were written by a model, so both read "synthetic".
+        self.assertEqual({r["origin"] for r in held_out}, {"synthetic"})
 
 
 if __name__ == "__main__":

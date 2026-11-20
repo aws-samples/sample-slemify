@@ -670,9 +670,14 @@ def _chunk_split_index(pairs, index):
 # retrieval index. A committed pair whose document was edited since the pair
 # was written would therefore still be scored, against text no source holds
 # any more, and recall would drift without a word. So the pipeline counts the
-# committed pairs it cannot match and fails above this share of them. Five per
-# cent is above one edited document in a corpus of this size and below a
-# corpus that has really moved on.
+# committed pairs it cannot match and fails above this share of them.
+#
+# The unit is pairs, not documents. For the shipped retriever set, 42 pairs
+# over 14 documents, each document answers three pairs, so one edited document
+# is 7.1 per cent and fails the stage. That is the intended reading: once a
+# document has changed, recall measured on the pairs that point at it cannot
+# be compared with another account's run. A share below the limit means a pair
+# or two lost their text to a small edit, which is reported and allowed.
 COMMITTED_PAIR_DRIFT_LIMIT = 0.05
 
 
@@ -773,8 +778,14 @@ def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, 
     for pr in eval_pairs:
         pr.setdefault("origin", "synthetic")
     if labeled:
-        logger.info("Holding out %d committed eval pairs (origin=real) with %d generated ones",
-                    len(labeled), len(eval_pairs))
+        # The origin comes from the records, not from this line. A committed
+        # retriever pair keeps "synthetic", because a model wrote the question,
+        # and a hand-labeled set keeps "real". The report scores the two
+        # origins separately, so a log that named one of them would misreport
+        # what was held out.
+        origins = ", ".join(sorted({r.get("origin", "") for r in labeled if r.get("origin")}))
+        logger.info("Holding out %d committed eval pairs (origin=%s) with %d generated ones",
+                    len(labeled), origins or "unset", len(eval_pairs))
         eval_pairs = eval_pairs + labeled
 
     logger.info("Writing %d train / %d eval pairs and %d-chunk corpus to s3://%s/",
