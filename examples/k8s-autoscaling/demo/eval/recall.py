@@ -23,10 +23,12 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import statistics
 import sys
 import time
 from datetime import datetime, timezone
+from botocore.exceptions import ClientError, ReadTimeoutError
 
 # The reranker helper checks config.RERANK; force it on here so this script can
 # exercise the reranker regardless of how the orchestrator is configured.
@@ -40,10 +42,42 @@ SET = os.path.join(HERE, "recall-set.jsonl")
 RESULTS_DIR = os.path.join(HERE, "results")
 MODES = ["bedrock", "slemify", "slemify+rerank"]
 RANK_DEPTH = 10  # MRR counts a hit anywhere in the top 10
+# The bedrock row makes one Titan call per held-out query. A transient Bedrock
+# error ends the whole run, so retry it: up to 4 attempts, waiting about 1, 2
+# and 4 s (plus up to 0.5 s of jitter), under 10 s extra in all. botocore does
+# not retry ModelErrorException (HTTP 424), so the client config alone is not
+# enough.
+EMBED_ATTEMPTS = 4
+EMBED_BASE_DELAY_S = 1.0
+RETRYABLE_CODES = {"ModelErrorException", "ThrottlingException", "ServiceUnavailableException",
+                   "InternalServerException", "ModelNotReadyException"}
 
 
 def chunk_id(text: str) -> str:
     return hashlib.sha1(text.strip().encode("utf-8")).hexdigest()[:16]
+
+
+def _transient(exc: Exception) -> str | None:
+    """The error name when it is worth another try, else None."""
+    if isinstance(exc, ClientError):
+        code = exc.response.get("Error", {}).get("Code", "")
+        return code if code in RETRYABLE_CODES else None
+    return "ReadTimeoutError" if isinstance(exc, ReadTimeoutError) else None
+
+
+def embed_bedrock(query: str) -> list[float]:
+    """retrieval._embed_bedrock, retrying transient Bedrock errors with backoff."""
+    for n in range(EMBED_ATTEMPTS):
+        try:
+            return retrieval._embed_bedrock(query)
+        except Exception as e:
+            name = _transient(e)
+            if name is None or n == EMBED_ATTEMPTS - 1:
+                raise
+            wait = EMBED_BASE_DELAY_S * 2 ** n + random.uniform(0, 0.5)
+            print(f"  Bedrock {name} on an embedding call; retrying in {wait:.1f}s "
+                  f"(attempt {n + 1}/{EMBED_ATTEMPTS})", flush=True)
+            time.sleep(wait)
 
 
 def _search(index: str, body: dict) -> list[dict]:
@@ -54,7 +88,7 @@ def _search(index: str, body: dict) -> list[dict]:
 def candidates(mode: str, query: str) -> list[dict]:
     """Hybrid pool exactly as the agent builds it: dense first, then BM25, de-duplicated."""
     if mode == "bedrock":
-        emb, index = retrieval._embed_bedrock(query), config.BEDROCK_INDEX_NAME
+        emb, index = embed_bedrock(query), config.BEDROCK_INDEX_NAME
     else:
         emb, index = retrieval._embed_slemify(query), config.INDEX_NAME
     dense = _search(index, {"size": config.RETRIEVE_CANDIDATES,
