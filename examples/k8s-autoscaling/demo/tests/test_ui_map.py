@@ -8,6 +8,8 @@ Set UI_MAP_SCREENSHOT_DIR to save a screenshot of each map.
 """
 import json
 import os
+import socket
+import struct
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -88,10 +90,18 @@ def error_body(steps):
           {"type": "cost", "usd": 0.0, "bedrock_calls": 0, "steps": steps, "total_ms": 5},
           {"type": "total", "ms": 5}]
     return ("".join(f"data: {json.dumps(e)}\n\n" for e in ev) + "data: [DONE]\n\n").encode()
+def partial_body(steps):
+    """Two events and no [DONE]: what the browser reads when the stream is cut."""
+    ev = [{"type": "steps", "steps": steps},
+          {"type": "step_start", "name": "Analyst SLM (CPU)", "note": ""}]
+    return "".join(f"data: {json.dumps(e)}\n\n" for e in ev).encode()
 class Stub:
     steps = None
     names = None
     body = None
+    # Replaces the /query or /apply response: "reset", or (status, content type, body).
+    raw = None
+    proposal = None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -113,7 +123,32 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        self.send(Stub.body or sse_body(Stub.steps, Stub.names), "text/event-stream")
+        if Stub.raw is not None and (self.path == "/apply" or not Stub.proposal):
+            self.send_raw(Stub.raw)
+        elif Stub.proposal:
+            self.send(Stub.proposal, "text/event-stream")
+        else:
+            self.send(Stub.body or sse_body(Stub.steps, Stub.names), "text/event-stream")
+    def send_raw(self, raw):
+        if raw == "reset":
+            # Promise more bytes than are sent, then reset the connection.
+            part = partial_body(Stub.steps)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(part) + 1000))
+            self.end_headers()
+            self.wfile.write(part)
+            self.wfile.flush()
+            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            self.connection.close()
+            self.close_connection = True
+            return
+        status, ctype, body = raw
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
 @unittest.skipIf(sync_playwright is None, "playwright is not installed")
@@ -216,5 +251,59 @@ class UiMapTest(unittest.TestCase):
         self.assertNotIn("/ 1", tally)
 
 
+    def lost_alert(self, setup, click_apply=False):
+        """Run one query against a stub that fails; return the alert text, the
+        alert count, whether Send is enabled and the Apply button state."""
+        Stub.steps, Stub.names = CONFIGS["row4"][0], []
+        setup()
+        page = self.browser.new_page()
+        try:
+            page.route("https://cdn.jsdelivr.net/**",
+                       lambda r: r.fulfill(body="", content_type="application/javascript"))
+            page.goto(self.url)
+            page.fill("#input", QUESTION)
+            page.click("#send")
+            if click_apply:
+                page.locator(".proposal button").click()
+            page.wait_for_function("document.querySelector('.msg.error[role=alert]') !== null", timeout=5000)
+            page.wait_for_function("!document.getElementById('send').disabled", timeout=5000)
+            alert = page.locator(".msg.error[role=alert]")
+            apply_btn = page.locator(".proposal button")
+            return (alert.inner_text(), alert.count(),
+                    page.evaluate("!document.getElementById('send').disabled"),
+                    apply_btn.is_enabled() if apply_btn.count() else None)
+        finally:
+            page.close()
+            Stub.raw = Stub.proposal = Stub.body = None
+    def assert_lost(self, result, reason):
+        text, count, send_enabled, _ = result
+        self.assertEqual(count, 1)
+        self.assertTrue(send_enabled, "Send stays disabled")
+        self.assertIn("The connection to the orchestrator was lost.", text)
+        self.assertIn(reason, text)
+        self.assertIn("Reload this tab.", text)
+        self.assertIn("reload the IDE tab and wait about a minute", text)
+    def test_proxy_405_text_shows_error(self):
+        # The ports proxy answers a POST with 405 text when the IDE extension host is gone.
+        result = self.lost_alert(lambda: setattr(
+            Stub, "raw", (405, "text/plain", b"Unsupported method POST")))
+        self.assert_lost(result, "The server answered 405 instead of a stream.")
+    def test_stream_closed_without_done_shows_error(self):
+        result = self.lost_alert(lambda: setattr(Stub, "body", partial_body(Stub.steps)))
+        self.assert_lost(result, "The connection closed before the answer finished.")
+    def test_connection_reset_mid_stream_shows_error(self):
+        result = self.lost_alert(lambda: setattr(Stub, "raw", "reset"))
+        self.assertEqual(result[1], 1)
+        self.assertTrue(result[2], "Send stays disabled")
+        self.assertIn("The connection to the orchestrator was lost.", result[0])
+    def test_apply_405_text_shows_error_and_reenables_button(self):
+        proposal = {"type": "proposal", "kind": "nodepool", "target": "demo-payments",
+                    "field": "limits.cpu", "value": "100", "summary": "Raise the CPU limit"}
+        def setup():
+            Stub.proposal = (f"data: {json.dumps(proposal)}\n\ndata: [DONE]\n\n").encode()
+            Stub.raw = (405, "text/plain", b"Unsupported method POST")
+        result = self.lost_alert(setup, click_apply=True)
+        self.assert_lost(result, "The server answered 405 instead of a stream.")
+        self.assertTrue(result[3], "Apply button stays disabled")
 if __name__ == "__main__":
     unittest.main()

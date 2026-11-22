@@ -306,15 +306,30 @@ const SCENARIOS=[
 const scBar=document.getElementById('scenarios');
 SCENARIOS.forEach(s=>{ const b=document.createElement('button'); b.className='chip'; b.textContent=s.label; b.onclick=()=>{ input.value=s.text; send(); }; scBar.appendChild(b); });
 
+// POST to the orchestrator and return the response only when it is an event
+// stream. The ports proxy answers 405 or "Not found." as plain text when the
+// IDE extension host is gone; reading that as a stream would show nothing.
+async function openStream(url, payload){
+  const resp=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  if(!resp.ok || !(resp.headers.get('content-type')||'').includes('text/event-stream'))
+    throw new Error('The server answered '+resp.status+' instead of a stream.');
+  return resp;
+}
+function showConnectionLost(e){
+  const d=addMsg('<strong>The connection to the orchestrator was lost.</strong> '+esc(e&&e.message||'Unknown error')+'<br>Reload this tab. If it shows <code>Not found.</code>, reload the IDE tab and wait about a minute.','error');
+  d.setAttribute('role','alert');
+  traceNote('connection lost');
+}
 async function send(){
   const text=input.value.trim(); if(!text) return;
   input.value=''; btn.disabled=true; steps={};
   trace.innerHTML=''; traceTotal.textContent=''; gReset();
   addMsg(esc(text).replace(/\n/g,'<br>'),'user');
 
-  let usedLLM=false, failed=false;
+  let usedLLM=false, failed=false, finished=false;
   const auto = document.getElementById('autopilot');
-  const resp=await fetch('query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text, autopilot: !!(auto && auto.checked)})});
+  try{
+  const resp=await openStream('query',{text, autopilot: !!(auto && auto.checked)});
   const reader=resp.body.getReader(); const dec=new TextDecoder();
   let responseDiv=null, rawText='', buffer='';
 
@@ -326,6 +341,7 @@ async function send(){
       if(!line.startsWith('data: ')) continue;
       const data=line.slice(6);
       if(data==='[DONE]'){
+        finished=true;
         if(responseDiv&&rawText) responseDiv.innerHTML=renderMd(rawText);
         // A failed query is not a run the CPU handled; leave the tally alone.
         if(!failed){ totalRuns++; if(!usedLLM) cpuRuns++; updateTally(); }
@@ -366,7 +382,12 @@ async function send(){
       }catch(e){}
     }
   }
-  btn.disabled=false; input.focus();
+  if(!finished) throw new Error('The connection closed before the answer finished.');
+  }catch(e){
+    showConnectionLost(e);
+  }finally{
+    btn.disabled=false; input.focus();
+  }
 }
 function addProposal(msg){
   const e=document.getElementById('empty'); if(e) e.remove();
@@ -382,7 +403,9 @@ function addProposal(msg){
 
 async function applyFix(kind, target, field, value, btn){
   btn.disabled=true; btn.textContent='Applying\u2026';
-  const resp=await fetch('apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,target,field,value})});
+  let finished=false;
+  try{
+  const resp=await openStream('apply',{kind,target,field,value});
   const reader=resp.body.getReader(); const dec=new TextDecoder(); let buffer='';
   while(true){
     const {done,value}=await reader.read(); if(done) break;
@@ -391,7 +414,7 @@ async function applyFix(kind, target, field, value, btn){
     for(const line of lines){
       if(!line.startsWith('data: ')) continue;
       const data=line.slice(6);
-      if(data==='[DONE]') break;
+      if(data==='[DONE]'){ finished=true; break; }
       try{
         const m=JSON.parse(data);
         if(m.type==='step_start'){ addStep(m.name, m.note); gActivate(m.name); }
@@ -400,7 +423,12 @@ async function applyFix(kind, target, field, value, btn){
       }catch(e){}
     }
   }
+  if(!finished) throw new Error('The connection closed before the fix finished.');
   btn.textContent='Applied';
+  }catch(e){
+    btn.disabled=false; btn.textContent='Apply this fix';
+    showConnectionLost(e);
+  }
 }
 
 applySteps(null);
