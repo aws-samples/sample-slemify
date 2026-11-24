@@ -173,6 +173,8 @@ class S3Stub:
         self.puts[Key] = Body
     def delete_object(self, Bucket, Key):
         self.deletes.append(Key)
+    def get_object(self, **kw):
+        raise ClientError({"Error": {"Code": "NoSuchKey", "Message": "stub"}}, "GetObject")
 class FloorTest(RoundsBase):
     DATA_CFG = {"bucket": "b", "path": "p/", "sources": []}
     def run_pipeline(self, backend, target_pairs=30, corpus=CORPUS):

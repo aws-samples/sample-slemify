@@ -14,7 +14,7 @@ import os
 import sys
 import unittest
 from unittest import mock
-
+from botocore.exceptions import ClientError
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-west-2")
 
@@ -70,6 +70,16 @@ def data_cfg(eval_pairs, labeled):
     return cfg
 
 
+class NoS3:
+    """Stands for boto3.client("s3"): nothing is stored, and every read finds
+    no object. The pipeline's own S3 calls (the failure record, the prebuilt
+    pairs) must not reach a real bucket."""
+    def put_object(self, **kw):
+        pass
+    def delete_object(self, **kw):
+        pass
+    def get_object(self, **kw):
+        raise ClientError({"Error": {"Code": "NoSuchKey", "Message": "stub"}}, "GetObject")
 def run(account, eval_pairs=0, labeled=True, missing=0):
     """Run the embedding pipeline for one account. The questions a model call
     returns differ per account, in wording and in how many come back, which is
@@ -98,6 +108,7 @@ def run(account, eval_pairs=0, labeled=True, missing=0):
     with mock.patch.object(main, "_select_backend", lambda model, endpoint: object()), \
             mock.patch.object(main, "_calculate_concurrency", lambda model: 8), \
             mock.patch.object(main, "_generate_queries_for_chunk", queries), \
+            mock.patch.object(main.boto3, "client", lambda *a, **k: NoS3()), \
             mock.patch.object(main, "read_raw_sources", read_raw_sources), \
             mock.patch.object(main, "write_jsonl_to_s3",
                               lambda bucket, key, records: written.__setitem__(key, records)):
