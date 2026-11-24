@@ -10,11 +10,28 @@ Supports three output shapes:
 - pipe_delimited (default): Structured label output (e.g., "label1|label2").
 - free_form: Structured reasoning output for audit/analysis tasks.
 - scoring: A single numeric target in [0,1] for regression/guardrail tasks.
+
+Retriever (task: embedding) projects can take their training pairs from a file
+instead of a model call. When <data.path>prebuilt/<project>/manifest.json and
+train.jsonl exist in the bucket and pass every check in _read_prebuilt_pairs,
+the pipeline uses those pairs and makes no model call for them. Any failed
+check logs one WARNING and the pipeline generates the pairs as usual. The
+workshop's central prep build writes these two files once per release with
+
+    python3 main.py --pairs-only --config <expert.yaml> --sources-dir <dir> \\
+        --out train.jsonl --manifest manifest.json
+
+which runs the same chunking, chunk sample and generation as the Job does, on
+the source files in <dir> instead of on S3 objects.
 """
 
+import argparse
+import datetime
+import hashlib
 import json
 import logging
 import math
+import os
 import random
 import re
 import sys
@@ -47,6 +64,9 @@ CHUNK_SAMPLE_SEED = 20261119
 # ROUND_JITTER_S, and no round starts after PAIR_RETRY_BUDGET_S seconds from
 # the end of the first pass. The Job runs the pipeline up to 3 times, so an
 # outage of about 25 minutes fits.
+# The model the Go CLI uses when expert.yaml names none (loader.go), for
+# --pairs-only runs that have no SLEMIFY_BEDROCK_MODEL.
+DEFAULT_PAIRS_MODEL = "global.anthropic.claude-sonnet-5"
 PAIR_RETRY_BUDGET_S = 480
 ROUND_PAUSES_S = (30, 60, 120, 240)
 ROUND_JITTER_S = 10
@@ -297,6 +317,8 @@ Output exactly {n_queries} JSON objects, one per line (JSONL). No array brackets
 # === Pipeline ===
 
 def main():
+    if "--pairs-only" in sys.argv[1:]:
+        sys.exit(pairs_only(sys.argv[1:]))
     config_path = "/config/expert.yaml"
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
@@ -622,6 +644,10 @@ def _generate_queries_for_chunk(backend, domain, chunk_text, n_queries):
     return queries
 
 
+def _expected_pairs(n_chunks, target_pairs, queries_per_chunk=3):
+    """The most pairs a corpus of n_chunks gives for this target."""
+    needed = min(n_chunks, (target_pairs + queries_per_chunk - 1) // queries_per_chunk)
+    return min(needed * queries_per_chunk, target_pairs)
 def _monotonic():
     return time.monotonic()
 def _pause(seconds):
@@ -649,7 +675,7 @@ def _generate_pairs_stats(raw_content, model, endpoint, target_pairs, domain, qu
     logger.info("Chunked corpus into %d document chunks", len(chunks))
     # Only process as many chunks as needed to hit the target pair count.
     needed_chunks = min(len(chunks), (target_pairs + queries_per_chunk - 1) // queries_per_chunk)
-    stats["expected"] = min(needed_chunks * queries_per_chunk, target_pairs)
+    stats["expected"] = _expected_pairs(len(chunks), target_pairs, queries_per_chunk)
     # Fixed seed, so the same corpus always yields the same chunks in the same
     # order. Two accounts running this pipeline then mine the same documents in
     # the same order, which is what makes their recall numbers comparable. The
@@ -771,6 +797,190 @@ def _check_committed_positives(labeled, chunks, bucket, data_cfg, eval_cfg):
                    "current document.", msg)
 
 
+PREBUILT_VERSION = 1
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+def _corpus_sha256(chunks):
+    """Hash of the chunk texts, one per line, in chunk order."""
+    return hashlib.sha256("\n".join(c["text"] for c in chunks).encode("utf-8")).hexdigest()
+def _prebuilt_keys(data_path, project_name):
+    base = f"{data_path.rstrip('/')}/prebuilt/{project_name}/"
+    return base + "manifest.json", base + "train.jsonl"
+def _positive_int(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+def _read_prebuilt_pairs(bucket, data_path, project_name, chunks, expected, target_pairs):
+    """Return the prebuilt training pairs, or None to generate them.
+    The pairs sit at <data_path>prebuilt/<project>/{manifest.json,train.jsonl}.
+    Every check that fails logs one WARNING (an absent manifest logs INFO) and
+    returns None, so a bad file never stops the run. The checks, in order: the
+    manifest is version 1 for this project with positive counts and 64-digit
+    hashes; train.jsonl has the stated size and sha256; its chunks are the
+    chunks of the sources this run just read; every line is a pair; the line
+    count is the stated count; every positive is one of those chunks; and the
+    count is at least MIN_PAIR_SHARE of the expected pairs."""
+    manifest_key, train_key = _prebuilt_keys(data_path, project_name)
+    s3 = boto3.client("s3")
+    def warn(reason):
+        logger.warning("Prebuilt pairs at s3://%s/%s not used (%s); generating", bucket, train_key, reason)
+    def fetch(key):
+        return s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    try:
+        raw_manifest = fetch(manifest_key)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("NoSuchKey", "404", "NotFound"):
+            logger.info("No prebuilt pairs at s3://%s/%s; generating", bucket, manifest_key)
+        else:
+            warn(f"reading the manifest failed: {code or 'ClientError'}")
+        return None
+    except Exception as e:
+        warn(f"reading the manifest failed: {type(e).__name__}")
+        return None
+    try:
+        manifest = json.loads(raw_manifest)
+    except ValueError:
+        warn("the manifest is not JSON")
+        return None
+    if not isinstance(manifest, dict) or manifest.get("version") != PREBUILT_VERSION:
+        warn("the manifest version is not 1")
+        return None
+    if manifest.get("project") != project_name:
+        warn("the manifest is for another project")
+        return None
+    for field in ("pairs", "bytes", "chunks"):
+        if not _positive_int(manifest.get(field)):
+            warn(f"manifest {field} is not a positive integer")
+            return None
+    for field in ("sha256", "corpus_sha256"):
+        value = manifest.get(field)
+        if not isinstance(value, str) or not _SHA256_RE.match(value):
+            warn(f"manifest {field} is not 64 lowercase hex digits")
+            return None
+    try:
+        body = fetch(train_key)
+    except Exception as e:
+        code = e.response.get("Error", {}).get("Code", "") if isinstance(e, ClientError) else type(e).__name__
+        warn(f"reading train.jsonl failed: {code}")
+        return None
+    if len(body) != manifest["bytes"]:
+        warn("train.jsonl size differs from the manifest")
+        return None
+    if hashlib.sha256(body).hexdigest() != manifest["sha256"]:
+        warn("train.jsonl sha256 differs from the manifest")
+        return None
+    if _corpus_sha256(chunks) != manifest["corpus_sha256"]:
+        warn("the pairs were written for other source documents")
+        return None
+    known = {c["text"] for c in chunks}
+    pairs = []
+    try:
+        for line in body.decode("utf-8").splitlines():
+            if not line.strip():
+                continue
+            obj = json.loads(line)
+            if (not isinstance(obj, dict)
+                    or not isinstance(obj.get("query"), str) or not obj["query"].strip()
+                    or not isinstance(obj.get("positive"), str) or not obj["positive"].strip()):
+                warn("a line is not a (query, positive) pair")
+                return None
+            if obj["positive"] not in known:
+                warn("a pair points at a document that is not in the sources")
+                return None
+            pairs.append(obj)
+    except ValueError:
+        warn("train.jsonl has a line that is not JSON")
+        return None
+    if len(pairs) != manifest["pairs"]:
+        warn("the line count differs from the manifest")
+        return None
+    if len(pairs) < MIN_PAIR_SHARE * expected:
+        warn(f"{len(pairs)} pairs is under {MIN_PAIR_SHARE:.0%} of the {expected} expected")
+        return None
+    logger.info("Using %d prebuilt pairs from s3://%s/%s (commit %s, written %s); "
+                "no Bedrock calls for training pairs", len(pairs), bucket, train_key,
+                str(manifest.get("commit", ""))[:12] or "unknown", manifest.get("generatedAt", "unknown"))
+    return pairs[:target_pairs]
+def _read_local_sources(sources_dir, data_path, sources):
+    """The records read_raw_sources builds from the bucket, built from the files
+    the upload script copies there (every *.txt under each source path). A
+    record's source is the S3 key the file gets, and the records of one source
+    are sorted by key, which is the order S3 lists them in (UTF-8 byte order,
+    the same as sorting the strings). That keeps the chunk list, and with it
+    the seeded chunk sample, the same as in a Job."""
+    records = []
+    for source in sources:
+        rel = source.get("path", "").lstrip("/")
+        root = os.path.join(sources_dir, rel)
+        found = []
+        for dirpath, _dirs, files in os.walk(root):
+            for name in files:
+                if name.endswith(".txt"):
+                    sub = os.path.relpath(os.path.join(dirpath, name), sources_dir)
+                    found.append(f"{data_path.rstrip('/')}/{sub.replace(os.sep, '/')}")
+        for key in sorted(found):
+            local = os.path.join(sources_dir, key[len(data_path.rstrip("/")) + 1:])
+            with open(local, "rb") as f:
+                content = f.read().decode("utf-8", errors="replace").strip()
+            if content:
+                records.append({"source": key, "content": content})
+    return records
+def pairs_only(argv):
+    """Write the training pairs of a retriever project and their manifest, with
+    no S3 access to the project's bucket. Used by the central prep build.
+    Exit status 0 when the pairs hold at least MIN_PAIR_SHARE of the expected
+    count, 1 otherwise."""
+    ap = argparse.ArgumentParser(prog="main.py --pairs-only")
+    ap.add_argument("--pairs-only", action="store_true")
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--sources-dir", required=True,
+                    help="local directory that holds what data.path holds in the bucket")
+    ap.add_argument("--data-path", default="", help="data.path; default is the config's")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--manifest", required=True)
+    args = ap.parse_args(argv)
+    with open(args.config, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    project = config["project"]
+    if project.get("task") != "embedding":
+        logger.error("--pairs-only needs project.task: embedding")
+        return 1
+    data_cfg = config["data"]
+    data_path = args.data_path or data_cfg["path"]
+    synthetic = data_cfg.get("synthetic") or {}
+    target = synthetic.get("pairs", 0)
+    model = synthetic.get("model") or os.environ.get("SLEMIFY_BEDROCK_MODEL") or DEFAULT_PAIRS_MODEL
+    if not target:
+        logger.error("synthetic.pairs is required")
+        return 1
+    raw = _read_local_sources(args.sources_dir, data_path, data_cfg.get("sources", []))
+    if not raw:
+        logger.error("no *.txt source files under %s for the sources in %s", args.sources_dir, args.config)
+        return 1
+    logger.info("Read %d source files from %s", len(raw), args.sources_dir)
+    pairs, chunks, stats = _generate_pairs_stats(
+        raw_content=raw, model=model, endpoint=synthetic.get("endpoint", ""),
+        target_pairs=target, domain=project["domain"])
+    failure = _pair_floor_failure(pairs, stats, model)
+    if failure:
+        logger.error("%s", failure["message"])
+        return 1
+    body = ("\n".join(json.dumps(p, ensure_ascii=False) for p in pairs)).encode("utf-8")
+    with open(args.out, "wb") as f:
+        f.write(body)
+    manifest = {
+        "version": PREBUILT_VERSION, "project": project["name"],
+        "tag": os.environ.get("RELEASE_TAG", ""),
+        "commit": os.environ.get("CODEBUILD_RESOLVED_SOURCE_VERSION", ""),
+        "model": model, "pairs": len(pairs), "chunks": len(chunks),
+        "expected": stats["expected"], "bytes": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "corpus_sha256": _corpus_sha256(chunks),
+        "generatedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    with open(args.manifest, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=1, sort_keys=True)
+    logger.info("Wrote %d pairs from %d chunks (%d bytes) in %d rounds", len(pairs), len(chunks),
+                len(body), stats["rounds"])
+    return 0
 def _pair_floor_failure(pairs, stats, model):
     """Return the failure record when the run holds too few pairs, else None.
     With fewer than MIN_PAIR_SHARE of the expected pairs, training module 2 on
@@ -838,25 +1048,32 @@ def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, 
 
     bucket = data_cfg["bucket"]
     _clear_failure_record(bucket, project_name)
-    logger.info("Generating %d (query, positive) pairs via %s...",
-                synthetic_cfg["pairs"], synthetic_cfg["model"])
-    pairs, chunks, stats = _generate_pairs_stats(
-        raw_content=raw_content,
-        model=synthetic_cfg["model"],
-        endpoint=synthetic_cfg.get("endpoint", ""),
-        target_pairs=synthetic_cfg["pairs"],
-        domain=domain,
-    )
-    failure = _pair_floor_failure(pairs, stats, synthetic_cfg["model"])
-    if failure:
-        logger.error("%s", failure["message"])
-        _write_failure_record(bucket, project_name, failure)
-        sys.exit(1)
-    if len(pairs) < stats["expected"]:
-        logger.warning("Generated %d of %d expected pairs, above the floor of %d. Bedrock errors: %s",
-                       len(pairs), stats["expected"], int(math.ceil(MIN_PAIR_SHARE * stats["expected"])),
-                       _format_tally(stats["errors"]))
-    logger.info("Generated %d pairs from %d chunks", len(pairs), len(chunks))
+    chunks = _chunk_documents(raw_content)
+    pairs = _read_prebuilt_pairs(
+        bucket, data_cfg["path"], project_name, chunks,
+        _expected_pairs(len(chunks), synthetic_cfg["pairs"]), synthetic_cfg["pairs"])
+    if pairs:
+        logger.info("Using %d prebuilt pairs from %d chunks", len(pairs), len(chunks))
+    else:
+        logger.info("Generating %d (query, positive) pairs via %s...",
+                    synthetic_cfg["pairs"], synthetic_cfg["model"])
+        pairs, chunks, stats = _generate_pairs_stats(
+            raw_content=raw_content,
+            model=synthetic_cfg["model"],
+            endpoint=synthetic_cfg.get("endpoint", ""),
+            target_pairs=synthetic_cfg["pairs"],
+            domain=domain,
+        )
+        failure = _pair_floor_failure(pairs, stats, synthetic_cfg["model"])
+        if failure:
+            logger.error("%s", failure["message"])
+            _write_failure_record(bucket, project_name, failure)
+            sys.exit(1)
+        if len(pairs) < stats["expected"]:
+            logger.warning("Generated %d of %d expected pairs, above the floor of %d. Bedrock errors: %s",
+                           len(pairs), stats["expected"], int(math.ceil(MIN_PAIR_SHARE * stats["expected"])),
+                           _format_tally(stats["errors"]))
+        logger.info("Generated %d pairs from %d chunks", len(pairs), len(chunks))
     # Independent eval: committed pairs when evaluation.labeled is set and
     # evaluation.pairs is 0, then a separate eval source/model when configured,
     # otherwise a held-out slice of the generated pairs.
