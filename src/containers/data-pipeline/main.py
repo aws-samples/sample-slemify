@@ -308,6 +308,7 @@ def main():
     data_cfg = config["data"]
     project_name = config["project"]["name"]
     domain = config["project"]["domain"]
+    _load_bedrock_fault(data_cfg["bucket"], data_cfg["path"])
     labels_config = config.get("project", {}).get("labels")
     task = config.get("project", {}).get("task", "generation")
     output_format = config.get("project", {}).get("output_format", "")
@@ -1581,6 +1582,22 @@ def _error_code(err):
     if isinstance(err, BotoConnectionError):
         return "Connection"
     return "Other"
+# End of the outage window that a test event wrote (lib/fault.sh,
+# bedrock-unavailable), as epoch seconds. Zero, the normal case, is no fault.
+_FAULT_BEDROCK_UNTIL = 0.0
+def _load_bedrock_fault(bucket, path):
+    """Read <path>_fault/bedrock.json once, when the object exists. Only the
+    end of the window is used, and nothing else from the file is logged."""
+    global _FAULT_BEDROCK_UNTIL
+    try:
+        body = boto3.client("s3").get_object(
+            Bucket=bucket, Key=f"{path.rstrip('/')}/_fault/bedrock.json")["Body"].read()
+        until = float(json.loads(body)["until"])
+    except Exception:
+        return
+    _FAULT_BEDROCK_UNTIL = until
+    logger.warning("FAULT INJECTION: Bedrock calls fail for the next %d seconds",
+                   max(0, int(until - time.time())))
 def _get_bedrock_rpm_quota(model_id):
     region = primary_region()
     try:
@@ -1643,6 +1660,9 @@ class BedrockBackend:
             read_timeout=300, connect_timeout=10, retries={"max_attempts": 2}))
 
     def generate(self, prompt):
+        if _FAULT_BEDROCK_UNTIL and time.time() < _FAULT_BEDROCK_UNTIL:
+            raise ClientError({"Error": {"Code": "ServiceUnavailableException",
+                                         "Message": "fault injection"}}, "Converse")
         kwargs = {
             "modelId": self.model_id,
             "messages": [{"role": "user", "content": [{"text": prompt}]}],

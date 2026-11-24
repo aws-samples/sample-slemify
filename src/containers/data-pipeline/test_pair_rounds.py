@@ -257,6 +257,49 @@ class FloorTest(RoundsBase):
                                             {"model": "m", "pairs": 30})
         self.assertEqual(cm.exception.code, 1)
         self.assertTrue(any("Could not write proj/processed/data-failure.json" in m for m in logs.output))
+class OutageWindowTest(unittest.TestCase):
+    """bedrock-unavailable: the window a test event writes to S3."""
+    def setUp(self):
+        self.addCleanup(setattr, main, "_FAULT_BEDROCK_UNTIL", 0.0)
+        main._FAULT_BEDROCK_UNTIL = 0.0
+        self.client = mock.Mock()
+        self.client.converse.return_value = {
+            "output": {"message": {"content": [{"text": "answer"}]}}}
+    def backend(self):
+        b = main.BedrockBackend("m")
+        b._client = self.client
+        return b
+    def s3_returns(self, body=None, error=None):
+        s3 = mock.Mock()
+        if error:
+            s3.get_object.side_effect = error
+        else:
+            s3.get_object.return_value = {"Body": mock.Mock(read=lambda: body)}
+        return mock.patch.object(main.boto3, "client", lambda *a, **k: s3), s3
+    def test_calls_fail_inside_the_window_and_work_after_it(self):
+        patch, s3 = self.s3_returns(json.dumps({"until": time.time() + 600}).encode())
+        with patch, self.assertLogs(main.logger, level="WARNING") as logs:
+            main._load_bedrock_fault("bucket", "k8s-autoscaling/data/")
+        self.assertEqual(s3.get_object.call_args.kwargs,
+                         {"Bucket": "bucket", "Key": "k8s-autoscaling/data/_fault/bedrock.json"})
+        self.assertTrue(any("FAULT INJECTION" in m for m in logs.output))
+        with self.assertRaises(ClientError) as cm:
+            self.backend().generate("p")
+        self.assertEqual(cm.exception.response["Error"]["Code"], "ServiceUnavailableException")
+        self.client.converse.assert_not_called()
+        main._FAULT_BEDROCK_UNTIL = time.time() - 1
+        self.assertEqual(self.backend().generate("p"), "answer")
+    def test_no_object_means_no_fault(self):
+        patch, _ = self.s3_returns(error=client_error("NoSuchKey"))
+        with patch:
+            main._load_bedrock_fault("bucket", "k8s-autoscaling/data/")
+        self.assertEqual(main._FAULT_BEDROCK_UNTIL, 0.0)
+        self.assertEqual(self.backend().generate("p"), "answer")
+    def test_a_file_that_is_not_a_window_is_ignored_and_not_logged(self):
+        patch, _ = self.s3_returns(b'{"until": "secret-looking text"}')
+        with patch, self.assertNoLogs(main.logger, level="WARNING"):
+            main._load_bedrock_fault("bucket", "k8s-autoscaling/data/")
+        self.assertEqual(main._FAULT_BEDROCK_UNTIL, 0.0)
 class HeldOutShortfallTest(unittest.TestCase):
     """A held-out set that came back short is reported, once."""
     CONFIG = """
@@ -278,6 +321,7 @@ data:
             f.write(self.CONFIG)
         self.addCleanup(os.remove, f.name)
         with mock.patch.object(sys, "argv", ["main.py", f.name]), \
+                mock.patch.object(main, "_load_bedrock_fault", lambda b, p: None), \
                 mock.patch.object(main, "read_raw_sources", lambda b, p, s: [{"source": "s", "content": "c"}]), \
                 mock.patch.object(main, "read_labeled_records", lambda *a, **k: []), \
                 mock.patch.object(main, "generate_synthetic", generate), \
