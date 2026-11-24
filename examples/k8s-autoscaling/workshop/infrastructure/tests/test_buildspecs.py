@@ -365,6 +365,39 @@ class PreBuildSignalTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.s.tmp, "prebuild-done")))
         self.run_finally()
         self.assertEqual(len(self.signals()), 1)
+class FaultHookTest(unittest.TestCase):
+    """provision-fail-once fails the build before the seed, once per account."""
+    def setUp(self):
+        from tests._stubs import AWS_FAKE
+        self.s = StubEnv()
+        self.addCleanup(self.s.cleanup)
+        self.s.stub_py("aws", AWS_FAKE)
+        spec = load_buildspec("buildspec.yaml")
+        self.cmd = find_command(spec, "build", "provision-fail-once")
+        self.env = dict(CODEBUILD_SRC_DIR=REPO_ROOT, INFRA_DIR=INFRA_REL)
+    def test_off_by_default(self):
+        r = self.s.run(self.cmd, **self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.s.calls("aws"), [])
+    def test_fails_once_and_records_it(self):
+        r = self.s.run(self.cmd, FAULT_INJECTION="provision-fail-once", **self.env)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("FAULT INJECTION: provision-fail-once", r.stdout)
+        self.assertEqual(len(self.s.calls("aws ssm put-parameter --name /slemify/fault/provision-fail-once")), 1)
+    def test_does_not_fire_again_once_recorded(self):
+        self.s.state("param", "fired")
+        r = self.s.run(self.cmd, FAULT_INJECTION="provision-fail-once", **self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.s.calls("aws ssm put-parameter"), [])
+    def test_runs_after_the_full_apply_and_before_the_seed(self):
+        spec = load_buildspec("buildspec.yaml")
+        cmds = phase_commands(spec, "build")
+        idx = [i for i, c in enumerate(cmds) if "provision-fail-once" in c]
+        self.assertEqual(len(idx), 1)
+        full = [i for i, c in enumerate(cmds) if "enable_s3_csi_addon=false" in c][0]
+        seed = [i for i, c in enumerate(cmds) if c.strip() == "bash seed/seed.sh"][0]
+        self.assertLess(full, idx[0])
+        self.assertLess(idx[0], seed)
 class PrepFailedMarkerTest(unittest.TestCase):
     def test_failed_json(self):
         from tests._stubs import AWS_FAKE

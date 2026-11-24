@@ -31,6 +31,8 @@
 #   CENTRAL_WAIT_MINUTES, CENTRAL_COPY_MINUTES, CENTRAL_TAIL_MINUTES
 #                          central-mode deadlines from the build start
 #                          (defaults 90, 100 and 140)
+#   FAULT_INJECTION        failure injection for test events (lib/fault.sh);
+#                          empty in every published workshop
 #
 # Central mode: when CENTRAL_PARAM names a parameter that exists, the event's
 # central account has prepared the images, the knowledge corpus and the
@@ -267,6 +269,14 @@ phases:
           export RERANKER_IMAGE="${REGISTRY}/${RERANK_REPO}:latest"
           echo "images: ${DEMO_IMAGE} ${RERANKER_IMAGE}"
           echo "export DEMO_IMAGE=${DEMO_IMAGE} RERANKER_IMAGE=${RERANKER_IMAGE}" > /tmp/images.env
+        fi
+      # Failure injection (lib/fault.sh): off unless FAULT_INJECTION is set.
+      - |
+        . "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/fault.sh"
+        if fault_on provision-fail-once once; then
+          fault_fired provision-fail-once
+          echo "FAULT INJECTION: provision-fail-once, failing the build before the seed"
+          exit 1
         fi
       - echo "Seeding the cluster"
       - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}"

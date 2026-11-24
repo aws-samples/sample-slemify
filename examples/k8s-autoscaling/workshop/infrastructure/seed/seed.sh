@@ -24,6 +24,9 @@ INFRA_DIR="$(dirname "${SEED_DIR}")"
 TF_DIR="${INFRA_DIR}/terraform"
 DEMO_DIR="$(cd "${INFRA_DIR}/../../demo" && pwd)"
 NAMESPACE="slemify"
+# Failure injection for test events (off unless FAULT_INJECTION is set).
+# shellcheck source=../lib/fault.sh
+. "${INFRA_DIR}/lib/fault.sh"
 
 # Each phase header carries the time since the seed started, and the phases
 # are summed up at the end, so the CodeBuild log shows where the time goes.
@@ -60,6 +63,7 @@ on_exit() {
   if [[ -n "$PF_OS_PID" ]]; then
     kill "$PF_OS_PID" 2>/dev/null || true
   fi
+  fault_bedrock_stop "${MODEL_BUCKET:-}" || true
   if [[ -n "$SEED_PHASES" ]]; then
     phase_timings || true
     if [[ "$rc" -ne 0 ]]; then
@@ -158,6 +162,8 @@ AWS_DEFAULT_REGION="${REGION}" bash "${EXAMPLE_DIR}/upload-to-s3.sh" "${MODEL_BU
 # report the stage's own wall time even when it finished long before.
 TRIAGE_DATA_PID=""
 RETRIEVER_DATA_PID=""
+# bedrock-unavailable (lib/fault.sh): the data pipeline reads this window at start.
+fault_bedrock_start "${MODEL_BUCKET}"
 start_data() {  # config logfile; sets DATA_PID and DATA_T0
   rm -f "$2.end"
   DATA_T0="$(date +%s)"
@@ -246,6 +252,7 @@ if command -v slemify >/dev/null 2>&1; then
   }
   wait_data "Triage" "${TRIAGE_DATA_PID}" /tmp/triage-data.log "${TRIAGE_DATA_T0:-0}"
   wait_data "Retriever" "${RETRIEVER_DATA_PID}" /tmp/retriever-data.log "${RETRIEVER_DATA_T0:-0}"
+  fault_bedrock_stop "${MODEL_BUCKET}"
 else
   echo "  slemify not installed; skipping the triage and retriever data stages" >&2
 fi
