@@ -151,5 +151,56 @@ echo "after: rc=$?"
         r = self.run_stage(0)
         self.assertIn("after: rc=0", r.stdout)
         self.assertEqual(self.s.calls("aws s3 cp"), [])
+class PrebuiltPairsCleanupTest(unittest.TestCase):
+    """The central retriever pairs are removed from the model bucket once the
+    retriever stage succeeded, and kept when it failed."""
+    PREFIX = "k8s-autoscaling/data/prebuilt/k8s-autoscaling-retriever/"
+    def setUp(self):
+        from tests._stubs import AWS_FAKE
+        self.s = StubEnv()
+        self.addCleanup(self.s.cleanup)
+        self.s.stub_py("aws", AWS_FAKE)
+        self.s.s3_put("team-models", self.PREFIX + "train.jsonl", "x")
+        self.s.s3_put("team-models", self.PREFIX + "manifest.json", "{}")
+        self.s.s3_put("team-models", "k8s-autoscaling/data/queries/doc.txt", "keep")
+        with open(self.s.path("stage.log"), "w") as f:
+            f.write("log\n")
+    def run_seed_tail(self, retriever_exit):
+        """wait_data for the retriever, then the cleanup lines that follow it."""
+        with open(SEED) as f:
+            text = f.read()
+        start = text.index("  wait_data() {")
+        end = text.index("else\n  echo \"  slemify not installed")
+        script = """set -uo pipefail
+log() { :; }
+SEED_BG=""
+TRIAGE_DATA_PID=""
+RETRIEVER_DATA_PID=""
+fault_bedrock_stop() { :; }
+sh -c 'exit %d' &
+RETRIEVER_DATA_PID=$!
+%s
+""" % (retriever_exit, text[start:end])
+        script = script.replace('wait_data "Triage" "${TRIAGE_DATA_PID}" /tmp/triage-data.log "${TRIAGE_DATA_T0:-0}" k8s-autoscaling-triage', "")
+        script = script.replace("/tmp/retriever-data.log", "$STAGE_LOG")
+        return self.s.run(script, redirect_tmp=False, STAGE_LOG=self.s.path("stage.log"), MODEL_BUCKET="team-models")
+    def test_removed_after_a_successful_retriever_stage(self):
+        r = self.run_seed_tail(0)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIsNone(self.s.s3_get("team-models", self.PREFIX + "train.jsonl"))
+        self.assertIsNone(self.s.s3_get("team-models", self.PREFIX + "manifest.json"))
+        self.assertEqual(self.s.s3_get("team-models", "k8s-autoscaling/data/queries/doc.txt"), "keep")
+        self.assertEqual(self.s.calls("aws s3 rm"),
+                         ["aws s3 rm --recursive --quiet s3://team-models/" + self.PREFIX])
+    def test_kept_after_a_failed_retriever_stage(self):
+        r = self.run_seed_tail(1)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(self.s.s3_get("team-models", self.PREFIX + "train.jsonl"), "x")
+        self.assertEqual(self.s.calls("aws s3 rm"), [])
+    def test_a_failed_delete_only_warns(self):
+        self.s.stub("aws", 'case "$2" in rm) exit 1;; esac; exit 0')
+        r = self.run_seed_tail(0)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("WARN could not remove the prebuilt retriever pairs", r.stderr)
 if __name__ == "__main__":
     unittest.main()

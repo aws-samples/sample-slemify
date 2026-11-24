@@ -119,8 +119,11 @@ if svc == "s3" and op in ("cp", "rm"):
         elif not a.startswith("--"):
             pos.append(a)
     if op == "rm":
-        if os.path.exists(s3path(pos[0])):
-            os.remove(s3path(pos[0]))
+        target = s3path(pos[0])
+        if "--recursive" in args:
+            shutil.rmtree(target, ignore_errors=True)
+        elif os.path.exists(target):
+            os.remove(target)
         sys.exit(0)
     src, dst = pos[0], pos[1]
     if src.startswith("s3://") and dst.startswith("s3://") and read("s3-copy-fail") is not None:

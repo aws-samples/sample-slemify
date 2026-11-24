@@ -138,6 +138,16 @@ central account. The team side uses the helpers in `lib/central.sh`.
   `CENTRAL_TAIL_MINUTES` (140) for the GGUF copy after the signal.
 - After the copies, the team build writes `/slemify/mirror` (the team's own
   `slemify` registry), so module 3 pulls llama.cpp from the account's ECR.
+- The retriever training pairs. The prep build runs the data pipeline's
+  `--pairs-only` mode in the background (one Bedrock pass over the corpus,
+  3 attempts) and writes `retriever/train.jsonl`, `retriever/manifest.json`
+  and then `retriever/retriever-ready.json`. A team copies the first two to
+  `k8s-autoscaling/data/prebuilt/k8s-autoscaling-retriever/` in its model
+  bucket, and the seed's retriever data stage uses them instead of calling
+  Bedrock. The pairs are optional. When the step fails (`retriever/failed.json`),
+  the marker is missing after 5 minutes, or the pipeline's checks reject the
+  files, the stage generates its own pairs, as on today's path. The seed
+  removes the prebuilt files once the stage succeeded.
 - Today's path. When `/slemify/central` does not exist, the team build starts
   its own image and GGUF builds as before, and deletes any `/slemify/mirror`
   left by an earlier event.
