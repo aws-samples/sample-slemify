@@ -14,18 +14,20 @@ Supports three output shapes:
 
 import json
 import logging
+import math
 import random
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 import boto3
 import yaml
 from botocore.config import Config
-
-from bedrock_region import bedrock_runtime, primary_region
-
+from botocore.exceptions import (
+    ClientError, ConnectionError as BotoConnectionError, ConnectTimeoutError,
+    ReadTimeoutError)
+from bedrock_region import bedrock_runtime, fallback_region, primary_region
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -38,7 +40,27 @@ BATCH_SIZE = 5
 # for them. A fixed value, so every run on the same corpus mines the same
 # documents and two accounts can compare their retrieval numbers.
 CHUNK_SAMPLE_SEED = 20261119
-
+# Rounds that retry only the chunks that came back without questions, for the
+# errors in RETRYABLE_CODES. A Bedrock outage of about 16 minutes failed every
+# call of four accounts, and one pass retries a call for about 3 seconds. Each
+# round waits ROUND_PAUSES_S[round] (the last value repeats) plus up to
+# ROUND_JITTER_S, and no round starts after PAIR_RETRY_BUDGET_S seconds from
+# the end of the first pass. The Job runs the pipeline up to 3 times, so an
+# outage of about 25 minutes fits.
+PAIR_RETRY_BUDGET_S = 480
+ROUND_PAUSES_S = (30, 60, 120, 240)
+ROUND_JITTER_S = 10
+# The run fails when it holds fewer than this share of the pairs it expected.
+# The lowest healthy count seen was 342 of 396 (86 per cent).
+MIN_PAIR_SHARE = 0.5
+# Error codes that a later round can recover from. AccessDeniedException is in
+# the list because a new account's Marketplace entitlement can take 10 to 15
+# minutes to reach the model. Any other error, for example ValidationException
+# for a wrong model id, ends the rounds at once.
+RETRYABLE_CODES = frozenset({
+    "ServiceUnavailableException", "InternalServerException", "ThrottlingException",
+    "ModelNotReadyException", "AccessDeniedException", "Timeout", "Connection",
+})
 GENERATION_PROMPT = """You are generating synthetic training data for a Small Language Model.
 
 DOMAIN CONTEXT:
@@ -513,6 +535,9 @@ def main():
                 logger.warning("Dropped %d eval records with empty output", eval_dropped)
             eval_records = eval_valid
         logger.info("Generated %d independent eval records", len(eval_records))
+        if len(eval_records) < eval_cfg["pairs"]:
+            logger.warning("The generated held-out set has %d of %d records; the rest failed or were dropped",
+                           len(eval_records), eval_cfg["pairs"])
     else:
         # Fallback: split training data into train/eval
         split_ratio = data_cfg.get("split_ratio", 0.9)
@@ -596,57 +621,95 @@ def _generate_queries_for_chunk(backend, domain, chunk_text, n_queries):
     return queries
 
 
+def _monotonic():
+    return time.monotonic()
+def _pause(seconds):
+    time.sleep(seconds)
+# Jitter for the round pauses. Its own generator, so the global random state
+# stays as the caller left it.
+_JITTER = random.Random()
 def _generate_pairs(raw_content, model, endpoint, target_pairs, domain, queries_per_chunk=3):
-    """Generate (query, positive) pairs by writing queries for each doc chunk."""
+    """Generate (query, positive) pairs by writing queries for each doc chunk.
+    Returns the pairs and the full chunk corpus. See _generate_pairs_stats for
+    the counts that go with them."""
+    pairs, chunks, _ = _generate_pairs_stats(
+        raw_content, model, endpoint, target_pairs, domain, queries_per_chunk)
+    return pairs, chunks
+def _generate_pairs_stats(raw_content, model, endpoint, target_pairs, domain, queries_per_chunk=3):
+    """_generate_pairs plus a dict of what the run did: expected (the most pairs
+    this corpus and target can give), chunks, rounds, seconds and the error
+    tally of this run."""
     backend = _select_backend(model, endpoint)
     concurrency = _calculate_concurrency(model) if not endpoint else 20
-
     chunks = _chunk_documents(raw_content)
+    stats = {"expected": 0, "chunks": len(chunks), "rounds": 0, "seconds": 0.0, "errors": {}}
     if not chunks:
-        return [], []
+        return [], [], stats
     logger.info("Chunked corpus into %d document chunks", len(chunks))
-
     # Only process as many chunks as needed to hit the target pair count.
     needed_chunks = min(len(chunks), (target_pairs + queries_per_chunk - 1) // queries_per_chunk)
+    stats["expected"] = min(needed_chunks * queries_per_chunk, target_pairs)
     # Fixed seed, so the same corpus always yields the same chunks in the same
     # order. Two accounts running this pipeline then mine the same documents in
     # the same order, which is what makes their recall numbers comparable. The
     # questions still come from a model call per chunk, so how many pairs each
     # chunk yields varies, and with it where the train/eval split lands.
     selected = random.Random(CHUNK_SAMPLE_SEED).sample(chunks, needed_chunks)
-
     # Results are collected by selection order, not by completion order, so the
     # pair order (and with it the train/eval split below) does not depend on
-    # which thread finishes first.
+    # which thread finishes first. A round fills the same slots.
     per_chunk = [[] for _ in selected]
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = {
-            pool.submit(_generate_queries_for_chunk, backend, domain,
-                        c["text"], queries_per_chunk): i
-            for i, c in enumerate(selected)
-        }
-        done = 0
-        for future in as_completed(futures):
-            index = futures[future]
-            done += 1
-            try:
-                queries = future.result()
-            except Exception as e:
-                logger.warning("Query generation failed: %s", e)
-                continue
-            per_chunk[index] = queries
-            if done % 25 == 0:
-                logger.info("  %d/%d chunks processed, %d pairs so far",
-                            done, len(selected), sum(len(q) for q in per_chunk))
-
+    def run_pass(indices):
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = {
+                pool.submit(_generate_queries_for_chunk, backend, domain,
+                            selected[i]["text"], queries_per_chunk): i
+                for i in indices
+            }
+            done = 0
+            for future in as_completed(futures):
+                index = futures[future]
+                done += 1
+                try:
+                    queries = future.result()
+                except Exception as e:
+                    logger.warning("Query generation failed: %s", e)
+                    continue
+                per_chunk[index] = queries
+                if done % 25 == 0:
+                    logger.info("  %d/%d chunks processed, %d pairs so far",
+                                done, len(futures), sum(len(q) for q in per_chunk))
+    started = _monotonic()
+    errors_at_start = ERROR_TALLY.snapshot()
+    run_pass(range(len(selected)))
+    # Rounds: only the chunks without questions, and only while the errors
+    # since the last pass include one that waiting can fix.
+    deadline = _monotonic() + PAIR_RETRY_BUDGET_S
+    since = errors_at_start
+    while True:
+        missing = [i for i, queries in enumerate(per_chunk) if not queries]
+        recent = _tally_since(since, ERROR_TALLY.snapshot())
+        if not missing or not (set(recent) & RETRYABLE_CODES):
+            break
+        remaining = deadline - _monotonic()
+        if remaining <= 0:
+            break
+        pause = ROUND_PAUSES_S[min(stats["rounds"], len(ROUND_PAUSES_S) - 1)]
+        pause = min(pause + _JITTER.uniform(0, ROUND_JITTER_S), remaining)
+        stats["rounds"] += 1
+        logger.info("round %d: %d of %d chunks still without questions; last errors %s; "
+                    "next try in %ds", stats["rounds"], len(missing), len(selected),
+                    _format_tally(recent), pause)
+        _pause(pause)
+        since = ERROR_TALLY.snapshot()
+        run_pass(missing)
+    stats["seconds"] = _monotonic() - started
+    stats["errors"] = _tally_since(errors_at_start, ERROR_TALLY.snapshot())
     pairs = [{"query": q, "positive": chunk["text"], "source": chunk.get("source", "")}
              for chunk, queries in zip(selected, per_chunk) for q in queries]
-
     # Return both the pairs and the full chunk corpus (used as the retrieval
     # index for eval recall@k).
-    return pairs[:target_pairs], chunks
-
-
+    return pairs[:target_pairs], chunks, stats
 def _chunk_split_index(pairs, index):
     """Move a train/eval split point back to a chunk boundary.
 
@@ -707,6 +770,51 @@ def _check_committed_positives(labeled, chunks, bucket, data_cfg, eval_cfg):
                    "current document.", msg)
 
 
+def _pair_floor_failure(pairs, stats, model):
+    """Return the failure record when the run holds too few pairs, else None.
+    With fewer than MIN_PAIR_SHARE of the expected pairs, training module 2 on
+    the result would look like a success and measure nothing."""
+    expected = stats["expected"]
+    floor = int(math.ceil(MIN_PAIR_SHARE * expected))
+    if pairs and len(pairs) >= floor:
+        return None
+    minutes = stats["seconds"] / 60.0
+    errors = _format_tally(stats["errors"])
+    if expected:
+        message = (
+            f"Generated {len(pairs)} of {expected} expected pairs from {stats['chunks']} chunks "
+            f"after {stats['rounds']} rounds over {minutes:.0f} min. Bedrock errors: {errors} "
+            f"(primary {primary_region()}, fallback {fallback_region()}). "
+            f"Stopping below {floor} pairs. Check the Bedrock service health for {model} "
+            "and rerun the data stage: slemify deploy --config <your expert.yaml> --until data")
+    else:
+        message = "No (query, positive) pairs generated: the sources gave no document chunks"
+    return {
+        "version": 1, "message": message, "model": model, "pairs": len(pairs),
+        "expected": expected, "floor": floor, "chunks": stats["chunks"],
+        "rounds": stats["rounds"], "minutes": round(minutes, 1),
+        "errors": stats["errors"], "primaryRegion": primary_region(),
+        "fallbackRegion": fallback_region(),
+        "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+def _failure_key(project_name):
+    return f"{project_name}/processed/data-failure.json"
+def _clear_failure_record(bucket, project_name):
+    """Remove an earlier run's data-failure.json, so a run that succeeds leaves
+    none behind. Never fails the run."""
+    try:
+        boto3.client("s3").delete_object(Bucket=bucket, Key=_failure_key(project_name))
+    except Exception as e:
+        logger.warning("Could not remove the old %s: %s", _failure_key(project_name), e)
+def _write_failure_record(bucket, project_name, record):
+    """Keep the cause where the build can read it. The Job controller deletes
+    the failed pods, so their logs are gone by the time anyone looks."""
+    try:
+        boto3.client("s3").put_object(
+            Bucket=bucket, Key=_failure_key(project_name),
+            Body=json.dumps(record).encode("utf-8"))
+    except Exception as e:
+        logger.warning("Could not write %s: %s", _failure_key(project_name), e)
 def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, synthetic_cfg):
     """Generate contrastive (query, positive) pairs and a retrieval corpus.
 
@@ -728,21 +836,26 @@ def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, 
         sys.exit(1)
 
     bucket = data_cfg["bucket"]
+    _clear_failure_record(bucket, project_name)
     logger.info("Generating %d (query, positive) pairs via %s...",
                 synthetic_cfg["pairs"], synthetic_cfg["model"])
-
-    pairs, chunks = _generate_pairs(
+    pairs, chunks, stats = _generate_pairs_stats(
         raw_content=raw_content,
         model=synthetic_cfg["model"],
         endpoint=synthetic_cfg.get("endpoint", ""),
         target_pairs=synthetic_cfg["pairs"],
         domain=domain,
     )
-    if not pairs:
-        logger.error("No (query, positive) pairs generated")
+    failure = _pair_floor_failure(pairs, stats, synthetic_cfg["model"])
+    if failure:
+        logger.error("%s", failure["message"])
+        _write_failure_record(bucket, project_name, failure)
         sys.exit(1)
+    if len(pairs) < stats["expected"]:
+        logger.warning("Generated %d of %d expected pairs, above the floor of %d. Bedrock errors: %s",
+                       len(pairs), stats["expected"], int(math.ceil(MIN_PAIR_SHARE * stats["expected"])),
+                       _format_tally(stats["errors"]))
     logger.info("Generated %d pairs from %d chunks", len(pairs), len(chunks))
-
     # Independent eval: committed pairs when evaluation.labeled is set and
     # evaluation.pairs is 0, then a separate eval source/model when configured,
     # otherwise a held-out slice of the generated pairs.
@@ -1442,7 +1555,32 @@ def _check_entity_coverage(records):
 
 
 # === Bedrock / OpenAI Backends ===
-
+class _ErrorTally:
+    """Counts failed model calls by error code, safe to use from every thread."""
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._counts = {}
+    def record(self, code):
+        with self._lock:
+            self._counts[code] = self._counts.get(code, 0) + 1
+    def snapshot(self):
+        with self._lock:
+            return dict(self._counts)
+def _tally_since(before, after):
+    return {c: n - before.get(c, 0) for c, n in after.items() if n - before.get(c, 0) > 0}
+def _format_tally(counts):
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return " ".join(f"{c}={n}" for c, n in ordered) or "none"
+ERROR_TALLY = _ErrorTally()
+def _error_code(err):
+    """The code a failed model call is counted under."""
+    if isinstance(err, ClientError):
+        return err.response.get("Error", {}).get("Code") or "Other"
+    if isinstance(err, (ReadTimeoutError, ConnectTimeoutError)):
+        return "Timeout"
+    if isinstance(err, BotoConnectionError):
+        return "Connection"
+    return "Other"
 def _get_bedrock_rpm_quota(model_id):
     region = primary_region()
     try:
@@ -1481,6 +1619,7 @@ def _call_with_retry(backend, prompt, max_retries=3):
         try:
             return backend.generate(prompt)
         except Exception as e:
+            ERROR_TALLY.record(_error_code(e))
             if "ThrottlingException" in str(e):
                 time.sleep(2 ** (attempt + 1))
             elif attempt < max_retries - 1:

@@ -89,7 +89,10 @@ def run(account, eval_pairs=0, labeled=True, missing=0):
         return out
 
     def queries(backend, domain, chunk_text, n_queries):
-        n = 1 + (len(chunk_text) + len(account)) % 2
+        # Two or three questions, as the model returns for most chunks. One
+        # per chunk would be under the share of expected pairs the pipeline
+        # accepts (main.MIN_PAIR_SHARE).
+        n = 2 + (len(chunk_text) + len(account)) % 2
         return [f"{account} question {i} about {chunk_text[:14]}" for i in range(n)]
 
     with mock.patch.object(main, "_select_backend", lambda model, endpoint: object()), \
