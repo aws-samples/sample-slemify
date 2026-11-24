@@ -5,9 +5,16 @@
 # Central prep build driver, run by buildspec-prep.yaml in the central
 # account. Builds once what every team copies: the seven images (by starting
 # the two image projects), the knowledge corpus, the llama.cpp mirror, and the
-# analyst GGUF (by starting the GGUF project). Everything goes under
-# releases/<tag>/<commit>/ in MODEL_BUCKET; images-ready.json is written once
-# the images and corpus are in place, and ready.json is written last.
+# analyst GGUF (by starting the GGUF project), and the retriever training pairs
+# (the data pipeline's --pairs-only mode, one Bedrock pass over the corpus).
+# Everything goes under releases/<tag>/<commit>/ in MODEL_BUCKET;
+# images-ready.json is written once the images and corpus are in place, and
+# ready.json is written last.
+#
+# The retriever pairs are optional. retriever/retriever-ready.json marks them
+# (written after train.jsonl and manifest.json), and retriever/failed.json says
+# why they are missing. A failed pairs step never fails prep: every team then
+# generates its own pairs, as it did before this step existed.
 #
 # A rerun at the same commit skips what exists. FORCE=1 redoes every step.
 #
@@ -17,6 +24,7 @@
 #   IMAGES_AMD64_PROJECT, IMAGES_ARM64_PROJECT image builds (buildspec-images.yaml)
 #   GGUF_PROJECT                               GGUF conversion (buildspec-gguf.yaml)
 #   FORCE                                      1 to ignore every skip
+#   BEDROCK_REGION                             Bedrock region for the pairs (default us-west-2)
 #   CRANE_VERSION, CRANE_SHA256                crane release and its sha256 (buildspec-prep.yaml)
 #   CODEBUILD_RESOLVED_SOURCE_VERSION, CODEBUILD_SRC_DIR, CODEBUILD_BUILD_ID, AWS_REGION
 
@@ -28,7 +36,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 FORCE="${FORCE:-0}"
 GGUF_PID=""
-
+RETRIEVER_PID=""
 step() {
   echo "$1" > "$CENTRAL_TMP/prep-step"
   echo "=== prep: $1 ==="
@@ -133,12 +141,86 @@ gguf_track() {
   echo "GGUF ready (${size} bytes)"
 }
 
-stop_gguf_track() {
+# retriever_track: writes the retriever training pairs once per release.
+# Returns 0 when it wrote retriever-ready.json or found it, 1 otherwise. Every
+# command is checked by hand: a function that runs under || ignores set -e.
+retriever_track() {
+  local base="${PREFIX}retriever/" dir="$CENTRAL_TMP/retriever" src="${CODEBUILD_SRC_DIR}"
+  local rc=0
+  if skip_allowed && s3_exists "$MODEL_BUCKET" "${base}retriever-ready.json"; then
+    echo "retriever pairs exist; skipping"
+    return 0
+  fi
+  # A failed.json from an earlier run would say the pairs are missing when they are not.
+  aws s3 rm --quiet "s3://${MODEL_BUCKET}/${base}failed.json" >/dev/null 2>&1 || true
+  mkdir -p "$dir" || return 1
+  pip3 install --quiet --retries 10 --timeout 60 pyyaml boto3 || { echo "pip install failed"; return 1; }
+  # Three attempts, 30 s then 60 s apart: prep is not on a team's critical path.
+  retry 3 0 env BEDROCK_REGION="${BEDROCK_REGION:-us-west-2}" BEDROCK_FALLBACK_REGION=us-east-1 \
+    python3 "${src}/src/containers/data-pipeline/main.py" --pairs-only \
+      --config "${src}/examples/k8s-autoscaling/retriever/expert.yaml" \
+      --sources-dir "${src}/examples/k8s-autoscaling/data" \
+      --out "$dir/train.jsonl" --manifest "$dir/manifest.json" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "the pairs step failed (exit ${rc})"
+    return 1
+  fi
+  python3 - "$dir/manifest.json" "$dir/retriever-ready.json" "${base}train.jsonl" <<'PY' || return 1
+import json, os, sys
+manifest, out, key = sys.argv[1:4]
+m = json.load(open(manifest))
+for field in ("bytes", "pairs"):
+    if not isinstance(m.get(field), int) or m[field] <= 0:
+        sys.exit("manifest %s is not above 0" % field)
+marker = {
+    "version": 1,
+    "tag": os.environ["RELEASE_TAG"],
+    "commit": os.environ["CODEBUILD_RESOLVED_SOURCE_VERSION"],
+    "retriever": {"key": key, "bytes": m["bytes"], "pairs": m["pairs"], "sha256": m["sha256"]},
+}
+json.dump(marker, open(out, "w"), indent=1, sort_keys=True)
+PY
+  # The marker goes last, so a team that sees it finds both files.
+  retry 5 0 aws s3 cp --quiet --content-type application/jsonl "$dir/train.jsonl" "s3://${MODEL_BUCKET}/${base}train.jsonl" || return 1
+  retry 5 0 aws s3 cp --quiet --content-type application/json "$dir/manifest.json" "s3://${MODEL_BUCKET}/${base}manifest.json" || return 1
+  retry 5 0 aws s3 cp --quiet --content-type application/json "$dir/retriever-ready.json" "s3://${MODEL_BUCKET}/${base}retriever-ready.json" || return 1
+  echo "wrote ${base}retriever-ready.json"
+}
+# retriever_track_main: runs the track and, when it fails, leaves
+# retriever/failed.json for waiting teams. Always returns 0.
+retriever_track_main() {
+  local log="$CENTRAL_TMP/retriever-track.log" rc=0 reason
+  retriever_track || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  reason=$(grep -F '[ERROR]' "$log" 2>/dev/null | tail -n 1 | head -c 300 || true)
+  [ -n "$reason" ] || reason="the pairs step ended with exit ${rc}"
+  echo "WARN retriever pairs not prepared (${reason}); teams generate their own"
+  RETRIEVER_REASON="$reason" python3 - "$CENTRAL_TMP/retriever-failed.json" <<'PY' || return 0
+import json, os, sys
+json.dump({
+    "version": 1,
+    "tag": os.environ.get("RELEASE_TAG"),
+    "commit": os.environ.get("CODEBUILD_RESOLVED_SOURCE_VERSION"),
+    "step": "retriever-pairs",
+    "reason": os.environ["RETRIEVER_REASON"],
+    "logUrl": os.environ.get("CODEBUILD_BUILD_URL"),
+}, open(sys.argv[1], "w"))
+PY
+  retry 5 0 aws s3 cp --quiet --content-type application/json "$CENTRAL_TMP/retriever-failed.json" \
+    "s3://${MODEL_BUCKET}/${PREFIX}retriever/failed.json" || echo "WARN could not write retriever/failed.json"
+  return 0
+}
+stop_tracks() {
   if [ -n "$GGUF_PID" ]; then
     kill "$GGUF_PID" 2>/dev/null || true
   fi
+  if [ -n "$RETRIEVER_PID" ]; then
+    kill "$RETRIEVER_PID" 2>/dev/null || true
+  fi
 }
-trap stop_gguf_track EXIT
+trap stop_tracks EXIT
 
 step validate
 tag_re='^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$'
@@ -193,6 +275,12 @@ else
   python3 "${CODEBUILD_SRC_DIR}/examples/k8s-autoscaling/demo/scripts/index-knowledge.py" \
     --export-only --strict --s3-bucket="${MODEL_BUCKET}" --s3-key="${CORPUS_KEY}"
 fi
+
+# The retriever pairs run in the background, like the GGUF below. Their log is
+# printed when the track is joined, before ready.json.
+echo "retriever pairs track started in the background (log in retriever-track.log)"
+retriever_track_main > "$CENTRAL_TMP/retriever-track.log" 2>&1 &
+RETRIEVER_PID=$!
 
 step llama
 ecr_login "$REGISTRY"
@@ -268,6 +356,13 @@ cat "$CENTRAL_TMP/gguf-track.log"
 if [ "$gguf_rc" -ne 0 ]; then
   echo "the GGUF track failed"
   exit 1
+fi
+
+# The pairs are optional: report the outcome and go on whatever it was.
+if [ -n "$RETRIEVER_PID" ]; then
+  wait "$RETRIEVER_PID" || true
+  RETRIEVER_PID=""
+  cat "$CENTRAL_TMP/retriever-track.log"
 fi
 
 step ready
