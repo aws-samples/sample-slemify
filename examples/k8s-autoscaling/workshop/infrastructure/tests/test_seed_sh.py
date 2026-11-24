@@ -105,5 +105,51 @@ exit 0''')
             DEMO_DIR=os.path.dirname(MANIFEST), DEMO_IMAGE="d", RERANKER_IMAGE="r", DECISION_IMAGE="x")
         self.assertNotEqual(r.returncode, 0)
         self.assertFalse(os.path.exists(self.applied))
+def wait_data_function():
+    """The wait_data function of seed.sh, as written in the file."""
+    with open(SEED) as f:
+        text = f.read()
+    start = text.index("  wait_data() {")
+    return text[start:text.index("\n  }\n", start) + len("\n  }\n")]
+class WaitDataTest(unittest.TestCase):
+    """A failed data stage prints the failure record the pipeline left in the
+    bucket, because the Job controller has deleted the failed pods."""
+    def setUp(self):
+        from tests._stubs import AWS_FAKE
+        self.s = StubEnv()
+        self.addCleanup(self.s.cleanup)
+        self.s.stub_py("aws", AWS_FAKE)
+        self.log = self.s.path("stage.log")
+        with open(self.log, "w") as f:
+            f.write("[DATA] failed: data job failed\n")
+    def run_stage(self, exit_code):
+        script = """set -uo pipefail
+log() { :; }
+SEED_BG=""
+%s
+sh -c 'exit %d' &
+wait_data Retriever $! "$STAGE_LOG" 0 k8s-autoscaling-retriever
+echo "after: rc=$?"
+""" % (wait_data_function(), exit_code)
+        return self.s.run(script, redirect_tmp=False, STAGE_LOG=self.log, MODEL_BUCKET="team-models")
+    def test_a_failed_stage_prints_the_failure_record(self):
+        record = '{"version": 1, "message": "Generated 12 of 396 expected pairs"}'
+        self.s.s3_put("team-models", "k8s-autoscaling-retriever/processed/data-failure.json", record)
+        r = self.run_stage(1)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("ERROR: Retriever data stage failed", r.stderr)
+        self.assertIn("[DATA] failed: data job failed", r.stderr)
+        self.assertIn("Generated 12 of 396 expected pairs", r.stderr)
+        self.assertNotIn("after:", r.stdout)
+        self.assertEqual(self.s.calls("aws s3 cp"),
+                         ["aws s3 cp s3://team-models/k8s-autoscaling-retriever/processed/data-failure.json -"])
+    def test_a_failed_stage_without_a_record_still_fails(self):
+        r = self.run_stage(1)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("[DATA] failed: data job failed", r.stderr)
+    def test_a_stage_that_worked_prints_no_record(self):
+        r = self.run_stage(0)
+        self.assertIn("after: rc=0", r.stdout)
+        self.assertEqual(self.s.calls("aws s3 cp"), [])
 if __name__ == "__main__":
     unittest.main()

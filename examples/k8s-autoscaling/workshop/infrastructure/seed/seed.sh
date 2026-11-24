@@ -230,7 +230,7 @@ fi
 # fine-tune the retriever. The tuned knowledge index is not built here; it has
 # to be built against the encoder the attendee trains (see `make index-tuned`).
 if command -v slemify >/dev/null 2>&1; then
-  wait_data() {  # name pid logfile start_epoch
+  wait_data() {  # name pid logfile start_epoch project
     [[ -z "$2" ]] && return 0
     log "$1: waiting for the background data stage"
     local rc=0 end took
@@ -247,11 +247,14 @@ if command -v slemify >/dev/null 2>&1; then
     else
       echo "ERROR: $1 data stage failed" >&2
       cat "$3" >&2
+      # The Job controller deletes the failed pods, so their logs are gone.
+      # The pipeline leaves the cause in the bucket when it fails on purpose.
+      { aws s3 cp "s3://${MODEL_BUCKET}/$5/processed/data-failure.json" - 2>/dev/null || true; } >&2
       exit 1
     fi
   }
-  wait_data "Triage" "${TRIAGE_DATA_PID}" /tmp/triage-data.log "${TRIAGE_DATA_T0:-0}"
-  wait_data "Retriever" "${RETRIEVER_DATA_PID}" /tmp/retriever-data.log "${RETRIEVER_DATA_T0:-0}"
+  wait_data "Triage" "${TRIAGE_DATA_PID}" /tmp/triage-data.log "${TRIAGE_DATA_T0:-0}" k8s-autoscaling-triage
+  wait_data "Retriever" "${RETRIEVER_DATA_PID}" /tmp/retriever-data.log "${RETRIEVER_DATA_T0:-0}" k8s-autoscaling-retriever
   fault_bedrock_stop "${MODEL_BUCKET}"
 else
   echo "  slemify not installed; skipping the triage and retriever data stages" >&2
