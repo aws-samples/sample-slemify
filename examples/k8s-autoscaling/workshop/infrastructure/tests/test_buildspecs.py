@@ -223,6 +223,90 @@ class InstallFailureSignalTest(unittest.TestCase):
         self.assertEqual(self.signals(), [])
 
 
+# A terraform stub for the targeted applies. "apply" fails while the number of
+# earlier applies is below $TF_FAILS ("always" fails every time). With
+# $TF_SLOW set, an apply that targets module.eks runs for a second and writes
+# "eks-finished" only when it is left to run to the end.
+TF_RETRY_STUB = r'''
+case "$1" in
+  output) echo team-models; exit 0 ;;
+  apply)
+    n=$(cat "$STUB_DIR/tf-applies" 2>/dev/null || echo 0)
+    echo $((n + 1)) > "$STUB_DIR/tf-applies"
+    if [ "${TF_SLOW:-0}" = 1 ]; then
+      /bin/sleep 1
+      touch "$STUB_DIR/eks-finished"
+    fi
+    if [ "${TF_FAILS:-0}" = always ] || [ "$n" -lt "${TF_FAILS:-0}" ]; then
+      echo "Error: reading ec2 resource: empty result" >&2
+      exit 1
+    fi
+    exit 0 ;;
+esac
+exit 0
+'''
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(INFRA))))
+INFRA_REL = "examples/k8s-autoscaling/workshop/infrastructure"
+class TargetedApplyRetryTest(unittest.TestCase):
+    """The VPC, model bucket and EKS applies retry like the full apply."""
+    def setUp(self):
+        self.s = StubEnv()
+        self.addCleanup(self.s.cleanup)
+        self.s.stub("terraform", TF_RETRY_STUB)
+        self.spec = load_buildspec("buildspec.yaml")
+        self.env = dict(CODEBUILD_SRC_DIR=REPO_ROOT, INFRA_DIR=INFRA_REL)
+    def applies(self):
+        return self.s.calls("terraform apply")
+    def test_the_three_targeted_applies_use_retry_3(self):
+        for needle in ("-target=module.vpc", "-target=aws_s3_bucket.models", "-target=module.eks"):
+            cmd = find_command(self.spec, "build", needle)
+            self.assertIn("retry 3 0 bash", cmd, needle)
+            self.assertIn("lib/tf-apply.sh", cmd, needle)
+            self.assertNotIn("\nterraform apply", "\n" + cmd, needle)
+    def test_vpc_apply_recovers_from_one_failure(self):
+        cmd = find_command(self.spec, "build", "-target=module.vpc")
+        r = self.s.run(cmd, TF_FAILS=1, **self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.applies()), 2)
+        self.assertTrue(all("-target=module.vpc" in c for c in self.applies()))
+        self.assertIn("attempt 1 of 3", r.stderr)
+        self.assertEqual(len(self.s.calls("sleep")), 1)
+    def test_models_apply_fails_after_three_attempts(self):
+        cmd = find_command(self.spec, "build", "-target=aws_s3_bucket.models")
+        r = self.s.run(cmd, TF_FAILS="always", **self.env)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(len(self.applies()), 3)
+        self.assertEqual(len(self.s.calls("sleep")), 2)
+        self.assertIn("-target=aws_s3_bucket_versioning.models", self.applies()[0])
+    def test_eks_apply_in_the_background_recovers(self):
+        cmd = find_command(self.spec, "build", "-target=module.eks")
+        r = self.s.run(cmd, TF_FAILS=1, **self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.applies()), 2)
+        with open(os.path.join(self.s.tmp, "eks-apply.log")) as f:
+            log = f.read()
+        self.assertIn("retry: bash", log)
+        self.assertNotIn("EKS apply failed", r.stdout)
+    def test_eks_apply_failure_reaches_wait_and_fails_the_build(self):
+        cmd = find_command(self.spec, "build", "-target=module.eks")
+        r = self.s.run(cmd, TF_FAILS="always", **self.env)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(len(self.applies()), 3)
+        self.assertIn("EKS apply failed", r.stdout)
+        self.assertIn("empty result", r.stdout)
+    def test_failed_amd64_build_waits_for_the_eks_apply(self):
+        # The block used to kill the background apply, which left terraform
+        # running under a dead subshell and the state half written.
+        self.s.stub("aws", 'case "$1 $2" in "codebuild batch-get-builds") echo FAILED ;; esac\nexit 0')
+        with open(os.path.join(self.s.tmp, "image-builds"), "w") as f:
+            f.write("amd:1 arm:1\n")
+        cmd = find_command(self.spec, "build", "-target=module.eks")
+        r = self.s.run(cmd, TF_SLOW=1, GGUF_BUILD="gguf", **self.env)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("amd64 image build failed", r.stdout)
+        self.assertIn("waiting for the EKS apply to finish before failing", r.stdout)
+        self.assertTrue(os.path.exists(self.s.path("eks-finished")))
+        self.assertNotIn("kill", cmd)
 class PrepFailedMarkerTest(unittest.TestCase):
     def test_failed_json(self):
         from tests._stubs import AWS_FAKE

@@ -40,6 +40,8 @@ Inputs come from CodeBuild environment variables set by the stack
 (`EKS_CLUSTER_NAME`, `EKS_CLUSTER_VERSION`, `BEDROCK_REGION`,
 `PARTICIPANT_ROLE_ARN`, `IDE_ROLE_ARN`, `TF_STATE_BUCKET`, `STACK_NAME`).
 `buildspec.yaml` writes the S3 backend to `backend.tf` from those.
+The VPC, model bucket and EKS applies each run through `lib/tf-apply.sh`
+under `retry 3 0` (30 s, then 60 s apart, plus jitter), like the full apply.
 
 Slemify creates its own per-project IAM role, service account, and pod
 identity association when an attendee runs `slemify deploy`
