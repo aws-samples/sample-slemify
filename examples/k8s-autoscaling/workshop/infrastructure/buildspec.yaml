@@ -152,6 +152,17 @@ phases:
       - '[ "${IDE_ROLE_ARN:-NONE}" != "NONE" ] && export TF_VAR_ide_role_arn="${IDE_ROLE_ARN}" || true'
       - '[ "${OPS_ROLE_ARN:-NONE}" != "NONE" ] && export TF_VAR_ops_role_arn="${OPS_ROLE_ARN}" || true'
       - terraform init -input=false
+      # Last pre_build command: every command above succeeded.
+      - touch /tmp/prebuild-done
+    # A failed pre_build command skips the build phase, so the FAILURE signal
+    # for the stack is sent here, the same way install does it.
+    finally:
+      - |
+        if [ ! -f /tmp/prebuild-done ] && [ ! -f /tmp/cfn-signalled ] && [ -n "${CFN_RESPONSE_URL:-}" ]; then
+          curl --retry 5 --retry-all-errors --retry-delay 5 -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"FAILURE\",\"Reason\":\"Provisioning failed in pre_build\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"See CodeBuild logs: ${CODEBUILD_LOG_PATH}\"}" "${CFN_RESPONSE_URL}"
+          touch /tmp/cfn-signalled
+          echo "signalled CloudFormation: pre_build failed"
+        fi
   build:
     commands:
       # The mode decision failed in install (its reason is in the install log).

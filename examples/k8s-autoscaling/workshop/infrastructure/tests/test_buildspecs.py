@@ -307,6 +307,64 @@ class TargetedApplyRetryTest(unittest.TestCase):
         self.assertIn("waiting for the EKS apply to finish before failing", r.stdout)
         self.assertTrue(os.path.exists(self.s.path("eks-finished")))
         self.assertNotIn("kill", cmd)
+class PreBuildSignalTest(unittest.TestCase):
+    """A failed pre_build command skips the build phase and post_build's
+    signal, so pre_build's finally block sends FAILURE."""
+    URL = "https://example.com/waitcondition"
+    def setUp(self):
+        self.s = StubEnv()
+        self.addCleanup(self.s.cleanup)
+        self.s.stub("curl", "exit 0")
+        self.spec = load_buildspec("buildspec.yaml")
+        self.pre = self.spec["phases"]["pre_build"]
+        self.env = dict(CFN_RESPONSE_URL=self.URL, CODEBUILD_BUILD_ID="team:1")
+    def run_finally(self, **extra):
+        env = dict(self.env)
+        env.update(extra)
+        for cmd in self.pre["finally"]:
+            self.assertEqual(self.s.run(cmd, **env).returncode, 0)
+    def signals(self):
+        return [c for c in self.s.calls("curl") if "-X PUT" in c]
+    def test_the_last_pre_build_command_marks_it_done(self):
+        self.assertEqual(self.pre["commands"][-1], "touch /tmp/prebuild-done")
+    def test_unfinished_pre_build_sends_failure(self):
+        self.run_finally()
+        [sig] = self.signals()
+        self.assertIn('"Status":"FAILURE"', sig)
+        self.assertIn("pre_build", sig)
+        self.assertIn(self.URL, sig)
+        self.assertTrue(os.path.exists(os.path.join(self.s.tmp, "cfn-signalled")))
+        # post_build, if it ran, would not send a second signal.
+        self.s.run(self.spec["phases"]["post_build"]["commands"][1], **self.env)
+        self.assertEqual(len(self.signals()), 1)
+    def test_finished_pre_build_sends_nothing(self):
+        open(os.path.join(self.s.tmp, "prebuild-done"), "w").close()
+        self.run_finally()
+        self.assertEqual(self.signals(), [])
+    def test_no_second_signal_after_an_install_failure(self):
+        open(os.path.join(self.s.tmp, "cfn-signalled"), "w").close()
+        self.run_finally()
+        self.assertEqual(self.signals(), [])
+    def test_no_signal_without_a_response_url(self):
+        self.run_finally(CFN_RESPONSE_URL="")
+        self.assertEqual(self.signals(), [])
+    def test_a_failing_terraform_init_ends_pre_build_without_the_marker(self):
+        # Run the real pre_build commands as CodeBuild does, with a failing init.
+        self.s.stub("terraform", 'exit 1')
+        self.s.stub("aws", "echo build:1")
+        with open(os.path.join(self.s.tmp, "central-mode"), "w") as f:
+            f.write("central\n")
+        os.makedirs(os.path.join(self.s.root, "src", INFRA_REL, "terraform"))
+        env = dict(self.spec["env"]["variables"])
+        env.update(self.env, CODEBUILD_SRC_DIR=os.path.join(self.s.root, "src"), TF_STATE_BUCKET="b",
+                   STACK_NAME="workshop-stack", EKS_CLUSTER_NAME="c", EKS_CLUSTER_VERSION="1.36")
+        # The first failed command stops the phase.
+        r = self.s.run("set -e\n" + "\n".join(self.pre["commands"]) + "\n", **env)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.s.calls("terraform"), ["terraform init -input=false"])
+        self.assertFalse(os.path.exists(os.path.join(self.s.tmp, "prebuild-done")))
+        self.run_finally()
+        self.assertEqual(len(self.signals()), 1)
 class PrepFailedMarkerTest(unittest.TestCase):
     def test_failed_json(self):
         from tests._stubs import AWS_FAKE
