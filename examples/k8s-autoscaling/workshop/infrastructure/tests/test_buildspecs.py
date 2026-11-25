@@ -286,7 +286,13 @@ class TargetedApplyRetryTest(unittest.TestCase):
         with open(os.path.join(self.s.tmp, "eks-apply.log")) as f:
             log = f.read()
         self.assertIn("retry: bash", log)
+        self.assertIn("retry: bash", r.stdout)
         self.assertNotIn("EKS apply failed", r.stdout)
+    def test_eks_apply_success_branch_prints_the_retry_lines(self):
+        cmd = find_command(self.spec, "build", "-target=module.eks")
+        success = cmd.split('if wait "${EKS_PID}"; then', 1)[1].split("else", 1)[0]
+        self.assertIn("grep -E '^(retry:|FAULT INJECTION)' /tmp/eks-apply.log || true", success)
+        self.assertLess(success.index("grep -E"), success.index("tail -n 3"))
     def test_eks_apply_failure_reaches_wait_and_fails_the_build(self):
         cmd = find_command(self.spec, "build", "-target=module.eks")
         r = self.s.run(cmd, TF_FAILS="always", **self.env)
