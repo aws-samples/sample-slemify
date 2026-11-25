@@ -868,9 +868,10 @@ def run_embedding_pipeline(config, data_cfg, project_name, domain, raw_content, 
     if labeled and not eval_cfg.get("pairs", 0):
         # Committed pairs only. Recall is then measured on the same questions
         # against the same documents in every account, because nothing in the
-        # held-out set came from a model call. The training pairs are still
-        # written per account, so the tuned encoder differs between accounts
-        # even though the measurement does not.
+        # held-out set came from a model call. The training pairs come from
+        # the central prebuilt file when it is present and are otherwise
+        # written per account, in which case the tuned encoder differs between
+        # accounts even though the measurement does not.
         logger.info("evaluation.pairs is 0: holding out the %d committed pairs only", len(labeled))
         train_pairs, eval_pairs = pairs, []
     elif eval_cfg.get("model") and eval_cfg.get("pairs", 0):
