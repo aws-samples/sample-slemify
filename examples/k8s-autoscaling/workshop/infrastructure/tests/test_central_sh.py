@@ -129,7 +129,7 @@ class CentralShTest(unittest.TestCase):
         self.assertEqual(self.s.calls("aws ssm delete-parameter"), [])
 
     def test_decide_today_deletes_mirror(self):
-        r = self.sh("decide_mode")
+        r = self.sh("decide_mode", CENTRAL_PARAM_WAIT_SECONDS=0)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.tmpfile("central-mode").strip(), "today")
         self.assertEqual(self.s.calls("aws ssm delete-parameter"),
@@ -141,11 +141,12 @@ class CentralShTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("/slemify/central", r.stdout)
 
-    def test_missing_bucket_fails_at_once(self):
+    def test_missing_bucket_fails_after_the_wait(self):
         self.s.state("param", json.dumps(PARAM))
         self.s.state("head-bucket-error", "An error occurred (404) when calling the HeadBucket operation: Not Found")
-        r = self.sh("decide_mode")
+        r = self.sh("decide_mode", CENTRAL_PARAM_WAIT_SECONDS=0)
         self.assertEqual(r.returncode, 1)
+        self.assertIn("gave up waiting", r.stdout)
         self.assertIn("stale", r.stdout)
 
     def test_forbidden_bucket_continues(self):
@@ -155,6 +156,64 @@ class CentralShTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(self.tmpfile("central-mode").strip(), "central")
 
+    # the wait for the central hand-off in decide_mode
+    WAITING = "waiting for /slemify/central from the central hand-off"
+    def late_stub(self, polls, action):
+        """A sleep stub that runs `action` (shell) on its <polls>th call."""
+        self.s.stub("sleep", 'n=$(cat "$STUB_DIR/sleeps" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$STUB_DIR/sleeps"\n'
+                    '[ "$n" -eq %d ] && { %s; }; exit 0' % (polls, action))
+    def test_wait_none_when_the_parameter_is_there(self):
+        self.s.state("param", json.dumps(PARAM))
+        r = self.sh("decide_mode")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.tmpfile("central-mode").strip(), "central")
+        self.assertEqual(self.s.calls("sleep"), [])
+        self.assertNotIn(self.WAITING, r.stdout)
+    def test_wait_until_the_parameter_appears(self):
+        late = self.s.path("late-param")
+        with open(late, "w") as f:
+            f.write(json.dumps(PARAM))
+        os.makedirs(self.s.path("state"), exist_ok=True)
+        self.late_stub(3, 'cp "%s" "%s"' % (late, self.s.path("state", "param")))
+        r = self.sh("decide_mode")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.tmpfile("central-mode").strip(), "central")
+        self.assertEqual(len(self.s.calls("sleep 30")), 3)
+        self.assertIn(self.WAITING + ", 0 minutes of 30", r.stdout)
+        self.assertEqual(r.stdout.count(self.WAITING), 1)
+        self.assertIn("/slemify/central arrived from the central hand-off after 0 min", r.stdout)
+        self.assertEqual(self.s.calls("aws ssm delete-parameter"), [])
+    def test_wait_gives_up_and_takes_todays_path(self):
+        self.s.stub("sleep", 'exec /bin/sleep "$@"')
+        r = self.sh("decide_mode", CENTRAL_PARAM_POLL_SECONDS=1, CENTRAL_PARAM_WAIT_SECONDS=2)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.tmpfile("central-mode").strip(), "today")
+        self.assertIn(self.WAITING + ", 0 minutes of 0", r.stdout)
+        self.assertIn("gave up waiting after 0 minutes", r.stdout)
+        self.assertIn("today's path", r.stdout)
+        self.assertEqual(self.s.calls("aws ssm delete-parameter"),
+                         ["aws ssm delete-parameter --name /slemify/mirror"])
+    def test_wait_replaces_a_stale_bucket_with_the_fresh_value(self):
+        self.s.state("param", json.dumps(dict(PARAM, bucket="old-event-bucket")))
+        self.s.state("head-bucket-error", "An error occurred (404) when calling the HeadBucket operation: Not Found")
+        fresh = self.s.path("fresh-param")
+        with open(fresh, "w") as f:
+            f.write(json.dumps(PARAM))
+        self.late_stub(2, 'cp "%s" "%s"; rm "%s"' % (fresh, self.s.path("state", "param"),
+                                                       self.s.path("state", "head-bucket-error")))
+        r = self.sh("decide_mode")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.tmpfile("central-mode").strip(), "central")
+        self.assertIn("export CENTRAL_BUCKET=central-prep-artifacts", self.tmpfile("central.env"))
+        self.assertEqual(len(self.s.calls("sleep 30")), 2)
+        self.assertIn("arrived from the central hand-off", r.stdout)
+        self.assertNotIn("stale", r.stdout)
+    def test_wait_skipped_without_central_param(self):
+        r = self.sh("decide_mode", CENTRAL_PARAM="")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.tmpfile("central-mode").strip(), "today")
+        self.assertEqual(self.s.calls("sleep"), [])
+        self.assertNotIn(self.WAITING, r.stdout)
     # check_marker and wait_for_object
 
     def marker_rc(self, text, kind="images"):

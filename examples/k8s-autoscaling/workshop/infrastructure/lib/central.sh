@@ -11,7 +11,8 @@
 # the knowledge corpus and the analyst GGUF once. A team build reads
 # /slemify/central (written by the grant function), waits for the prep
 # markers, and copies everything into its own account. When the parameter is
-# absent the team build takes today's path and builds everything itself.
+# absent the team build first waits for it (decide_mode), then takes today's
+# path and builds everything itself.
 #
 # Every function returns its status; none calls exit or set -e, so callers can
 # test the result. Must run under bash 3.2: no associative arrays, no wait -n,
@@ -151,13 +152,68 @@ check_central_bucket() {
   return 0
 }
 
+# wait_for_central_param
+# Reads /slemify/central. When CENTRAL_PARAM is set and the parameter does not
+# exist, or names a bucket that does not exist (a stale value from an earlier
+# event, which the new hand-off overwrites), polls every
+# CENTRAL_PARAM_POLL_SECONDS (default 30) for up to CENTRAL_PARAM_WAIT_MINUTES
+# (default 30). CENTRAL_PARAM_WAIT_SECONDS overrides the wait, for tests. The
+# central grant function can be a few minutes behind the team build.
+# Logs at the start, every 2 minutes, and when it arrives or the wait ends.
+# Returns what read_central_param returns. After the wait, a missing parameter
+# stays 2 and a stale one stays 0, so decide_mode behaves as it did before.
+wait_for_central_param() {
+  local interval=${CENTRAL_PARAM_POLL_SECONDS:-30}
+  local window=${CENTRAL_PARAM_WAIT_SECONDS:-$(( ${CENTRAL_PARAM_WAIT_MINUTES:-30} * 60 ))}
+  local rc stale start now elapsed left next_log=0 waited=0
+  start=$(date +%s)
+  while :; do
+    rc=0
+    stale=0
+    read_central_param || rc=$?
+    # shellcheck disable=SC1091
+    if [ "$rc" -eq 0 ] && ! ( . "$CENTRAL_TMP/central.env" && check_central_bucket >/dev/null ); then
+      stale=1
+    fi
+    if [ -z "${CENTRAL_PARAM:-}" ] || { [ "$rc" -ne 2 ] && [ "$stale" -eq 0 ]; }; then
+      if [ "$waited" -eq 1 ] && [ "$rc" -eq 0 ]; then
+        elapsed=$(( $(date +%s) - start ))
+        echo "${CENTRAL_PARAM} arrived from the central hand-off after $((elapsed / 60)) min $((elapsed % 60)) s"
+      fi
+      return "$rc"
+    fi
+    waited=1
+    now=$(date +%s)
+    elapsed=$((now - start))
+    if [ "$now" -ge "$next_log" ]; then
+      echo "waiting for ${CENTRAL_PARAM} from the central hand-off, $((elapsed / 60)) minutes of $((window / 60))"
+      next_log=$((now + 120))
+    fi
+    if [ "$elapsed" -ge "$window" ]; then
+      if [ "$stale" -eq 1 ]; then
+        echo "gave up waiting after $((elapsed / 60)) minutes: ${CENTRAL_PARAM} still names a bucket that does not exist"
+      else
+        echo "gave up waiting after $((elapsed / 60)) minutes: ${CENTRAL_PARAM} was not written by the central hand-off"
+      fi
+      return "$rc"
+    fi
+    left=$((window - elapsed))
+    if [ "$left" -lt "$interval" ]; then
+      sleep "$left"
+    else
+      sleep "$interval"
+    fi
+  done
+}
 # decide_mode
-# Records BUILD_T0 and writes central-mode. Returns 1 when the parameter
-# exists but cannot be read or is invalid, or names a missing bucket.
+# Records BUILD_T0 and writes central-mode. Waits for the parameter first
+# (wait_for_central_param). The deadlines of the central steps count from
+# BUILD_T0, so the wait uses part of them. Returns 1 when the parameter exists
+# but cannot be read or is invalid, or names a missing bucket.
 decide_mode() {
   date +%s > "$CENTRAL_TMP/build-t0"
   local rc=0
-  read_central_param || rc=$?
+  wait_for_central_param || rc=$?
   case "$rc" in
     0)
       echo central > "$CENTRAL_TMP/central-mode"
