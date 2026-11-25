@@ -218,6 +218,7 @@ phases:
         fi
         echo "Waiting for the EKS apply (pid ${EKS_PID})"
         if wait "${EKS_PID}"; then
+          grep -E '^(retry:|FAULT INJECTION)' /tmp/eks-apply.log || true
           tail -n 3 /tmp/eks-apply.log
         else
           echo "EKS apply failed:"; tail -n 60 /tmp/eks-apply.log; exit 1
