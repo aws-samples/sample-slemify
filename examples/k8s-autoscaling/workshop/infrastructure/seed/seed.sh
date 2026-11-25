@@ -256,6 +256,11 @@ if command -v slemify >/dev/null 2>&1; then
   wait_data "Triage" "${TRIAGE_DATA_PID}" /tmp/triage-data.log "${TRIAGE_DATA_T0:-0}" k8s-autoscaling-triage
   wait_data "Retriever" "${RETRIEVER_DATA_PID}" /tmp/retriever-data.log "${RETRIEVER_DATA_T0:-0}" k8s-autoscaling-retriever
   fault_bedrock_stop "${MODEL_BUCKET}"
+  # The central pairs (lib/central.sh) were for this seed only. Remove them, so
+  # a later `slemify deploy --stage data` writes fresh pairs instead of quietly
+  # reusing this event's.
+  aws s3 rm --recursive --quiet "s3://${MODEL_BUCKET}/k8s-autoscaling/data/prebuilt/k8s-autoscaling-retriever/" \
+    || echo "WARN could not remove the prebuilt retriever pairs from the model bucket" >&2
 else
   echo "  slemify not installed; skipping the triage and retriever data stages" >&2
 fi

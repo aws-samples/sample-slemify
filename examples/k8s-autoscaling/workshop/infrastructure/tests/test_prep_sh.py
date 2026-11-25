@@ -27,6 +27,28 @@ with open(os.environ["STUB_LOG"], "a") as log:
 '''
 
 
+# Stands in for src/containers/data-pipeline/main.py --pairs-only. It fails the
+# first $PAIRS_FAILS runs (a counter file), writes three pairs and a manifest,
+# and logs its arguments and the Bedrock regions it was given.
+PAIRS_ONLY = r'''
+import hashlib, json, os, sys
+args = dict(zip(sys.argv[2::2], sys.argv[3::2]))
+with open(os.environ["STUB_LOG"], "a") as log:
+    log.write("pairs-only %s BEDROCK_REGION=%s BEDROCK_FALLBACK_REGION=%s\n" % (
+        " ".join(sys.argv[1:2]), os.environ.get("BEDROCK_REGION"), os.environ.get("BEDROCK_FALLBACK_REGION")))
+counter = os.path.join(os.environ["STUB_DIR"], "pairs-runs")
+n = int(open(counter).read()) if os.path.exists(counter) else 0
+open(counter, "w").write(str(n + 1))
+if n < int(os.environ.get("PAIRS_FAILS", "0")):
+    print("2026-11-24 10:00:00 [ERROR] slemify.data-pipeline: Generated 12 of 396 expected pairs. Stopping below 198 pairs.", file=sys.stderr)
+    sys.exit(1)
+body = ('{"query": "q", "positive": "p", "source": "s"}\n' * 3).encode()
+open(args["--out"], "wb").write(body)
+json.dump({"version": 1, "project": "k8s-autoscaling-retriever", "pairs": 3, "chunks": 3, "expected": 9,
+           "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest(), "corpus_sha256": "e" * 64},
+          open(args["--manifest"], "w"))
+'''
+RETRIEVER = PREFIX + "retriever/"
 class PrepShTest(unittest.TestCase):
     def setUp(self):
         self.s = StubEnv()
@@ -43,6 +65,10 @@ class PrepShTest(unittest.TestCase):
         os.makedirs(scripts)
         with open(os.path.join(scripts, "index-knowledge.py"), "w") as f:
             f.write(EXPORT)
+        pipeline = os.path.join(src, "src/containers/data-pipeline")
+        os.makedirs(pipeline)
+        with open(os.path.join(pipeline, "main.py"), "w") as f:
+            f.write(PAIRS_ONLY)
         self.env = {
             "RELEASE_TAG": TAG, "CODEBUILD_RESOLVED_SOURCE_VERSION": COMMIT,
             "CODEBUILD_SRC_DIR": src, "CODEBUILD_BUILD_ID": "slemify-prep:42",
@@ -158,6 +184,80 @@ class PrepShTest(unittest.TestCase):
     def test_pip_setup_failure_writes_failed_json(self):
         self.assert_setup_failure_marker(PIP_FAIL=1)
 
+    # retriever pairs
+    def test_pairs_are_written_and_the_marker_goes_last(self):
+        r = self.prep()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("wrote %sretriever-ready.json" % RETRIEVER, r.stdout)
+        self.assertEqual(self.s.s3_get(BUCKET, RETRIEVER + "train.jsonl").count('"query"'), 3)
+        manifest = json.loads(self.s.s3_get(BUCKET, RETRIEVER + "manifest.json"))
+        marker = json.loads(self.s.s3_get(BUCKET, RETRIEVER + "retriever-ready.json"))
+        self.assertEqual(marker, {"version": 1, "tag": TAG, "commit": COMMIT, "retriever": {
+            "key": RETRIEVER + "train.jsonl", "bytes": manifest["bytes"], "pairs": 3,
+            "sha256": manifest["sha256"]}})
+        self.assertLess(self.upload_index("retriever/train.jsonl"), self.upload_index("retriever/manifest.json"))
+        self.assertLess(self.upload_index("retriever/manifest.json"), self.upload_index("retriever/retriever-ready.json"))
+        self.assertIsNone(self.s.s3_get(BUCKET, RETRIEVER + "failed.json"))
+        self.assertIsNotNone(self.s.s3_get(BUCKET, PREFIX + "ready.json"))
+    def test_pairs_run_with_the_regions_and_start_after_the_corpus(self):
+        r = self.prep()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = self.s.calls()
+        pairs = [i for i, c in enumerate(calls) if c.startswith("pairs-only")]
+        export = [i for i, c in enumerate(calls) if c.startswith("export")]
+        self.assertEqual(len(pairs), 1)
+        self.assertGreater(pairs[0], export[0])
+        self.assertEqual(calls[pairs[0]],
+                         "pairs-only --pairs-only BEDROCK_REGION=us-west-2 BEDROCK_FALLBACK_REGION=us-east-1")
+        self.assertTrue(any(c.startswith("pip3 install") and "pyyaml" in c for c in self.s.calls("pip3")))
+    def test_the_bedrock_region_can_be_set(self):
+        self.prep(BEDROCK_REGION="us-east-1")
+        self.assertIn("BEDROCK_REGION=us-east-1 BEDROCK_FALLBACK_REGION=us-east-1", self.s.calls("pairs-only")[0])
+    def test_a_failed_pairs_step_does_not_fail_prep(self):
+        r = self.prep(PAIRS_FAILS=9)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.s.calls("pairs-only")), 3)
+        self.assertIsNone(self.s.s3_get(BUCKET, RETRIEVER + "retriever-ready.json"))
+        failed = json.loads(self.s.s3_get(BUCKET, RETRIEVER + "failed.json"))
+        self.assertEqual((failed["version"], failed["step"], failed["tag"], failed["commit"]),
+                         (1, "retriever-pairs", TAG, COMMIT))
+        self.assertIn("Stopping below 198 pairs", failed["reason"])
+        self.assertIn("WARN retriever pairs not prepared", r.stdout)
+        self.assertIn("teams generate their own", r.stdout)
+        self.assertIsNotNone(self.s.s3_get(BUCKET, PREFIX + "images-ready.json"))
+        self.assertIsNotNone(self.s.s3_get(BUCKET, PREFIX + "ready.json"))
+        self.assertIsNone(self.s.s3_get(BUCKET, PREFIX + "failed.json"))
+    def test_a_pairs_failure_is_retried(self):
+        r = self.prep(PAIRS_FAILS=1)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.s.calls("pairs-only")), 2)
+        self.assertIsNotNone(self.s.s3_get(BUCKET, RETRIEVER + "retriever-ready.json"))
+        self.assertIsNone(self.s.s3_get(BUCKET, RETRIEVER + "failed.json"))
+    def test_a_pip_failure_for_the_pairs_does_not_fail_prep(self):
+        self.s.stub("pip3", 'case "$*" in *pyyaml*) exit 1;; esac; exit 0')
+        r = self.prep()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.s.calls("pairs-only"), [])
+        failed = json.loads(self.s.s3_get(BUCKET, RETRIEVER + "failed.json"))
+        self.assertEqual(failed["step"], "retriever-pairs")
+        self.assertIsNotNone(self.s.s3_get(BUCKET, PREFIX + "ready.json"))
+    def test_existing_pairs_are_skipped_unless_forced(self):
+        self.s.s3_put(BUCKET, RETRIEVER + "retriever-ready.json", "{}")
+        r = self.prep()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("retriever pairs exist; skipping", r.stdout)
+        self.assertEqual(self.s.calls("pairs-only"), [])
+        self.assertEqual(self.s.s3_get(BUCKET, RETRIEVER + "retriever-ready.json"), "{}")
+        r = self.prep(FORCE=1)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.s.calls("pairs-only")), 1)
+        self.assertNotEqual(self.s.s3_get(BUCKET, RETRIEVER + "retriever-ready.json"), "{}")
+    def test_a_stale_failed_json_is_removed_when_the_pairs_work(self):
+        self.s.s3_put(BUCKET, RETRIEVER + "failed.json", "{}")
+        r = self.prep()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIsNone(self.s.s3_get(BUCKET, RETRIEVER + "failed.json"))
+        self.assertIsNotNone(self.s.s3_get(BUCKET, RETRIEVER + "retriever-ready.json"))
     def test_invalid_tag(self):
         r = self.prep(RELEASE_TAG="bad/tag")
         self.assertEqual(r.returncode, 1)

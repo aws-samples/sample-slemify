@@ -262,7 +262,7 @@ PY
   done
 }
 
-# check_marker <file> <images|ready>
+# check_marker <file> <images|ready|retriever>
 # Returns 0 when the marker is for this tag and commit and complete, 1 when
 # it is not (which callers treat as "not there yet").
 check_marker() {
@@ -297,6 +297,14 @@ if kind == "images":
     positive("knowledge")
 elif kind == "ready":
     positive("gguf")
+elif kind == "retriever":
+    positive("retriever")
+    r = m["retriever"]
+    pairs = r.get("pairs")
+    if not isinstance(pairs, int) or isinstance(pairs, bool) or pairs <= 0:
+        no("retriever.pairs is not above 0")
+    if not isinstance(r.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", r["sha256"]):
+        no("retriever.sha256 is not 64 hex digits")
 else:
     no("unknown kind %s" % kind)
 PY
@@ -304,6 +312,7 @@ PY
 export CENTRAL_BUILT_REPOS CENTRAL_LLAMA_REPO
 marker_images() { check_marker "$1" images; }
 marker_ready() { check_marker "$1" ready; }
+marker_retriever() { check_marker "$1" retriever; }
 
 # marker_field <file> <dotted path>: prints one value from a marker.
 marker_field() {
@@ -425,6 +434,65 @@ central_copy_phase() {
   retry 3 "$copy_deadline" aws ssm put-parameter --name /slemify/mirror --type String --overwrite \
     --value "${team_host}/slemify" >/dev/null || { echo "could not write /slemify/mirror"; return 1; }
   echo "images and corpus copied; /slemify/mirror set"
+  # Optional: never fails the build.
+  central_retriever_copy "$model_bucket" "$copy_deadline" || true
+}
+# central_retriever_copy <model bucket> <deadline epoch>
+# Copies the retriever training pairs the prep build wrote once per release
+# (retriever/train.jsonl and retriever/manifest.json) to where the data
+# pipeline looks for prebuilt pairs. The pairs are optional: on any problem
+# this logs one WARN and returns 0, and the seed generates the pairs in this
+# account as before. The prep track normally ends 1 to 2 minutes after prep
+# starts, long before images-ready.json, so a missing marker is waited for at
+# most 5 minutes, and a retriever/failed.json is not waited for at all.
+# Failure injection: no-central-pairs (lib/fault.sh) treats the pairs as absent.
+RETRIEVER_TEAM_PREFIX="k8s-autoscaling/data/prebuilt/k8s-autoscaling-retriever/"
+central_retriever_copy() {
+  local model_bucket=$1 deadline=$2 base="s3://${CENTRAL_BUCKET}/${PREFIX}retriever/"
+  local marker="$CENTRAL_TMP/retriever-ready.json" reason="" bytes polls=0
+  # shellcheck disable=SC1091
+  . "$(dirname "${BASH_SOURCE[0]}")/fault.sh"
+  if fault_on no-central-pairs; then
+    echo "FAULT INJECTION: no-central-pairs, ignoring the central retriever pairs"
+    reason="fault injection"
+  fi
+  while [ -z "$reason" ]; do
+    if aws s3 cp --quiet "${base}retriever-ready.json" "$marker" >/dev/null 2>&1; then
+      if marker_retriever "$marker" 2>"$CENTRAL_TMP/retriever-marker.err"; then
+        break
+      fi
+      reason="the marker is not valid: $(head -c 200 "$CENTRAL_TMP/retriever-marker.err")"
+    elif aws s3 cp --quiet "${base}failed.json" "$CENTRAL_TMP/retriever-failed.json" >/dev/null 2>&1; then
+      reason="the central prep build could not write them"
+    else
+      polls=$((polls + 1))
+      # 10 polls, 30 s apart: 5 minutes.
+      if [ "$polls" -ge 10 ] || [ $(($(date +%s) + 30)) -ge "$deadline" ]; then
+        reason="not ready after 5 minutes"
+      else
+        sleep 30
+      fi
+    fi
+  done
+  if [ -z "$reason" ]; then
+    bytes=$(marker_field "$marker" retriever.bytes) || reason="the marker has no size"
+  fi
+  if [ -z "$reason" ]; then
+    # train.jsonl first, so a copy that stops half way leaves no manifest and
+    # the pipeline sees no prebuilt pairs at all.
+    copy_object_checked "${base}train.jsonl" "$model_bucket" "${RETRIEVER_TEAM_PREFIX}train.jsonl" "$bytes" "$deadline" \
+      || reason="copying train.jsonl failed"
+  fi
+  if [ -z "$reason" ]; then
+    retry 5 "$deadline" aws s3 cp --only-show-errors --copy-props metadata-directive \
+      "${base}manifest.json" "s3://${model_bucket}/${RETRIEVER_TEAM_PREFIX}manifest.json" \
+      || reason="copying manifest.json failed"
+  fi
+  if [ -n "$reason" ]; then
+    echo "WARN central retriever pairs not used (${reason}); the seed generates them in this account"
+    return 0
+  fi
+  echo "copied retriever pairs ($(marker_field "$marker" retriever.pairs))"
 }
 
 # central_gguf_copy <model bucket>

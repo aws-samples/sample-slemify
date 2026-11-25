@@ -24,6 +24,15 @@ def images_marker(**over):
     return json.dumps(m)
 
 
+TRAIN = '{"query": "q", "positive": "p", "source": "s"}\n' * 3
+MANIFEST = json.dumps({"version": 1, "project": "k8s-autoscaling-retriever", "pairs": 3})
+TEAM_RETRIEVER = "k8s-autoscaling/data/prebuilt/k8s-autoscaling-retriever/"
+def retriever_marker(**over):
+    m = {"version": 1, "tag": TAG, "commit": COMMIT,
+         "retriever": {"key": PREFIX + "retriever/train.jsonl", "bytes": len(TRAIN), "pairs": 3,
+                       "sha256": "d" * 64}}
+    m.update(over)
+    return json.dumps(m)
 class CentralShTest(unittest.TestCase):
     def setUp(self):
         self.s = StubEnv()
@@ -165,6 +174,19 @@ class CentralShTest(unittest.TestCase):
         ready["gguf"]["bytes"] = 0
         self.assertEqual(self.marker_rc(json.dumps(ready), "ready"), 1)
 
+    def test_check_marker_retriever(self):
+        rc = lambda text: self.marker_rc(text, "retriever")  # noqa: E731
+        self.assertEqual(rc(retriever_marker()), 0)
+        self.assertEqual(rc(retriever_marker(commit="f" * 40)), 1)
+        self.assertEqual(rc(retriever_marker(tag="v0.2.0")), 1)
+        self.assertEqual(rc(retriever_marker(version=2)), 1)
+        good = json.loads(retriever_marker())["retriever"]
+        for field, bad in (("bytes", 0), ("bytes", "9"), ("pairs", 0), ("pairs", True),
+                           ("sha256", "d" * 63), ("sha256", "D" * 64), ("sha256", None)):
+            with self.subTest(field=field, bad=bad):
+                self.assertEqual(rc(retriever_marker(retriever=dict(good, **{field: bad}))), 1)
+        self.assertEqual(rc(retriever_marker(retriever=None)), 1)
+        self.assertEqual(rc("not json"), 1)
     def test_wait_gives_up_at_deadline_and_shows_failed_step(self):
         self.s.s3_put(PARAM["bucket"], PREFIX + "images-ready.json", images_marker(commit="f" * 40))
         self.s.s3_put(PARAM["bucket"], PREFIX + "failed.json",
@@ -217,8 +239,93 @@ class CentralShTest(unittest.TestCase):
         self.assertIn("copy failed: corpus", r.stdout)
         self.assertEqual(self.s.calls("aws ssm put-parameter"), [])
 
+    # central_retriever_copy
+    def retriever_copy(self, **env):
+        self.central_state()
+        return self.sh('central_load && central_retriever_copy team-models "$(( $(date +%s) + 3600 ))"', **env)
+    def central_put(self, name, text):
+        self.s.s3_put(PARAM["bucket"], PREFIX + "retriever/" + name, text)
+    def put_retriever_artifact(self, marker=None):
+        self.central_put("train.jsonl", TRAIN)
+        self.central_put("manifest.json", MANIFEST)
+        self.central_put("retriever-ready.json", marker or retriever_marker())
+    def assert_not_used(self, r, reason):
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("WARN central retriever pairs not used (%s" % reason, r.stdout)
+        self.assertIn("the seed generates them in this account", r.stdout)
+        self.assertIsNone(self.s.s3_get("team-models", TEAM_RETRIEVER + "manifest.json"))
+    def test_retriever_copy_copies_both_files(self):
+        self.put_retriever_artifact()
+        r = self.retriever_copy()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("copied retriever pairs (3)", r.stdout)
+        self.assertEqual(self.s.s3_get("team-models", TEAM_RETRIEVER + "train.jsonl"), TRAIN)
+        self.assertEqual(self.s.s3_get("team-models", TEAM_RETRIEVER + "manifest.json"), MANIFEST)
+        self.assertEqual(self.s.calls("sleep"), [])
+        copies = [c for c in self.s.calls("aws s3 cp") if c.count("s3://") == 2]
+        self.assertEqual(len(copies), 2)
+        self.assertIn("train.jsonl", copies[0])
+        self.assertIn("manifest.json", copies[1])
+        for c in copies:
+            self.assertIn("--copy-props metadata-directive", c)
+    def test_retriever_copy_waits_for_a_late_marker(self):
+        self.central_put("train.jsonl", TRAIN)
+        self.central_put("manifest.json", MANIFEST)
+        late = self.s.path("late-marker")
+        with open(late, "w") as f:
+            f.write(retriever_marker())
+        dest = self.s.path("s3", PARAM["bucket"], PREFIX + "retriever", "retriever-ready.json")
+        self.s.stub("sleep", 'n=$(cat "$STUB_DIR/sleeps" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$STUB_DIR/sleeps"\n'
+                    '[ "$n" -eq 3 ] && cp "%s" "%s"; exit 0' % (late, dest))
+        r = self.retriever_copy()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.s.calls("sleep 30")), 3)
+        self.assertIn("copied retriever pairs (3)", r.stdout)
+    def test_retriever_copy_gives_up_after_five_minutes(self):
+        r = self.retriever_copy()
+        self.assert_not_used(r, "not ready after 5 minutes")
+        self.assertEqual(len(self.s.calls("sleep 30")), 9)
+    def test_retriever_copy_does_not_wait_for_a_failed_prep_step(self):
+        self.central_put("failed.json", json.dumps({"step": "retriever-pairs"}))
+        r = self.retriever_copy()
+        self.assert_not_used(r, "the central prep build could not write them")
+        self.assertEqual(self.s.calls("sleep"), [])
+    def test_retriever_copy_rejects_an_invalid_marker(self):
+        self.put_retriever_artifact(retriever_marker(commit="f" * 40))
+        r = self.retriever_copy()
+        self.assert_not_used(r, "the marker is not valid")
+        self.assertIn("another commit", r.stdout)
+        self.assertEqual(self.s.calls("sleep"), [])
+    def test_retriever_copy_rejects_a_size_mismatch(self):
+        marker = json.loads(retriever_marker())
+        marker["retriever"]["bytes"] += 1
+        self.put_retriever_artifact(json.dumps(marker))
+        r = self.retriever_copy()
+        self.assert_not_used(r, "copying train.jsonl failed")
+    def test_retriever_copy_failure_never_fails_the_build(self):
+        self.put_retriever_artifact()
+        self.s.state("s3-copy-fail", "1")
+        r = self.retriever_copy()
+        self.assert_not_used(r, "copying train.jsonl failed")
+    def test_retriever_copy_fault_ignores_the_pairs(self):
+        self.put_retriever_artifact()
+        r = self.retriever_copy(FAULT_INJECTION="no-central-pairs")
+        self.assert_not_used(r, "fault injection")
+        self.assertEqual(self.s.calls("aws s3 cp"), [])
+        self.assertEqual(self.s.calls("sleep"), [])
+    def test_copy_phase_copies_the_pairs_last_and_ignores_their_failure(self):
+        self.prepare_copy()
+        self.put_retriever_artifact()
+        r = self.sh("central_copy_phase")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.s.s3_get("team-models", TEAM_RETRIEVER + "train.jsonl"), TRAIN)
+        self.assertTrue(r.stdout.rstrip().endswith("copied retriever pairs (3)"), r.stdout)
+        # Without any marker the phase still succeeds.
+        os.remove(self.s.path("s3", PARAM["bucket"], PREFIX + "retriever", "retriever-ready.json"))
+        r = self.sh("central_copy_phase")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("WARN central retriever pairs not used", r.stdout)
     # central_tail
-
     def test_tail_copies_gguf_and_applies_addon(self):
         self.central_state()
         self.s.s3_put(PARAM["bucket"], PREFIX + "models/k8s-autoscaling-analyst/model-q4_k_m.gguf", "GGUF")
