@@ -31,6 +31,8 @@
 #   CENTRAL_WAIT_MINUTES, CENTRAL_COPY_MINUTES, CENTRAL_TAIL_MINUTES
 #                          central-mode deadlines from the build start
 #                          (defaults 90, 100 and 140)
+#   FAULT_INJECTION        failure injection for test events (lib/fault.sh);
+#                          empty in every published workshop
 #
 # Central mode: when CENTRAL_PARAM names a parameter that exists, the event's
 # central account has prepared the images, the knowledge corpus and the
@@ -152,6 +154,17 @@ phases:
       - '[ "${IDE_ROLE_ARN:-NONE}" != "NONE" ] && export TF_VAR_ide_role_arn="${IDE_ROLE_ARN}" || true'
       - '[ "${OPS_ROLE_ARN:-NONE}" != "NONE" ] && export TF_VAR_ops_role_arn="${OPS_ROLE_ARN}" || true'
       - terraform init -input=false
+      # Last pre_build command: every command above succeeded.
+      - touch /tmp/prebuild-done
+    # A failed pre_build command skips the build phase, so the FAILURE signal
+    # for the stack is sent here, the same way install does it.
+    finally:
+      - |
+        if [ ! -f /tmp/prebuild-done ] && [ ! -f /tmp/cfn-signalled ] && [ -n "${CFN_RESPONSE_URL:-}" ]; then
+          curl --retry 5 --retry-all-errors --retry-delay 5 -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"FAILURE\",\"Reason\":\"Provisioning failed in pre_build\",\"UniqueId\":\"${CODEBUILD_BUILD_ID}\",\"Data\":\"See CodeBuild logs: ${CODEBUILD_LOG_PATH}\"}" "${CFN_RESPONSE_URL}"
+          touch /tmp/cfn-signalled
+          echo "signalled CloudFormation: pre_build failed"
+        fi
   build:
     commands:
       # The mode decision failed in install (its reason is in the install log).
@@ -162,10 +175,14 @@ phases:
         fi
       - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/terraform"
       - echo "Applying VPC, then cluster, then the rest"
-      - terraform apply -input=false -auto-approve -target=module.vpc
+      # The three targeted applies retry like the full apply: lib/tf-apply.sh runs
+      # one apply and retry (lib/central.sh) repeats it, 3 attempts, 30 s then
+      # 60 s apart plus jitter. A transient AWS error, such as an EC2 tag that
+      # cannot be read back right after it was written, no longer ends the build.
+      - . "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/central.sh" && retry 3 0 bash "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/tf-apply.sh" -target=module.vpc
       # The model bucket is created with the VPC target's siblings; make sure it
       # exists now so the GGUF conversion can start before the cluster is up.
-      - terraform apply -input=false -auto-approve -target=aws_s3_bucket.models -target=aws_s3_bucket_server_side_encryption_configuration.models -target=aws_s3_bucket_public_access_block.models -target=aws_s3_bucket_versioning.models
+      - . "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/central.sh" && retry 3 0 bash "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/tf-apply.sh" -target=aws_s3_bucket.models -target=aws_s3_bucket_server_side_encryption_configuration.models -target=aws_s3_bucket_public_access_block.models -target=aws_s3_bucket_versioning.models
       # Apply the cluster and, in parallel, start the GGUF conversion as soon as
       # the amd64 gguf-convert image exists. The conversion needs only the model
       # bucket (applied above) and that image (it runs on the x86 fleet), not the
@@ -173,9 +190,11 @@ phases:
       # apply. This whole block is ONE shell command: a CodeBuild build spec runs
       # each list item in a separate shell, so a background job started in one
       # item cannot be waited on in another. The cluster apply runs in the
-      # background here and is waited on at the end of the same block.
+      # background here and is waited on at the end of the same block. The
+      # subshell retries the apply, so wait returns 0 after any attempt that
+      # succeeds, and the retry lines land in /tmp/eks-apply.log.
       - |
-        terraform apply -input=false -auto-approve -target=module.eks > /tmp/eks-apply.log 2>&1 &
+        ( . "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/central.sh" && retry 3 0 bash "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/tf-apply.sh" -target=module.eks ) > /tmp/eks-apply.log 2>&1 &
         EKS_PID=$!
         echo "EKS apply started in the background (pid ${EKS_PID}); starting the GGUF conversion meanwhile"
         if [ -n "${GGUF_BUILD:-}" ] && [ -f /tmp/image-builds ]; then
@@ -187,7 +206,7 @@ phases:
             case "${STATUS}" in
               IN_PROGRESS) sleep 20 ;;
               SUCCEEDED) break ;;
-              *) echo "amd64 image build failed: ${STATUS}"; kill "${EKS_PID}" 2>/dev/null; exit 1 ;;
+              *) echo "amd64 image build failed: ${STATUS}"; echo "waiting for the EKS apply to finish before failing"; wait "${EKS_PID}" || true; exit 1 ;;
             esac
           done
           MODEL_BUCKET=$(terraform output -raw model_bucket)
@@ -199,6 +218,7 @@ phases:
         fi
         echo "Waiting for the EKS apply (pid ${EKS_PID})"
         if wait "${EKS_PID}"; then
+          grep -E '^(retry:|FAULT INJECTION)' /tmp/eks-apply.log || true
           tail -n 3 /tmp/eks-apply.log
         else
           echo "EKS apply failed:"; tail -n 60 /tmp/eks-apply.log; exit 1
@@ -250,6 +270,14 @@ phases:
           export RERANKER_IMAGE="${REGISTRY}/${RERANK_REPO}:latest"
           echo "images: ${DEMO_IMAGE} ${RERANKER_IMAGE}"
           echo "export DEMO_IMAGE=${DEMO_IMAGE} RERANKER_IMAGE=${RERANKER_IMAGE}" > /tmp/images.env
+        fi
+      # Failure injection (lib/fault.sh): off unless FAULT_INJECTION is set.
+      - |
+        . "${CODEBUILD_SRC_DIR}/${INFRA_DIR}/lib/fault.sh"
+        if fault_on provision-fail-once once; then
+          fault_fired provision-fail-once
+          echo "FAULT INJECTION: provision-fail-once, failing the build before the seed"
+          exit 1
         fi
       - echo "Seeding the cluster"
       - cd "${CODEBUILD_SRC_DIR}/${INFRA_DIR}"

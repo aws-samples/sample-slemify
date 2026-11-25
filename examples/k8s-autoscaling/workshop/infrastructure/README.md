@@ -40,6 +40,8 @@ Inputs come from CodeBuild environment variables set by the stack
 (`EKS_CLUSTER_NAME`, `EKS_CLUSTER_VERSION`, `BEDROCK_REGION`,
 `PARTICIPANT_ROLE_ARN`, `IDE_ROLE_ARN`, `TF_STATE_BUCKET`, `STACK_NAME`).
 `buildspec.yaml` writes the S3 backend to `backend.tf` from those.
+The VPC, model bucket and EKS applies each run through `lib/tf-apply.sh`
+under `retry 3 0` (30 s, then 60 s apart, plus jitter), like the full apply.
 
 Slemify creates its own per-project IAM role, service account, and pod
 identity association when an attendee runs `slemify deploy`
@@ -155,6 +157,16 @@ aws codebuild start-build --project-name slemify-prep --source-version <ref> \
   --environment-variables-override name=RELEASE_TAG,value=<tag>,type=PLAINTEXT
 ```
 
+## Failure injection
+Test events can make a build fail on purpose. The stack passes its
+`FaultInjection` parameter to the build as `FAULT_INJECTION`; it is empty
+unless a test content build sets it, and the published workshop never does.
+`lib/fault.sh` documents the format (`name[:arg][@share]`, comma separated)
+and the faults: `tf-eks-fail-first`, `provision-fail-once`,
+`no-central-pairs` and `bedrock-unavailable:<seconds>`.
+`provision-fail-once` fails the build before the seed and nothing tears the
+account down, so Workshop Studio's retry cannot succeed. Use it only once a
+cleanup on failure exists.
 ## IDE port-forwards
 
 The services in the cluster are ClusterIP only. Attendees reach them from the
