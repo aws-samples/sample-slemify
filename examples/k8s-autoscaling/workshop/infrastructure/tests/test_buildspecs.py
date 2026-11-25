@@ -159,6 +159,7 @@ class ModeFailureTest(unittest.TestCase):
         self.assertIn("/slemify/central", r.stdout)
 
     def test_today_passes_the_build_check(self):
+        self.env["CENTRAL_PARAM_WAIT_SECONDS"] = "0"
         r = self.s.run(self.decide, **self.env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.mode(), "today")

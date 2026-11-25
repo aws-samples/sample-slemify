@@ -124,7 +124,17 @@ central account. The team side uses the helpers in `lib/central.sh`.
   `bucket` and `registry`. `buildspec.yaml` reads it in `install` (the name
   comes from `CENTRAL_PARAM`) and writes `central` or `today` to
   `/tmp/central-mode`. A parameter that exists but fails validation, or names
-  a bucket that no longer exists, fails the build before the signal.
+  a bucket that no longer exists, fails the build before the signal. When
+  `CENTRAL_PARAM` is set and the parameter does not exist yet (the grant
+  function can be a few minutes behind the build), or names a bucket that
+  does not exist (a stale value from an earlier event), `install` polls every
+  30 seconds for up to `CENTRAL_PARAM_WAIT_MINUTES` (default 30) and goes on
+  in central mode as soon as a valid value appears. After the wait it takes
+  today's path (or fails on a stale value) as before. A build with no
+  `CENTRAL_PARAM` does not wait. The log shows `waiting for /slemify/central
+  from the central hand-off, N minutes of 30` at the start and every 2
+  minutes, then `arrived` or `gave up`. The wait counts against the deadlines
+  below, which start with the build.
 - The markers. The prep build writes everything under
   `releases/<tag>/<commit>/` in the central bucket, where `<tag>` is
   `RELEASE_TAG` and `<commit>` is the resolved 40-character commit.

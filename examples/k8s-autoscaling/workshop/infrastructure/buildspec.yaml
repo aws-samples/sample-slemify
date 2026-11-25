@@ -31,6 +31,10 @@
 #   CENTRAL_WAIT_MINUTES, CENTRAL_COPY_MINUTES, CENTRAL_TAIL_MINUTES
 #                          central-mode deadlines from the build start
 #                          (defaults 90, 100 and 140)
+#   CENTRAL_PARAM_WAIT_MINUTES
+#                          how long install waits for CENTRAL_PARAM to appear
+#                          before it takes today's path (default 30, set in
+#                          lib/central.sh)
 #   FAULT_INJECTION        failure injection for test events (lib/fault.sh);
 #                          empty in every published workshop
 #
@@ -41,7 +45,8 @@
 # images and the corpus before the full apply, and copies the GGUF in the
 # tail. lib/central.sh has the helpers.
 #
-# Today's path: when the parameter does not exist, this build starts its own
+# Today's path: when the parameter does not exist after the wait (up to
+# CENTRAL_PARAM_WAIT_MINUTES), this build starts its own
 # image and GGUF builds as before. A parameter that exists but is invalid
 # fails the build before the signal.
 
