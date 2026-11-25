@@ -135,6 +135,10 @@ if svc == "s3" and op in ("cp", "rm"):
     srcp = s3path(src) if src.startswith("s3://") else src
     if not os.path.exists(srcp):
         fail("An error occurred (404) when calling the HeadObject operation: Key not found", 1)
+    if dst == "-":
+        with open(srcp) as f:
+            sys.stdout.write(f.read())
+        sys.exit(0)
     dstp = s3path(dst) if dst.startswith("s3://") else dst
     os.makedirs(os.path.dirname(dstp) or ".", exist_ok=True)
     shutil.copyfile(srcp, dstp)
